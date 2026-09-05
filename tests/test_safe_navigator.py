@@ -171,10 +171,35 @@ class TestSafeNavigator(unittest.TestCase):
 
     def test_out_of_bounds_target_rejection(self):
         """Target positions exceeding hardware limits must raise SafeNavigatorException."""
-        self.nav.cam_target_x = 450.0 # Exceeds 300mm limit
+        self.nav.cam_target_x = 450.0 # Exceeds limit
         self.nav.cam_target_y = 10.0
         with self.assertRaises(SafeNavigatorException):
             self.nav.approach_camera(self.toolhead, None)
+
+    def test_config_aliases_and_speed_normalization(self):
+        """Verify camera_target_x/y/z aliases and mm/min to mm/s speed auto-conversion."""
+        aliased_config = {
+            "travel_speed": 12000.0, # 12000 mm/min -> 200 mm/s
+            "approach_speed": 1800.0, # 1800 mm/min -> 30 mm/s
+            "z_speed": 600.0,        # 600 mm/min -> 10 mm/s
+            "safe_z": 40.0,
+            "camera_target_x": 160.0,
+            "camera_target_y": 12.0,
+            "camera_target_z": 24.0,
+            "switch_target_x": 230.0,
+            "switch_target_y": 340.0,
+            "switch_target_z": 16.0,
+        }
+        nav = SafeNavigator(DummyConfig(self.printer, aliased_config))
+        self.assertAlmostEqual(nav.travel_speed, 200.0)
+        self.assertAlmostEqual(nav.approach_speed, 30.0)
+        self.assertAlmostEqual(nav.z_speed, 10.0)
+        self.assertEqual(nav.cam_target_x, 160.0)
+        self.assertEqual(nav.cam_target_y, 12.0)
+        self.assertEqual(nav.cam_target_z, 24.0)
+        self.assertEqual(nav.switch_target_x, 230.0)
+        self.assertEqual(nav.switch_target_y, 340.0)
+        self.assertEqual(nav.switch_target_z, 16.0)
 
 
 if __name__ == "__main__":

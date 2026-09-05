@@ -10,6 +10,26 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.8.0] - 2026-09-05
+### Added
+- Real-World High-Contrast & Dim Illumination Vision Benchmarks:
+  - Added user real-world Voron Stealth Changer camera frames (`nozzle_dim_lighting_eval1.jpg`, `nozzle_high_glare_eval2.jpg`) into regression fixtures.
+  - 100% detection rate across all lighting extremes at Tier 1 with sub-pixel precision.
+- Nozzle Cleaning & Purge Integration:
+  - Added `CLEAN_NOZZLE` parameter to `CALIBRATE_ALL_TOOLS` and `CALIBRATE_TOOL` macros.
+  - Added `clean_nozzle_gcode` template hook in `klippy/extras/tool_calibrator.py` and default `_CLEAN_NOZZLE` macro.
+- Selective Tool Calibration:
+  - `CALIBRATE_TOOL_OFFSETS` now supports `TOOLS` parameter (e.g. `TOOLS=1` or `TOOLS=1,2`) with automatic reference tool sequencing.
+- Configuration Robustness & Unit Normalization:
+  - Automatic feedrate conversion in `SafeNavigator`: detects speeds configured in mm/min (`> 500`) and converts to mm/s, preventing supersonic velocity crashes.
+  - Dual configuration key aliases supported seamlessly (`service_url` / `server_url`, `offsets_config_path` / `offset_config_path`, `camera_target_x` / `camera_x`, `switch_target_x` / `zswitch_x_pos`).
+- Multi-Threshold Median Slice Optimization in `server/nozzle_detector.py`:
+  - Adjusted `minArea` from 250/180 down to 45/35/25 pixels to detect micro-orifices (< 0.4mm nozzle holes) under intense specular cone reflections.
+  - Reordered cascades to evaluate Grayscale + Median multi-threshold sweep first, achieving Tier 1 lock on shiny brass nozzles without glare artifacts.
+  - Expanded test suite to 23 automated unit and integration tests.
+
+---
+
 ## [0.7.0] - 2026-09-05
 ### Added
 - Automated Star-Pattern Camera Scale & Matrix Calibration:

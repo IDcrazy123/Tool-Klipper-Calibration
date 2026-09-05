@@ -25,26 +25,40 @@ class SafeNavigator:
         self.printer = config.get_printer()
 
         # Speeds (mm/s converted to mm/min for G-code/toolhead moves where required)
-        self.travel_speed = config.getfloat("travel_speed", 100.0, above=10.0)
-        self.approach_speed = config.getfloat("approach_speed", 25.0, above=5.0)
-        self.z_speed = config.getfloat("z_speed", 10.0, above=1.0)
+        self.travel_speed = config.getfloat("travel_speed", 100.0, above=0.1)
+        if self.travel_speed > 500.0:
+            self.travel_speed /= 60.0
+
+        self.approach_speed = config.getfloat("approach_speed", 25.0, above=0.1)
+        if self.approach_speed > 500.0:
+            self.approach_speed /= 60.0
+
+        self.z_speed = config.getfloat("z_speed", 10.0, above=0.1)
+        if self.z_speed > 500.0:
+            self.z_speed /= 60.0
 
         # Global Safe Z Clearance Altitude
         self.safe_z = config.getfloat("safe_z", 35.0, above=0.0)
 
-        # Camera Station Waypoints
+        # Camera Station Waypoints (supports camera_target_x and camera_x aliases)
         self.cam_approach_x = config.getfloat("camera_approach_x", None)
         self.cam_approach_y = config.getfloat("camera_approach_y", None)
-        self.cam_target_x = config.getfloat("camera_x", None)
-        self.cam_target_y = config.getfloat("camera_y", None)
-        self.cam_target_z = config.getfloat("camera_focal_z", 15.0)
+        cam_tx = config.getfloat("camera_target_x", None)
+        self.cam_target_x = cam_tx if cam_tx is not None else config.getfloat("camera_x", None)
+        cam_ty = config.getfloat("camera_target_y", None)
+        self.cam_target_y = cam_ty if cam_ty is not None else config.getfloat("camera_y", None)
+        cam_tz = config.getfloat("camera_target_z", None)
+        self.cam_target_z = cam_tz if cam_tz is not None else config.getfloat("camera_focal_z", 15.0)
 
-        # Z Switch Station Waypoints (Optional if using Cartographer)
+        # Z Switch Station Waypoints (supports switch_target_x and zswitch_x_pos aliases)
         self.switch_approach_x = config.getfloat("switch_approach_x", None)
         self.switch_approach_y = config.getfloat("switch_approach_y", None)
-        self.switch_target_x = config.getfloat("zswitch_x_pos", None)
-        self.switch_target_y = config.getfloat("zswitch_y_pos", None)
-        self.switch_target_z = config.getfloat("zswitch_z_pos", None)
+        sw_tx = config.getfloat("switch_target_x", None)
+        self.switch_target_x = sw_tx if sw_tx is not None else config.getfloat("zswitch_x_pos", None)
+        sw_ty = config.getfloat("switch_target_y", None)
+        self.switch_target_y = sw_ty if sw_ty is not None else config.getfloat("zswitch_y_pos", None)
+        sw_tz = config.getfloat("switch_target_z", None)
+        self.switch_target_z = sw_tz if sw_tz is not None else config.getfloat("zswitch_z_pos", None)
 
     def get_axis_limits(self) -> Dict[str, Tuple[float, float]]:
         """

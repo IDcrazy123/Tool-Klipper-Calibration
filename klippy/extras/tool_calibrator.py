@@ -31,8 +31,12 @@ class ToolCalibrator:
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object("gcode")
 
-        # Config parameters
-        self.server_url = config.get("server_url", "http://localhost:8090").rstrip("/")
+        # Config parameters (supports service_url and server_url aliases)
+        srv_url = config.get("server_url", None)
+        if srv_url is None:
+            srv_url = config.get("service_url", "http://localhost:8090")
+        self.server_url = srv_url.rstrip("/")
+
         self.reference_tool = config.getint("reference_tool", 0)
         self.z_backend_type = config.get("z_backend", "cartographer").strip().lower()
         self.max_centering_iterations = config.getint("max_centering_iterations", 5, minval=1, maxval=10)
@@ -40,9 +44,10 @@ class ToolCalibrator:
 
         # Core Component Instances
         self.navigator = SafeNavigator(config)
-        self.config_manager = ConfigManager(
-            config.get("offset_config_path", "~/printer_data/config/tool_offsets.cfg")
-        )
+        cfg_path = config.get("offset_config_path", None)
+        if cfg_path is None:
+            cfg_path = config.get("offsets_config_path", "~/printer_data/config/tool_offsets.cfg")
+        self.config_manager = ConfigManager(cfg_path)
 
         # Initialize Z Backend
         if self.z_backend_type == "switch":
@@ -57,6 +62,7 @@ class ToolCalibrator:
         self.start_gcode = self.gcode_macro.load_template(config, "start_gcode", "")
         self.before_pickup_gcode = self.gcode_macro.load_template(config, "before_pickup_gcode", "")
         self.after_pickup_gcode = self.gcode_macro.load_template(config, "after_pickup_gcode", "")
+        self.clean_nozzle_gcode = self.gcode_macro.load_template(config, "clean_nozzle_gcode", "")
         self.finish_gcode = self.gcode_macro.load_template(config, "finish_gcode", "")
 
         # Calibration State
@@ -177,11 +183,15 @@ class ToolCalibrator:
             CALIBRATE_Z (int): 1 to run Z probing (default: 1)
             SAVE_CONFIG (int): 1 to persist offsets to disk (default: 1)
             DRY_RUN (int): 1 to simulate without physical touch or disk saves (default: 0)
+            CLEAN_NOZZLE (int): 1 to run nozzle cleaning macro/hook prior to vision (default: 0)
+            TOOLS (str): Comma-separated list of tool indices to calibrate (e.g. TOOLS=1 or TOOLS=1,2)
         """
         calibrate_xy = gcmd.get_int("CALIBRATE_XY", 1) == 1
         calibrate_z = gcmd.get_int("CALIBRATE_Z", 1) == 1
         save_config = gcmd.get_int("SAVE_CONFIG", 1) == 1
         dry_run = gcmd.get_int("DRY_RUN", 0) == 1
+        clean_nozzle = gcmd.get_int("CLEAN_NOZZLE", 0) == 1
+        tools_param = gcmd.get("TOOLS", None)
 
         toolhead = self.printer.lookup_object("toolhead")
         gcode_move = self.printer.lookup_object("gcode_move")
@@ -200,12 +210,26 @@ class ToolCalibrator:
             return
 
         # Discover tool sequence
-        ordered_tools = [self.reference_tool]
-        if toolchanger is not None and hasattr(toolchanger, "tool_numbers"):
-            all_tools = list(toolchanger.tool_numbers)
-            ordered_tools = [self.reference_tool] + [t for t in all_tools if t != self.reference_tool]
+        if tools_param is not None:
+            try:
+                selected = [int(p.strip()) for p in str(tools_param).split(",") if p.strip()]
+            except ValueError:
+                gcmd.respond_error(f"Invalid TOOLS parameter: '{tools_param}'. Must be comma-separated integers.")
+                return
+            if not selected:
+                gcmd.respond_error("TOOLS parameter cannot be empty.")
+                return
+            if self.reference_tool not in selected:
+                ordered_tools = [self.reference_tool] + selected
+            else:
+                ordered_tools = [self.reference_tool] + [t for t in selected if t != self.reference_tool]
         else:
-            gcmd.respond_info("[tool_calibrator] Note: [toolchanger] object not detected; calibrating active tool only.")
+            ordered_tools = [self.reference_tool]
+            if toolchanger is not None and hasattr(toolchanger, "tool_numbers"):
+                all_tools = list(toolchanger.tool_numbers)
+                ordered_tools = [self.reference_tool] + [t for t in all_tools if t != self.reference_tool]
+            else:
+                gcmd.respond_info("[tool_calibrator] Note: [toolchanger] object not detected; calibrating active tool only.")
 
         gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Dry Run: {dry_run})")
 
@@ -229,6 +253,18 @@ class ToolCalibrator:
                     self.gcode_macro.run_script("after_pickup_gcode", self.after_pickup_gcode, {"TOOL": tool_no})
 
                 toolhead.wait_moves()
+
+                # Optional nozzle cleaning prior to optical inspection
+                if clean_nozzle:
+                    if self.clean_nozzle_gcode:
+                        gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
+                        self.gcode_macro.run_script("clean_nozzle_gcode", self.clean_nozzle_gcode, {"TOOL": tool_no})
+                    else:
+                        try:
+                            self.gcode.run_script_from_command(f"_CLEAN_NOZZLE TOOL={tool_no}")
+                        except Exception:
+                            pass
+                    toolhead.wait_moves()
 
                 tool_offsets: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}
 

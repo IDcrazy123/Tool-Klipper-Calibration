@@ -63,15 +63,15 @@ class NozzleDetector:
         """Tier 1: High-precision detector requiring strict circularity."""
         params = cv2.SimpleBlobDetector_Params()
         params.minThreshold = 5
-        params.maxThreshold = 200
+        params.maxThreshold = 220
         params.thresholdStep = 5
 
         params.filterByArea = True
-        params.minArea = 250
-        params.maxArea = 15000
+        params.minArea = 45
+        params.maxArea = 20000
 
         params.filterByCircularity = True
-        params.minCircularity = 0.78
+        params.minCircularity = 0.60
         params.maxCircularity = 1.0
 
         params.filterByConvexity = True
@@ -79,7 +79,7 @@ class NozzleDetector:
         params.maxConvexity = 1.0
 
         params.filterByInertia = True
-        params.minInertiaRatio = 0.35
+        params.minInertiaRatio = 0.30
 
         params.filterByColor = False
         return cv2.SimpleBlobDetector_create(params)
@@ -88,15 +88,15 @@ class NozzleDetector:
         """Tier 2: Looser thresholds for discolored or slightly encrusted nozzles."""
         params = cv2.SimpleBlobDetector_Params()
         params.minThreshold = 5
-        params.maxThreshold = 220
+        params.maxThreshold = 225
         params.thresholdStep = 5
 
         params.filterByArea = True
-        params.minArea = 180
+        params.minArea = 35
         params.maxArea = 25000
 
         params.filterByCircularity = True
-        params.minCircularity = 0.55
+        params.minCircularity = 0.50
         params.maxCircularity = 1.0
 
         params.filterByConvexity = True
@@ -104,7 +104,7 @@ class NozzleDetector:
         params.maxConvexity = 1.0
 
         params.filterByInertia = True
-        params.minInertiaRatio = 0.25
+        params.minInertiaRatio = 0.20
 
         params.filterByColor = False
         return cv2.SimpleBlobDetector_create(params)
@@ -112,16 +112,16 @@ class NozzleDetector:
     def _create_super_relaxed_detector(self) -> cv2.SimpleBlobDetector:
         """Tier 3: Fallback detector for high-noise and heavily stained nozzles."""
         params = cv2.SimpleBlobDetector_Params()
-        params.minThreshold = 10
+        params.minThreshold = 5
         params.maxThreshold = 240
         params.thresholdStep = 10
 
         params.filterByArea = True
-        params.minArea = 120
+        params.minArea = 25
         params.maxArea = 35000
 
         params.filterByCircularity = True
-        params.minCircularity = 0.40
+        params.minCircularity = 0.38
         params.maxCircularity = 1.0
 
         params.filterByConvexity = True
@@ -196,12 +196,17 @@ class NozzleDetector:
         self.image_center = (width / 2.0, height / 2.0)
 
         # Detection cascade combinations: (preprocessor_alg, detector, tier, combo_id)
+        # Alg 2: Grayscale + Median Blur (multi-threshold slice sweep - optimal for micro-orifices)
+        # Alg 0: Gamma + YUV Adaptive Gaussian (for low-contrast or dark nozzles)
+        # Alg 1: Gamma + Triangle Threshold (for shiny brass tip glare)
         cascades = [
-            (0, self.standard_detector, 1, 1),
-            (1, self.standard_detector, 1, 2),
-            (0, self.relaxed_detector, 2, 3),
-            (1, self.relaxed_detector, 2, 4),
-            (2, self.super_relaxed_detector, 3, 5),
+            (2, self.standard_detector, 1, 1),
+            (0, self.standard_detector, 1, 2),
+            (1, self.standard_detector, 1, 3),
+            (2, self.relaxed_detector, 2, 4),
+            (0, self.relaxed_detector, 2, 5),
+            (1, self.relaxed_detector, 2, 6),
+            (2, self.super_relaxed_detector, 3, 7),
         ]
 
         # Prioritize last successful combo if available
