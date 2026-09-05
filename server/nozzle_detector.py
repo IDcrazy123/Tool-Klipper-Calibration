@@ -241,6 +241,23 @@ class NozzleDetector:
             maxRadius=25
         )
         if circles is None or len(circles) == 0:
+            # Low-light & dim-illumination adaptive enhancement via CLAHE
+            if gray.mean() < 90 or gray.std() < 35:
+                clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+                enhanced = clahe.apply(gray)
+                bilateral_enh = cv2.bilateralFilter(enhanced, 9, 75, 75)
+                circles = cv2.HoughCircles(
+                    bilateral_enh,
+                    cv2.HOUGH_GRADIENT,
+                    dp=1,
+                    minDist=8,
+                    param1=50,
+                    param2=14,
+                    minRadius=7,
+                    maxRadius=25
+                )
+
+        if circles is None or len(circles) == 0:
             return None
 
         roi_cx, roi_cy = cx_center - x0, cy_center - y0

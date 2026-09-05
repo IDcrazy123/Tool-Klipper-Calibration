@@ -361,6 +361,36 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("XY_DETECT", execution_order)
         self.assertLess(execution_order.index("Z_PROBE_REF"), execution_order.index("XY_DETECT"))
 
+    def test_inspection_lighting_lifecycle(self):
+        """Optical inspection lighting lifecycle: Camera light ON/OFF & Nozzle light OFF/ON."""
+        self.config_data["camera_pin"] = "cam_light"
+        self.config_data["camera_led_brightness"] = 0.4
+        calibrator = ToolCalibrator(self.config)
+
+        # Mock macros
+        nozzle_off_mock = MagicMock()
+        nozzle_on_mock = MagicMock()
+        orig_lookup = self.printer.lookup_object
+
+        def mock_lookup(name, default=None):
+            if name == "gcode_macro _CALIBRATION_NOZZLE_LED_OFF":
+                return nozzle_off_mock
+            elif name == "gcode_macro _CALIBRATION_NOZZLE_LED_ON":
+                return nozzle_on_mock
+            return orig_lookup(name, default)
+
+        self.printer.lookup_object = mock_lookup
+
+        # Test enable lighting
+        calibrator._set_inspection_lighting(True, tool_no=1)
+        self.assertIn("SET_PIN PIN=cam_light VALUE=0.4", self.gcode.executed_scripts)
+        self.assertIn("_CALIBRATION_NOZZLE_LED_OFF TOOL=1", self.gcode.executed_scripts)
+
+        # Test disable lighting
+        calibrator._set_inspection_lighting(False, tool_no=1)
+        self.assertIn("SET_PIN PIN=cam_light VALUE=0", self.gcode.executed_scripts)
+        self.assertIn("_CALIBRATION_NOZZLE_LED_ON TOOL=1", self.gcode.executed_scripts)
+
 
 if __name__ == "__main__":
     unittest.main()

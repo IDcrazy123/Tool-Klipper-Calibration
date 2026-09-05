@@ -166,5 +166,26 @@ Cartographer 3D V4 eddy-current probes feature high-precision nozzle-touch homin
 ### Rationale
 - Completely eliminates bed sticker melting, eliminates bed tilt systematic errors, adapts to all Cartographer sensor versions, and ensures safe multi-tool Z calibration with sub-micron repeatability.
 
+---
+
+## ADR-011: Optical Inspection Lighting Lifecycle & Toolhead Sensor Blooming Suppression
+
+### Context
+In multi-toolheads (e.g. Voron StealthBurner, DragonBurner, StealthChanger), toolheads often incorporate downward-shining RGB/white LEDs (`[neopixel sb_leds]`, `nozzle_leds`). When a tool moves above an upward-facing bed camera, these downward LEDs shine directly into the camera lens, blinding the image sensor with extreme saturation (optical sensor blooming / glare flare traps). Furthermore, bed-mounted camera ring LEDs must be turned on during calibration and safely turned off afterwards to prevent unnecessary heat buildup and energy waste.
+
+### Decision
+1. **Automated Lifecycle Lighting Management:**
+   - On entering the camera station, `_set_inspection_lighting(True, tool_no)` is called automatically inside a guaranteed `try ... finally` block.
+   - Illuminates the camera ring light via direct pin (`camera_pin` / `camera_led_brightness`) or macro hook `_CALIBRATION_CAMERA_LED_ON`.
+   - Dispatches `_CALIBRATION_NOZZLE_LED_OFF TOOL={tool_no}` to turn off the toolhead's nozzle LEDs during camera dwell.
+2. **Guaranteed Post-Inspection Restoration:**
+   - In the `finally:` clause upon departing the camera station, `_set_inspection_lighting(False, tool_no)` turns off the camera ring light (`_CALIBRATION_CAMERA_LED_OFF`) and restores normal toolhead illumination (`_CALIBRATION_NOZZLE_LED_ON TOOL={tool_no}`).
+3. **Adaptive Low-Light Contrast (CLAHE):**
+   - In `server/nozzle_detector.py`, if illumination is dim (mean ROI luminance $< 90$ or std $< 35$), Contrast Limited Adaptive Histogram Equalization (CLAHE) is automatically applied to highlight circular orifice edges without accentuating background noise.
+
+### Rationale
+- Completely eliminates camera sensor blooming caused by toolhead nozzle LEDs, prevents thermal/specular hotspots on shiny metal nozzles, and guarantees flawless circular orifice detection under low-light or dim LED ring conditions.
+
+
 
 

@@ -65,6 +65,14 @@ class ToolCalibrator:
         self.clean_nozzle_gcode = self.gcode_macro.load_template(config, "clean_nozzle_gcode", "")
         self.finish_gcode = self.gcode_macro.load_template(config, "finish_gcode", "")
 
+        # Optical Lighting Configuration
+        self.camera_pin = config.get("camera_pin", config.get("camera_led", None))
+        self.camera_led_brightness = config.getfloat("camera_led_brightness", 1.0, minval=0.0, maxval=1.0)
+        self.camera_led_macro_on = config.get("camera_led_macro_on", "_CALIBRATION_CAMERA_LED_ON")
+        self.camera_led_macro_off = config.get("camera_led_macro_off", "_CALIBRATION_CAMERA_LED_OFF")
+        self.nozzle_led_macro_off = config.get("nozzle_led_macro_off", "_CALIBRATION_NOZZLE_LED_OFF")
+        self.nozzle_led_macro_on = config.get("nozzle_led_macro_on", "_CALIBRATION_NOZZLE_LED_ON")
+
         # Calibration State
         self.cached_offsets: Dict[int, Dict[str, float]] = {}
         self.last_run_status = "UNINITIALIZED"
@@ -244,28 +252,64 @@ class ToolCalibrator:
 
         return [self.reference_tool]
 
+    def _set_inspection_lighting(self, enable: bool, tool_no: int = 0) -> None:
+        """
+        Manages optical lighting:
+        - When enable=True: turns ON camera ring LED and turns OFF toolhead nozzle LED.
+        - When enable=False: turns OFF camera ring LED and restores toolhead nozzle LED.
+        """
+        try:
+            if enable:
+                if self.camera_pin:
+                    self.gcode.run_script_from_command(f"SET_PIN PIN={self.camera_pin} VALUE={self.camera_led_brightness}")
+                else:
+                    macro = self.printer.lookup_object(f"gcode_macro {self.camera_led_macro_on}", None)
+                    if macro is not None:
+                        self.gcode.run_script_from_command(f"{self.camera_led_macro_on}")
+
+                nozzle_off_macro = self.printer.lookup_object(f"gcode_macro {self.nozzle_led_macro_off}", None)
+                if nozzle_off_macro is not None:
+                    self.gcode.run_script_from_command(f"{self.nozzle_led_macro_off} TOOL={tool_no}")
+            else:
+                if self.camera_pin:
+                    self.gcode.run_script_from_command(f"SET_PIN PIN={self.camera_pin} VALUE=0")
+                else:
+                    macro = self.printer.lookup_object(f"gcode_macro {self.camera_led_macro_off}", None)
+                    if macro is not None:
+                        self.gcode.run_script_from_command(f"{self.camera_led_macro_off}")
+
+                nozzle_on_macro = self.printer.lookup_object(f"gcode_macro {self.nozzle_led_macro_on}", None)
+                if nozzle_on_macro is not None:
+                    self.gcode.run_script_from_command(f"{self.nozzle_led_macro_on} TOOL={tool_no}")
+        except Exception as ex:
+            logger.debug(f"[tool_calibrator] Lighting control error: {ex}")
+
     def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None) -> List[float]:
         """Executes optical camera alignment for a single tool."""
         gcmd.respond_info(f"[T{tool_no}] Entering Camera Station...")
-        self.navigator.approach_camera(toolhead, gcode_move, target_z=target_focal_z)
-        self._center_nozzle(toolhead, gcmd)
-        raw_pos = toolhead.get_position()
+        self._set_inspection_lighting(True, tool_no)
+        try:
+            self.navigator.approach_camera(toolhead, gcode_move, target_z=target_focal_z)
+            self._center_nozzle(toolhead, gcmd)
+            raw_pos = toolhead.get_position()
 
-        if tool_no == self.reference_tool:
-            ref_xy = [raw_pos[0], raw_pos[1]]
-            gcmd.respond_info(f"[T{tool_no}] Reference Optical Origin set to X{raw_pos[0]:.3f} Y{raw_pos[1]:.3f}")
-            self.navigator.depart_station(toolhead, gcode_move)
-            return ref_xy
-        else:
-            if reference_origin_xy is None:
-                raise SafeNavigatorException(f"Reference tool T{self.reference_tool} optical origin has not been established.")
-            dx = round(raw_pos[0] - reference_origin_xy[0], 3)
-            dy = round(raw_pos[1] - reference_origin_xy[1], 3)
-            tool_offsets["x"] = dx
-            tool_offsets["y"] = dy
-            gcmd.respond_info(f"[T{tool_no}] Calculated XY Offsets: X{dx:+.3f}mm Y{dy:+.3f}mm")
-            self.navigator.depart_station(toolhead, gcode_move)
-            return reference_origin_xy
+            if tool_no == self.reference_tool:
+                ref_xy = [raw_pos[0], raw_pos[1]]
+                gcmd.respond_info(f"[T{tool_no}] Reference Optical Origin set to X{raw_pos[0]:.3f} Y{raw_pos[1]:.3f}")
+                self.navigator.depart_station(toolhead, gcode_move)
+                return ref_xy
+            else:
+                if reference_origin_xy is None:
+                    raise SafeNavigatorException(f"Reference tool T{self.reference_tool} optical origin has not been established.")
+                dx = round(raw_pos[0] - reference_origin_xy[0], 3)
+                dy = round(raw_pos[1] - reference_origin_xy[1], 3)
+                tool_offsets["x"] = dx
+                tool_offsets["y"] = dy
+                gcmd.respond_info(f"[T{tool_no}] Calculated XY Offsets: X{dx:+.3f}mm Y{dy:+.3f}mm")
+                self.navigator.depart_station(toolhead, gcode_move)
+                return reference_origin_xy
+        finally:
+            self._set_inspection_lighting(False, tool_no)
 
     def _execute_z_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_z_result: Dict[str, Any], tool_offsets: Dict[str, float]) -> Dict[str, Any]:
         """Executes Z probing alignment for a single tool."""
@@ -454,10 +498,13 @@ class ToolCalibrator:
 
             if auto_center:
                 gcmd.respond_info("[tool_calibrator] Auto-centering nozzle over camera via visual servoing...")
+                self._set_inspection_lighting(True, self.reference_tool)
                 try:
                     self._center_nozzle(toolhead, gcmd)
                 except Exception as ex:
                     gcmd.respond_info(f"Auto-centering note: {ex}. Proceeding with current manual position.")
+                finally:
+                    self._set_inspection_lighting(False, self.reference_tool)
 
             pos = toolhead.get_position()
             target_x, target_y, target_z = round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)
@@ -539,6 +586,7 @@ class ToolCalibrator:
             return
 
         gcmd.respond_info(f"[tool_calibrator] Starting Star-Pattern Camera Calibration (Displacement: ±{dist:.2f}mm)...")
+        self._set_inspection_lighting(True, self.reference_tool)
 
         # 1. Approach Camera safely
         self.navigator.approach_camera(toolhead, gcode_move)
@@ -631,6 +679,7 @@ class ToolCalibrator:
             )
 
         finally:
+            self._set_inspection_lighting(False, self.reference_tool)
             self.navigator.depart_station(toolhead, gcode_move)
 
     def cmd_CALIBRATION_SET_SAFE_POS(self, gcmd) -> None:

@@ -10,6 +10,19 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.8.4] - 2026-09-05
+### Added
+- Optical Inspection Lighting Lifecycle & Sensor Blooming Protection:
+  - Integrated Lighting Manager in `klippy/extras/tool_calibrator.py`: automatically illuminates camera ring lighting (`camera_pin` / `camera_led_brightness` / `_CALIBRATION_CAMERA_LED_ON`) upon entering camera station, and shuts it off upon departure.
+  - Automatic toolhead nozzle LED suppression (`_CALIBRATION_NOZZLE_LED_OFF`): automatically turns off downward-facing toolhead nozzle LEDs (StealthBurner, DragonBurner, etc.) during optical inspection, preventing intense direct light from saturating the upward-facing camera sensor (sensor blooming/flare trap). Restores toolhead LEDs (`_CALIBRATION_NOZZLE_LED_ON`) immediately upon departure.
+  - Added default customizable macro hooks in `macros/tool_calibrator_macros.cfg`.
+- Low-Light & Dim-Illumination Adaptive Contrast Enhancement (CLAHE):
+  - Upgraded `detect_curvature_circle` in `server/nozzle_detector.py`: when central ROI has low luminance (< 90) or low contrast, applies adaptive histogram equalization (CLAHE) prior to circular gradient accumulation.
+  - Guarantees sub-pixel detection reliability even under dim ring lighting or low-glare settings.
+- Expanded automated test suite to 37 passing unit & integration tests (`test_inspection_lighting_lifecycle`).
+
+---
+
 ## [0.8.3] - 2026-09-05
 ### Added
 - Cartographer Touch V4 Relative Delta Z Backend & Official Specification Alignment:
