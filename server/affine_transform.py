@@ -145,3 +145,43 @@ class TransformationSolver:
             return (round(float(offset_x), 3), round(float(offset_y), 3))
 
         raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
+
+    def calculate_tool_delta(
+        self, reference_uv: Tuple[float, float], target_uv: Tuple[float, float]
+    ) -> Tuple[float, float]:
+        """
+        Calculates the physical machine XY offset of a target toolhead relative to a reference toolhead.
+        Used for configuring tool offsets (e.g. G10 P<tool> X<dx> Y<dy> or [tool n] gcode_x_offset).
+
+        Args:
+            reference_uv: Detected center of reference tool (e.g. T0) in pixels (u, v).
+            target_uv: Detected center of target tool (e.g. T1) in pixels (u, v).
+
+        Returns:
+            Tuple[float, float]: (delta_x_mm, delta_y_mm) physical offset.
+        """
+        nx_ref, ny_ref = self.normalize_coords(reference_uv)
+        nx_tgt, ny_tgt = self.normalize_coords(target_uv)
+
+        if self.transform_matrix is not None:
+            if self.transform_matrix.shape[1] == 6:
+                v_ref = np.array([nx_ref**2, ny_ref**2, nx_ref * ny_ref, nx_ref, ny_ref, 1.0])
+                v_tgt = np.array([nx_tgt**2, ny_tgt**2, nx_tgt * ny_tgt, nx_tgt, ny_tgt, 1.0])
+            else:
+                v_ref = np.array([nx_ref, ny_ref, 1.0])
+                v_tgt = np.array([nx_tgt, ny_tgt, 1.0])
+
+            real_ref = self.transform_matrix @ v_ref
+            real_tgt = self.transform_matrix @ v_tgt
+            delta_xy = real_tgt - real_ref
+            return (round(float(delta_xy[0]), 4), round(float(delta_xy[1]), 4))
+
+        if self.mpp is not None:
+            du = target_uv[0] - reference_uv[0]
+            dv = target_uv[1] - reference_uv[1]
+            delta_x = du * self.mpp
+            delta_y = dv * self.mpp
+            return (round(float(delta_x), 4), round(float(delta_y), 4))
+
+        raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
+

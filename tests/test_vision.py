@@ -93,6 +93,32 @@ class TestAffineTransform(unittest.TestCase):
         # du = +20, -1 * 0.55 * 20 * 0.0125 = -0.1375mm
         self.assertAlmostEqual(off_x, -0.138, delta=0.01)
 
+    def test_calculate_tool_delta(self):
+        """Verify physical delta XY computation between two tools (T0 ref vs T1 target)."""
+        # Test with linear MPP fallback
+        self.solver.transform_matrix = None
+        self.solver.set_mpp(0.0125)
+        # T0 at (737.42, 328.79), T1 at (735.00, 324.50)
+        # du = -2.42, dv = -4.29
+        # dx = -2.42 * 0.0125 = -0.03025, dy = -4.29 * 0.0125 = -0.053625
+        dx, dy = self.solver.calculate_tool_delta((737.42, 328.79), (735.00, 324.50))
+        self.assertAlmostEqual(dx, -0.0303, delta=0.001)
+        self.assertAlmostEqual(dy, -0.0536, delta=0.001)
+
+        # Test with affine transformation matrix
+        star_points = [
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[1.0, 0.0], [420.0, 240.0]],
+            [[-1.0, 0.0], [220.0, 240.0]],
+            [[0.0, 1.0], [320.0, 340.0]],
+            [[0.0, -1.0], [320.0, 140.0]]
+        ]
+        self.solver.solve_matrix(star_points)
+        # Shift target by +50px in U (+0.5mm in X) and -20px in V (-0.2mm in Y)
+        dx_aff, dy_aff = self.solver.calculate_tool_delta((320.0, 240.0), (370.0, 220.0))
+        self.assertAlmostEqual(dx_aff, 0.50, delta=0.01)
+        self.assertAlmostEqual(dy_aff, -0.20, delta=0.01)
+
 
 class TestNozzleDetector(unittest.TestCase):
     def setUp(self):
@@ -146,6 +172,19 @@ class TestNozzleDetector(unittest.TestCase):
         self.assertAlmostEqual(best[0], 180.0, delta=1.0)
         self.assertAlmostEqual(best[1], 140.0, delta=1.0)
         self.assertAlmostEqual(best[2], 22.0, delta=1.0)
+
+    def test_subpixel_refinement_precision(self):
+        """Verify _refine_upper_arc_symmetry achieves sub-pixel convergence (< 0.15px)."""
+        roi = np.full((260, 260), 30, dtype=np.uint8)
+        # Create circular nozzle orifice centered at (130, 130)
+        cv2.circle(roi, (130, 130), 28, 190, -1)
+        cv2.circle(roi, (130, 130), 16, 20, -1)
+        # Start coarse search perturbed by (+2.0, -1.5)
+        refined_x, refined_y = self.detector._refine_upper_arc_symmetry(
+            roi, cx=132.0, cy=128.5, radius=16.0, max_shift=4.0
+        )
+        self.assertAlmostEqual(refined_x, 130.0, delta=0.15)
+        self.assertAlmostEqual(refined_y, 130.0, delta=0.15)
 
 
 class TestVisualDebugger(unittest.TestCase):
@@ -201,6 +240,25 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertTrue(test_data["success"])
         self.assertTrue(test_data["found"])
         self.assertIsNotNone(test_data["center_uv"])
+
+    def test_calculate_tool_delta_endpoint(self):
+        """Verify POST /calculate_tool_delta endpoint produces accurate delta and G-code."""
+        from server.tool_calibrator_server import solver
+        solver.set_mpp(0.0125)
+        res = self.client.post("/calculate_tool_delta", json={
+            "reference_uv": [737.42, 328.79],
+            "target_uv": [735.00, 324.50],
+            "tool": 1
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["tool"], 1)
+        self.assertEqual(data["delta_uv"], [-2.42, -4.29])
+        self.assertAlmostEqual(data["delta_xy"][0], -0.0303, delta=0.001)
+        self.assertAlmostEqual(data["delta_xy"][1], -0.0536, delta=0.001)
+        self.assertIn("G10 P1", data["gcode_command"])
+        self.assertIn("[tool 1]", data["config_snippet"])
 
 
 if __name__ == "__main__":

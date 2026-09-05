@@ -51,7 +51,7 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.8.1",
+        "version": "0.8.7",
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,
         "calibrated_mpp": solver.mpp
@@ -238,6 +238,51 @@ def calculate_offset():
     except Exception as ex:
         logger.exception("Error in /calculate_offset")
         return jsonify({"success": False, "error": str(ex)}), 400
+
+
+@app.route("/calculate_tool_delta", methods=["POST"])
+def calculate_tool_delta():
+    """
+    Calculates physical machine XY offset between a reference tool (e.g. T0)
+    and a target tool (e.g. T1) from detected nozzle pixel coordinates.
+    Payload: {
+        "reference_uv": [u0, v0],
+        "target_uv": [u1, v1],
+        "tool": 1
+    }
+    """
+    try:
+        data = request.get_json(force=True)
+        ref_uv = data.get("reference_uv")
+        tgt_uv = data.get("target_uv")
+        tool_idx = int(data.get("tool", 1))
+
+        if not ref_uv or len(ref_uv) != 2:
+            return jsonify({"success": False, "error": "Invalid 'reference_uv' coordinate"}), 400
+        if not tgt_uv or len(tgt_uv) != 2:
+            return jsonify({"success": False, "error": "Invalid 'target_uv' coordinate"}), 400
+
+        ref_pt = (float(ref_uv[0]), float(ref_uv[1]))
+        tgt_pt = (float(tgt_uv[0]), float(tgt_uv[1]))
+
+        delta_xy = solver.calculate_tool_delta(ref_pt, tgt_pt)
+        dx, dy = delta_xy
+
+        delta_uv = (round(tgt_pt[0] - ref_pt[0], 3), round(tgt_pt[1] - ref_pt[1], 3))
+
+        return jsonify({
+            "success": True,
+            "tool": tool_idx,
+            "delta_uv": delta_uv,
+            "delta_xy": [dx, dy],
+            "mpp": solver.mpp,
+            "gcode_command": f"G10 P{tool_idx} X{dx:.4f} Y{dy:.4f}",
+            "config_snippet": f"[tool {tool_idx}]\ngcode_x_offset: {dx:.4f}\ngcode_y_offset: {dy:.4f}"
+        }), 200
+    except Exception as ex:
+        logger.exception("Error in /calculate_tool_delta")
+        return jsonify({"success": False, "error": str(ex)}), 400
+
 
 
 @app.route("/api/samples", methods=["GET"])

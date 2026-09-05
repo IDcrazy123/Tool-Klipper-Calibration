@@ -394,7 +394,7 @@
         <div class="header-title">
             <div class="logo-ring"></div>
             <h1>Tool-Klipper-Calibration</h1>
-            <span class="version-badge">v0.8.1 Curvature</span>
+            <span class="version-badge">v0.8.7 Sub-Pixel</span>
         </div>
         <div id="status-pill" class="status-pill">
             <div class="status-dot"></div>
@@ -491,6 +491,56 @@
                 </div>
             </div>
 
+            <!-- Multi-Tool Delta Offset Calculator Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <span>📐</span> Multi-Tool Delta Offset Calculator
+                    </h2>
+                    <span class="tier-badge tier-curv" style="font-size: 0.7rem;">Sub-Pixel Solver</span>
+                </div>
+                <div class="controls-group">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                        <div>
+                            <label style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 0.3rem; display: block;">Reference Tool (T0) UV</label>
+                            <input id="input-ref-uv" type="text" class="input-text" placeholder="e.g. 737.42, 328.79">
+                        </div>
+                        <div>
+                            <label style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 0.3rem; display: block;">Target Tool (T1..n) UV</label>
+                            <input id="input-tgt-uv" type="text" class="input-text" placeholder="e.g. 735.00, 324.50">
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button id="btn-set-ref-uv" class="btn btn-secondary" style="font-size: 0.78rem; padding: 0.4rem 0.6rem; flex: 1;">📌 Set Ref from Last Detect</button>
+                        <button id="btn-set-tgt-uv" class="btn btn-secondary" style="font-size: 0.78rem; padding: 0.4rem 0.6rem; flex: 1;">📌 Set Tgt from Last Detect</button>
+                    </div>
+                    <div style="display: flex; gap: 0.75rem; align-items: center;">
+                        <input id="input-delta-tool-idx" type="number" class="input-text" style="width: 90px;" min="1" max="32" value="1" placeholder="Tool #">
+                        <button id="btn-calc-tool-delta" class="btn btn-primary" style="flex: 1;">⚡ Calculate Tool Delta Offset</button>
+                    </div>
+                    <div id="delta-result-box" class="result-card" style="display: none; margin-top: 0.5rem;">
+                        <div class="result-header">
+                            <span style="font-size: 0.85rem; font-weight: 600; color: var(--accent-cyan);" id="delta-tool-header">Tool Offset Result</span>
+                            <span class="tier-badge tier-standard" id="delta-mpp-badge">Scale Active</span>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; font-family: 'JetBrains Mono', monospace;">
+                            <div>
+                                <span style="font-size: 0.75rem; color: var(--text-muted);">Pixel Delta (ΔU, ΔV):</span>
+                                <div id="delta-uv-val" style="font-size: 0.95rem; color: var(--text-primary);">--</div>
+                            </div>
+                            <div>
+                                <span style="font-size: 0.75rem; color: var(--text-muted);">Machine Offset (ΔX, ΔY):</span>
+                                <div id="delta-xy-val" style="font-size: 1.05rem; font-weight: 700; color: var(--accent-green);">--</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 0.4rem;">
+                            <span style="font-size: 0.72rem; color: var(--text-muted);">Klipper G-Code:</span>
+                            <code id="delta-gcode-val" style="display: block; background: rgba(0,0,0,0.5); padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.82rem; color: var(--accent-cyan); font-family: 'JetBrains Mono', monospace; margin-top: 0.2rem; word-break: break-all;">--</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Configuration Card -->
             <div class="card">
                 <div class="card-header">
@@ -508,6 +558,7 @@
 
     <script>
         let currentZoom = 1.0;
+        let lastDetectedUV = null;
 
         async function fetchHealth() {
             try {
@@ -550,6 +601,7 @@
             const confBox = document.getElementById("res-confidence-box");
             
             if (data.found && data.center_uv) {
+                lastDetectedUV = data.center_uv;
                 statusEl.textContent = "Nozzle Orifice Locked";
                 statusEl.style.color = "var(--accent-green)";
                 
@@ -667,6 +719,68 @@
                 currentZoom = 1.0;
                 btn.textContent = "Zoom 1.0X";
                 img.style.transform = "scale(1.0)";
+            }
+        });
+
+        document.getElementById("btn-set-ref-uv").addEventListener("click", () => {
+            if (!lastDetectedUV) {
+                alert("Please run a detection or test a sample first to acquire nozzle coordinates!");
+                return;
+            }
+            document.getElementById("input-ref-uv").value = `${lastDetectedUV[0].toFixed(2)}, ${lastDetectedUV[1].toFixed(2)}`;
+        });
+
+        document.getElementById("btn-set-tgt-uv").addEventListener("click", () => {
+            if (!lastDetectedUV) {
+                alert("Please run a detection or test a sample first to acquire nozzle coordinates!");
+                return;
+            }
+            document.getElementById("input-tgt-uv").value = `${lastDetectedUV[0].toFixed(2)}, ${lastDetectedUV[1].toFixed(2)}`;
+        });
+
+        document.getElementById("btn-calc-tool-delta").addEventListener("click", async () => {
+            const refStr = document.getElementById("input-ref-uv").value.trim();
+            const tgtStr = document.getElementById("input-tgt-uv").value.trim();
+            const toolIdx = parseInt(document.getElementById("input-delta-tool-idx").value) || 1;
+
+            if (!refStr || !tgtStr) {
+                alert("Please provide both Reference UV (T0) and Target UV coordinates!");
+                return;
+            }
+
+            const parseUV = (str) => str.split(/[, \t]+/).filter(Boolean).map(Number);
+            const refUV = parseUV(refStr);
+            const tgtUV = parseUV(tgtStr);
+
+            if (refUV.length < 2 || tgtUV.length < 2 || isNaN(refUV[0]) || isNaN(tgtUV[0])) {
+                alert("Invalid coordinate format. Expected: U, V (e.g. 737.42, 328.79)");
+                return;
+            }
+
+            try {
+                const res = await fetch("/calculate_tool_delta", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        reference_uv: refUV,
+                        target_uv: tgtUV,
+                        tool: toolIdx
+                    })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert("Calculation Error: " + (data.error || "Failed to calculate delta"));
+                    return;
+                }
+
+                document.getElementById("delta-result-box").style.display = "block";
+                document.getElementById("delta-tool-header").textContent = `Tool T${data.tool} vs T0 Delta`;
+                document.getElementById("delta-mpp-badge").textContent = data.mpp ? `${data.mpp.toFixed(5)} mm/px` : "Linear";
+                document.getElementById("delta-uv-val").textContent = `ΔU: ${data.delta_uv[0] > 0 ? '+' : ''}${data.delta_uv[0].toFixed(2)}px, ΔV: ${data.delta_uv[1] > 0 ? '+' : ''}${data.delta_uv[1].toFixed(2)}px`;
+                document.getElementById("delta-xy-val").textContent = `ΔX: ${data.delta_xy[0] > 0 ? '+' : ''}${data.delta_xy[0].toFixed(4)}mm, ΔY: ${data.delta_xy[1] > 0 ? '+' : ''}${data.delta_xy[1].toFixed(4)}mm`;
+                document.getElementById("delta-gcode-val").textContent = data.gcode_command;
+            } catch (err) {
+                alert("Request error: " + err.message);
             }
         });
 

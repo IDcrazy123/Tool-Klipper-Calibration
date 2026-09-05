@@ -174,12 +174,30 @@ class NozzleDetector:
             blurred = cv2.medianBlur(gray, 5)
             return cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
 
+    @staticmethod
+    def _sample_bilinear_vec(img: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Vectorized bilinear interpolation on 2D float image."""
+        h, w = img.shape[:2]
+        x0 = np.floor(x).astype(int)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+        y0 = np.floor(y).astype(int)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+        x0 = np.clip(x0, 0, w - 1)
+        y0 = np.clip(y0, 0, h - 1)
+        fx = (x - x0).astype(np.float32)
+        fy = (y - y0).astype(np.float32)
+        top = (1.0 - fx) * img[y0, x0] + fx * img[y0, x1]
+        bot = (1.0 - fx) * img[y1, x0] + fx * img[y1, x1]
+        return (1.0 - fy) * top + fy * bot
+
     def _refine_upper_arc_symmetry(
         self, gray: np.ndarray, cx: float, cy: float, radius: float, max_shift: float = 4.0
     ) -> Tuple[float, float]:
         """
         Refines nozzle center by optimizing radial gradient consistency along the upper arc
-        (150-deg to 30-deg elevation), completely avoiding downward conical specular glare flares.
+        (150-deg to 30-deg elevation) with continuous sub-pixel bilinear sampling and two-stage
+        coarse-to-fine optimization (< 0.05px resolution). Completely avoids downward conical
+        specular glare flares.
         """
         try:
             gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -187,28 +205,30 @@ class NozzleDetector:
             angles = np.linspace(-np.pi * 0.85, -np.pi * 0.15, 30)
             cos_a = np.cos(angles).astype(np.float32)
             sin_a = np.sin(angles).astype(np.float32)
-
-            best_score = -1e9
-            best_c = (cx, cy)
-            shifts = np.arange(-max_shift, max_shift + 0.5, 0.5, dtype=np.float32)
             h, w = gray.shape[:2]
 
-            for dy in shifts:
-                y = cy + dy
-                for dx in shifts:
-                    x = cx + dx
-                    px = x + radius * cos_a
-                    py = y + radius * sin_a
-                    if px.min() < 1 or px.max() >= w - 1 or py.min() < 1 or py.max() >= h - 1:
-                        continue
-                    ix = np.round(px).astype(int)
-                    iy = np.round(py).astype(int)
-                    proj = gx[iy, ix] * cos_a + gy[iy, ix] * sin_a
-                    score = float(np.mean(np.abs(proj)))
-                    if score > best_score:
-                        best_score = score
-                        best_c = (float(x), float(y))
-            return best_c
+            def evaluate_shifts(base_x: float, base_y: float, shifts: np.ndarray) -> Tuple[float, float]:
+                dx_grid, dy_grid = np.meshgrid(shifts, shifts)
+                x_cand = (base_x + dx_grid).astype(np.float32)
+                y_cand = (base_y + dy_grid).astype(np.float32)
+
+                px = x_cand[:, :, None] + radius * cos_a[None, None, :]
+                py = y_cand[:, :, None] + radius * sin_a[None, None, :]
+
+                valid = (px >= 1) & (px < w - 2) & (py >= 1) & (py < h - 2)
+                samp_gx = self._sample_bilinear_vec(gx, px, py)
+                samp_gy = self._sample_bilinear_vec(gy, px, py)
+                proj = np.abs(samp_gx * cos_a[None, None, :] + samp_gy * sin_a[None, None, :])
+                proj = np.where(valid, proj, 0.0)
+                scores = np.mean(proj, axis=2)
+                best_idx = np.unravel_index(np.argmax(scores), scores.shape)
+                return float(x_cand[best_idx]), float(y_cand[best_idx])
+
+            # Coarse pass: 0.5px steps across [-max_shift, +max_shift]
+            c_x, c_y = evaluate_shifts(cx, cy, np.arange(-max_shift, max_shift + 0.5, 0.5, dtype=np.float32))
+            # Fine pass: 0.05px steps across [-0.45, +0.45] around coarse peak
+            f_x, f_y = evaluate_shifts(c_x, c_y, np.arange(-0.45, 0.46, 0.05, dtype=np.float32))
+            return round(f_x, 3), round(f_y, 3)
         except Exception:
             return cx, cy
 
