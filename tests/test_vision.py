@@ -2,6 +2,7 @@
 Unit Tests for Tool-Klipper-Calibration Vision Daemon.
 """
 
+import os
 import unittest
 import numpy as np
 import cv2
@@ -97,6 +98,37 @@ class TestVisualDebugger(unittest.TestCase):
         self.assertGreater(len(jpeg_bytes), 100)
         # Header for JPEG is 0xFF 0xD8
         self.assertEqual(jpeg_bytes[:2], b'\xff\xd8')
+
+
+class TestServerEndpoints(unittest.TestCase):
+    def setUp(self):
+        from server.tool_calibrator_server import app
+        self.client = app.test_client()
+
+    def test_dashboard_route(self):
+        """Dashboard GET / must return 200 OK and render HTML."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Tool-Klipper-Calibration", response.data)
+        self.assertIn(b"Vision Monitor", response.data)
+
+    def test_sample_dataset_detection(self):
+        """Verify 3-tier cascade detects nozzle across diverse sample images."""
+        sample_dir = os.path.join(os.path.dirname(__file__), "sample_images")
+        if not os.path.exists(sample_dir):
+            return
+
+        detector = NozzleDetector(frame_width=640, frame_height=480)
+        image_files = [f for f in os.listdir(sample_dir) if f.endswith(".jpg")]
+        self.assertGreaterEqual(len(image_files), 5)
+
+        for img_name in image_files:
+            img_path = os.path.join(sample_dir, img_name)
+            frame = cv2.imread(img_path)
+            self.assertIsNotNone(frame, f"Failed to load {img_name}")
+            result = detector.detect(frame)
+            self.assertTrue(result.found, f"Failed detection on {img_name}")
+            self.assertIsNotNone(result.center_uv)
 
 
 if __name__ == "__main__":

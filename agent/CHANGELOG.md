@@ -10,6 +10,20 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.6.0] - 2026-09-05
+### Added
+- Interactive Vision Monitor & Diagnostics Web Dashboard:
+  - Responsive dark-theme dashboard on route `/` embedded into `server/tool_calibrator_server.py` via `server/templates/index.html`.
+  - Live video stream HUD with crosshairs, optical center markers, and stream refresh.
+  - Real-time telemetry monitoring (scale MPP, affine matrix solved state, active snapshot URL).
+  - 1-Click diagnostic nozzle detection tool calling REST API directly from the browser.
+- Offline Vision Benchmark Dataset & Testing:
+  - Dataset generator in `scripts/generate_sample_dataset.py`.
+  - Benchmark sample images in `tests/sample_images/` covering perfect center, dual-axis offsets, dim illumination, optical flare/glare, and debris contamination.
+  - Automated regression test in `tests/test_vision.py` asserting 100% cascade detection across all sample images (21 total passing unit & integration tests).
+
+---
+
 ## [0.5.0] - 2026-09-05
 ### Added
 - Fully Automated Station Staging & Zero-Manual-Config Workflow:

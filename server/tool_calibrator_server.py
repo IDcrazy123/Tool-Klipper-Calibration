@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Dict, Any
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, render_template
 from waitress import serve
 
 from .stream_grabber import StreamGrabber
@@ -30,13 +30,19 @@ logging.basicConfig(
 logger = logging.getLogger("tool_calibrator.server")
 
 # Initialize Flask App
-app = Flask(__name__)
+app = Flask(__name__, template_folder=os.path.join(os.path.dirname(__file__), "templates"))
 
 # Core Service Instances
 grabber = StreamGrabber()
 detector = NozzleDetector()
 solver = TransformationSolver(damping_factor=0.55)
 debugger = VisualDebugger()
+
+
+@app.route("/", methods=["GET"])
+def dashboard():
+    """Serves the interactive Vision Monitor & Diagnostics Dashboard."""
+    return render_template("index.html")
 
 
 @app.route("/health", methods=["GET"])
