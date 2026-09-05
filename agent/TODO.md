@@ -1,0 +1,58 @@
+# TODO.md — Work Breakdown Structure (WBS) & Progress Checklist
+
+> [!NOTE]
+> Bản tiếng Việt có sẵn tại: [TODO.vi.md](TODO.vi.md)
+
+This checklist tracks execution progress across all phases of the **Tool-Klipper-Calibration** project.
+
+---
+
+## 📊 Phase Overview & Status
+
+- [x] **Phase 1: Architecture, Documentation & Environment Setup** *(Completed)*
+- [ ] **Phase 2: Vision Background Service Implementation (`server/`)**
+- [ ] **Phase 3: Klipper Core Extension Implementation (`klippy/extras/`)**
+- [ ] **Phase 4: User Macro Suite & Hook Integration (`macros/`)**
+- [ ] **Phase 5: Offline Synthetic Testing & Dry-Run Benchmarking**
+- [ ] **Phase 6: Automated Packaging, Install Scripts & Release**
+
+---
+
+## Detailed Task Checklist
+
+### Phase 1: Architecture, Documentation & Git Setup
+- [x] **Task 1.1:** Initialize Git repository on `main` branch with remote origin.
+- [x] **Task 1.2:** Configure comprehensive `.gitignore` for Python, Klipper configs, and local references.
+- [x] **Task 1.3:** Create modular, bilingual 14-document architecture in `agent/` folder.
+- [x] **Task 1.4:** Create root `README.md` and `README.vi.md`.
+
+### Phase 2: Vision Background Service (`server/`)
+- [ ] **Task 2.1:** Implement `stream_grabber.py` to acquire low-latency MJPEG snapshot frames from Crowsnest.
+- [ ] **Task 2.2:** Build `nozzle_detector.py` featuring TAMV-derived 3-tier cascade (Standard, Relaxed, Super-Relaxed).
+- [ ] **Task 2.3:** Implement `affine_transform.py` for star-pattern mm-per-pixel (`mpp`) calibration and matrix inversion.
+- [ ] **Task 2.4:** Build `visual_debugger.py` to stream live MJPEG previews with crosshairs and detected circles.
+- [ ] **Task 2.5:** Develop `tool_calibrator_server.py` exposing REST JSON endpoints on port 8090 (`/health`, `/detect_nozzle`, `/calibrate_mpp`, `/preview`).
+
+### Phase 3: Klipper Core Extension (`klippy/extras/`)
+- [ ] **Task 3.1:** Implement `tool_calibrator.py` core orchestrator class and G-code dispatcher.
+- [ ] **Task 3.2:** Develop `safe_navigator.py` implementing 3-tier waypoint transitions and motion boundaries.
+- [ ] **Task 3.3:** Build `z_backends/base_z.py` abstract interface.
+- [ ] **Task 3.4:** Implement `z_backends/switch_backend.py` supporting physical endstop probing.
+- [ ] **Task 3.5:** Implement `z_backends/cartographer_backend.py` supporting Cartographer V4 Touch Home & Touch Probe.
+- [ ] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
+
+### Phase 4: Macro Suite & Hook Integration (`macros/`)
+- [ ] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.
+- [ ] **Task 4.2:** Develop interactive teaching macros `CALIBRATION_SET_SAFE_POS`.
+- [ ] **Task 4.3:** Integrate lifecycle hooks: `before_pickup_gcode`, `after_pickup_gcode`, `start_gcode`, `finish_gcode`.
+- [ ] **Task 4.4:** Implement rollback macro `CALIBRATION_ROLLBACK_OFFSETS`.
+
+### Phase 5: Verification & Benchmarking
+- [ ] **Task 5.1:** Offline unit tests using synthetic nozzle sample images across diverse illumination profiles.
+- [ ] **Task 5.2:** Contactless dry-run validation (`DRY_RUN=1`) on physical hardware.
+- [ ] **Task 5.3:** 10-cycle repeatability benchmark verifying $\sigma_{XY} \le 0.015\text{mm}$ and $\sigma_Z \le 0.008\text{mm}$.
+
+### Phase 6: Packaging & Automated Deployment
+- [ ] **Task 6.1:** Write automated Linux installer script `scripts/install.sh` (virtualenv, dependencies, systemd unit).
+- [ ] **Task 6.2:** Create uninstaller script `scripts/uninstall.sh`.
+- [ ] **Task 6.3:** Verify Moonraker Update Manager integration.
