@@ -1,0 +1,8 @@
+# Tool-Klipper-Calibration Vision Daemon Requirements
+# Optimized for Raspberry Pi OS (armhf / aarch64) & x86_64
+flask>=2.2.0,<3.1.0
+waitress>=2.1.0,<3.1.0
+opencv-python-headless>=4.5.5
+numpy>=1.21.0
+requests>=2.28.0
+urllib3>=1.26.0,<3.0.0

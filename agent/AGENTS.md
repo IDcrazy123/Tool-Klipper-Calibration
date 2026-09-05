@@ -37,3 +37,4 @@ Welcome to the **Tool-Klipper-Calibration** project. This is the master orchestr
 3. **Strict Single-Branch Git Policy:** Commit directly to **`main`** only; never create side branches (see [GIT_RULE.md](GIT_RULE.md)).
 4. **Mechanical Safety First:** Never execute diagonal travel moves through obstacles; always transit through safe staging positions (`Safe_Z`, `Safe_Approach`) (see [SAFETY.md](SAFETY.md)).
 5. **Continuous State Updates:** Always update [TODO.md](TODO.md) and [CHANGELOG.md](CHANGELOG.md) upon task completion.
+6. **Klipper & Toolchanger Conflict Prevention:** Never invoke native `SAVE_CONFIG` (avoids corrupting multi-tool definitions); pull images strictly from Crowsnest Snapshots rather than WebRTC; reuse probe wrappers if `[tools_calibrate]` is pre-configured (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).

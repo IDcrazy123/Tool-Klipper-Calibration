@@ -39,3 +39,4 @@ Toàn bộ tài liệu kỹ thuật chi tiết được quản lý bằng tiến
 3. **Chính sách nhánh Git duy nhất:** Chỉ làm việc trên nhánh **`main`**, tuyệt đối không tạo nhánh phụ (xem [GIT_RULE.md](GIT_RULE.md)).
 4. **An toàn cơ khí là trên hết:** Không bao giờ di chuyển vòi phun đường chéo cắt qua chướng ngại vật; luôn di chuyển qua các toạ độ an toàn (`Safe_Z`, `Safe_Approach`) (xem [SAFETY.md](SAFETY.md)).
 5. **Cập nhật trạng thái:** Luôn cập nhật [TODO.md](TODO.md) và [CHANGELOG.md](CHANGELOG.md) sau mỗi task hoàn thành.
+6. **Phòng tránh xung đột Klipper & Toolchanger:** Tuyệt đối không gọi lệnh `SAVE_CONFIG` (tránh phá hỏng cấu hình đa tool); luôn kéo ảnh từ Crowsnest Snapshot thay vì WebRTC; tái sử dụng probe wrapper nếu `[tools_calibrate]` đã được cấu hình (xem [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).

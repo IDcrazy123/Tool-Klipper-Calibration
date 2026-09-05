@@ -81,10 +81,39 @@ Enforce a strict single `main` branch policy (Trunk-Based Development). All deve
 ## ADR-006: Dedicated Configuration Persistence (`tool_offsets.cfg`)
 
 ### Context
-Directly modifying `printer.cfg` (as done by Axiscope) risks corrupting the main printer configuration if power is interrupted during regex file writes.
+Directly modifying `printer.cfg` (as done by Axiscope) risks corrupting the main printer configuration if power is interrupted during regex file writes. Furthermore, native Klipper `SAVE_CONFIG` creates conflicting global `[probe]` or `[extruder]` overrides.
 
 ### Decision
-Persist toolhead offsets into an isolated configuration file `tool_offsets.cfg` (included via `[include tool_offsets.cfg]`), accompanied by automated timestamped backups before each write.
+Persist toolhead offsets into an isolated configuration file `tool_offsets.cfg` (included via `[include tool_offsets.cfg]`), accompanied by automated timestamped backups before each write. Avoid using `SAVE_CONFIG`.
 
 ### Rationale
 - Absolute protection of master machine configurations and trivial rollback capabilities.
+
+---
+
+## ADR-007: Safe Coexistence with `tools_calibrate` & Pin Registration
+
+### Context
+When using the Switch Z backend, registering a physical switch pin with Klipper's `query_endstops` will throw an unrecoverable configuration error if `[tools_calibrate]` is already declared in `printer.cfg`.
+
+### Decision
+Instead of raising a fatal conflict error (as done in Axiscope), `tool_calibrator` inspects `printer.lookup_object('tools_calibrate', None)`:
+1. If `tools_calibrate` is present, it re-uses the already registered probe wrapper object.
+2. In Cartographer backend mode, switch pin registration is bypassed completely.
+
+### Rationale
+- Guarantees painless coexistence across diverse community toolchanger configurations.
+
+---
+
+## ADR-008: Snapshot Frame Acquisition vs Live Stream Decoding
+
+### Context
+Mainsail supports multiple camera streaming backends (ustreamer, camera-streamer/WebRTC). OpenCV cannot natively decode WebRTC without extensive browser dependencies.
+
+### Decision
+The Vision Service exclusively pulls single frames from Crowsnest's HTTP snapshot endpoint (`/?action=snapshot`), independent of the live UI stream format.
+
+### Rationale
+- Ensures $100\%$ compatibility whether the user views WebRTC, MJPEG, or HLS in Mainsail/Fluidd.
+
