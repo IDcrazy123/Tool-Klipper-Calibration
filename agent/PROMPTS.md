@@ -1,8 +1,5 @@
 # PROMPTS.md — Standard Agent Interaction Templates & Prompts
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [PROMPTS.vi.md](PROMPTS.vi.md)
-
 This document provides standardized prompt templates for human developers when instructing AI agents across different implementation phases of **Tool-Klipper-Calibration**.
 
 ---

@@ -1,8 +1,5 @@
 # DECISIONS.md — Architecture Decision Records (ADR)
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [DECISIONS.vi.md](DECISIONS.vi.md)
-
 This document captures key Architecture Decision Records (ADRs) for the **Tool-Klipper-Calibration** project, detailing technical rationale, trade-offs, and lessons synthesized from the three reference projects (`Axiscope`, `kTAMV`, `TAMV`).
 
 ---

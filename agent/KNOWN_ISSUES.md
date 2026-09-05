@@ -1,8 +1,5 @@
 # KNOWN_ISSUES.md — Known Hardware/Software Edge Cases & Remedies
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [KNOWN_ISSUES.vi.md](KNOWN_ISSUES.vi.md)
-
 This document catalogues known hardware quirks, optical anomalies, and environmental edge cases observed across toolchanger implementations, along with proven mitigation strategies.
 
 ---

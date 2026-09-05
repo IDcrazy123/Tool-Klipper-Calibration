@@ -1,8 +1,5 @@
 # PROJECT.md — Project Mission & Technical Specifications
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [PROJECT.vi.md](PROJECT.vi.md)
-
 ---
 
 ## 1. Executive Summary

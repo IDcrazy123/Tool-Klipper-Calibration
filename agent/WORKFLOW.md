@@ -1,8 +1,5 @@
 # WORKFLOW.md — Operational Workflow & Finite State Machine
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [WORKFLOW.vi.md](WORKFLOW.vi.md)
-
 ---
 
 ## 1. Finite State Machine (FSM)

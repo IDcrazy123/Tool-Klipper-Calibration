@@ -1,8 +1,5 @@
 # DIRECTORY.md — Project Structure & Module Boundaries
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [DIRECTORY.vi.md](DIRECTORY.vi.md)
-
 This document details the file tree, roles, and modular boundaries of the **Tool-Klipper-Calibration** project.
 
 ---
@@ -16,20 +13,21 @@ Tool-Klipper-Calibration/
 ├── README.vi.md                 # Vietnamese landing page
 │
 ├── agent/                       # Agent & Developer Documentation Suite
-│   ├── AGENTS.md / .vi.md       # Master coordination & sitemap
-│   ├── BACKUP.md / .vi.md       # Configuration persistence, backups & rollback protocol
-│   ├── CHANGELOG.md / .vi.md    # Semantic version update history
-│   ├── DECISIONS.md / .vi.md    # Architecture Decision Records (ADR)
-│   ├── DIRECTORY.md / .vi.md    # Codebase tree & boundaries (this document)
-│   ├── GIT_RULE.md / .vi.md     # Git rules: single main branch only, commit conventions
-│   ├── KNOWN_ISSUES.md / .vi.md # Hardware/software edge cases & troubleshooting
-│   ├── LOGGING.md / .vi.md      # Standard error codes (ERR_xxx) & telemetry format
-│   ├── PROJECT.md / .vi.md      # Mission, technical requirements & hardware specs
-│   ├── PROMPTS.md / .vi.md      # Standard prompts and interaction templates
-│   ├── SAFETY.md / .vi.md       # 3-tier safe navigation & hardware protection rules
-│   ├── STYLE.md / .vi.md        # Python/Macro coding standards & commenting rules
-│   ├── TODO.md / .vi.md         # Phased work breakdown structure (WBS) & progress
-│   └── WORKFLOW.md / .vi.md     # Operational flow & Finite State Machine (FSM)
+│   ├── AGENTS.md                # Master coordination & sitemap (English)
+│   ├── AGENTS.vi.md             # Hướng dẫn điều phối trung tâm (Tiếng Việt)
+│   ├── BACKUP.md                # Configuration persistence, backups & rollback protocol
+│   ├── CHANGELOG.md             # Semantic version update history
+│   ├── DECISIONS.md             # Architecture Decision Records (ADR)
+│   ├── DIRECTORY.md             # Codebase tree & boundaries (this document)
+│   ├── GIT_RULE.md              # Git rules: single main branch only, commit conventions
+│   ├── KNOWN_ISSUES.md          # Hardware/software edge cases & troubleshooting
+│   ├── LOGGING.md               # Standard error codes (ERR_xxx) & telemetry format
+│   ├── PROJECT.md               # Mission, technical requirements & hardware specs
+│   ├── PROMPTS.md               # Standard prompts and interaction templates
+│   ├── SAFETY.md                # 3-tier safe navigation & hardware protection rules
+│   ├── STYLE.md                 # Python/Macro coding standards & commenting rules
+│   ├── TODO.md                  # Phased work breakdown structure (WBS) & progress
+│   └── WORKFLOW.md              # Operational flow & Finite State Machine (FSM)
 │
 ├── klippy/                      # Klipper Extension (Runs inside Klippy Python environment)
 │   └── extras/

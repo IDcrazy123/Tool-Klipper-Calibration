@@ -1,8 +1,5 @@
 # TODO.md — Work Breakdown Structure (WBS) & Progress Checklist
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [TODO.vi.md](TODO.vi.md)
-
 This checklist tracks execution progress across all phases of the **Tool-Klipper-Calibration** project.
 
 ---

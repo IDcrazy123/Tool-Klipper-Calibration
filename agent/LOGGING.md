@@ -1,8 +1,5 @@
 # LOGGING.md — Error Taxonomy & Telemetry Standards
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [LOGGING.vi.md](LOGGING.vi.md)
-
 This document establishes the standardized error classification, telemetry messaging format, and console feedback protocols for **Tool-Klipper-Calibration**.
 
 ---

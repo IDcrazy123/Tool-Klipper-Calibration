@@ -1,8 +1,5 @@
 # STYLE.md — Coding Standards & Commenting Guidelines
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [STYLE.vi.md](STYLE.vi.md)
-
 This document defines code style, static typing, and commenting conventions for the **Tool-Klipper-Calibration** codebase.
 
 ---

@@ -1,8 +1,5 @@
 # BACKUP.md — Configuration Persistence & Rollback Strategy
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [BACKUP.vi.md](BACKUP.vi.md)
-
 This document establishes configuration persistence protocols, automated backup naming conventions, and emergency rollback procedures for **Tool-Klipper-Calibration**.
 
 ---

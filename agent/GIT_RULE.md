@@ -1,8 +1,5 @@
 # GIT_RULE.md — Git Strategy & Repository Management Rules
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [GIT_RULE.vi.md](GIT_RULE.vi.md)
-
 This document establishes the binding Git policy, commit standards, and update mechanisms for the **Tool-Klipper-Calibration** repository.
 
 ---

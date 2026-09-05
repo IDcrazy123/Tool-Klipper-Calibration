@@ -1,8 +1,5 @@
 # SAFETY.md — Safe Navigation & Hardware Protection
 
-> [!NOTE]
-> Bản tiếng Việt có sẵn tại: [SAFETY.vi.md](SAFETY.vi.md)
-
 ---
 
 ## 1. First Principles of Machine Safety
