@@ -191,12 +191,19 @@ class NozzleDetector:
         return (1.0 - fy) * top + fy * bot
 
     def _refine_upper_arc_symmetry(
-        self, gray: np.ndarray, cx: float, cy: float, radius: float, max_shift: float = 4.0
-    ) -> Tuple[float, float]:
+        self,
+        gray: np.ndarray,
+        cx: float,
+        cy: float,
+        radius: float,
+        max_shift: float = 3.5,
+        max_r_shift: float = 3.0,
+        return_radius: bool = False
+    ) -> Union[Tuple[float, float], Tuple[float, float, float]]:
         """
-        Refines nozzle center by optimizing radial gradient consistency across 360 degrees with
-        robust trimmed-quantile scoring (discarding shadows/flares) and continuous sub-pixel
-        bilinear sampling (< 0.05px resolution).
+        Refines nozzle center and radius by jointly optimizing radial gradient consistency across
+        360 degrees with robust trimmed-quantile scoring (discarding shadows/flares) and continuous
+        sub-pixel bilinear sampling (< 0.05px resolution).
         """
         try:
             gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -206,33 +213,54 @@ class NozzleDetector:
             sin_a = np.sin(angles).astype(np.float32)
             h, w = gray.shape[:2]
 
-            def evaluate_shifts(base_x: float, base_y: float, shifts: np.ndarray) -> Tuple[float, float]:
-                dx_grid, dy_grid = np.meshgrid(shifts, shifts)
-                x_cand = (base_x + dx_grid).astype(np.float32)
-                y_cand = (base_y + dy_grid).astype(np.float32)
+            def eval_grid(bx: float, by: float, br: float, xy_shifts: np.ndarray, r_shifts: np.ndarray) -> Tuple[float, float, float]:
+                best_score = -1.0
+                best_res = (bx, by, br)
 
-                px = x_cand[:, :, None] + radius * cos_a[None, None, :]
-                py = y_cand[:, :, None] + radius * sin_a[None, None, :]
+                dx_grid, dy_grid = np.meshgrid(xy_shifts, xy_shifts)
+                x_cand = (bx + dx_grid).astype(np.float32)
+                y_cand = (by + dy_grid).astype(np.float32)
 
-                valid = (px >= 1) & (px < w - 2) & (py >= 1) & (py < h - 2)
-                samp_gx = self._sample_bilinear_vec(gx, px, py)
-                samp_gy = self._sample_bilinear_vec(gy, px, py)
-                proj = np.abs(samp_gx * cos_a[None, None, :] + samp_gy * sin_a[None, None, :])
-                proj = np.where(valid, proj, 0.0)
-                
-                # Trimmed quantile mean: take top 60% of radial projections (drops shadow/glare quadrant)
-                sorted_proj = np.sort(proj, axis=2)
-                k = int(36 * 0.40)
-                scores = np.mean(sorted_proj[:, :, k:], axis=2)
-                best_idx = np.unravel_index(np.argmax(scores), scores.shape)
-                return float(x_cand[best_idx]), float(y_cand[best_idx])
+                for dr in r_shifts:
+                    r = br + dr
+                    if r < 7.0 or r > 26.0:
+                        continue
+                    px = x_cand[:, :, None] + r * cos_a[None, None, :]
+                    py = y_cand[:, :, None] + r * sin_a[None, None, :]
+                    valid = (px >= 1) & (px < w - 2) & (py >= 1) & (py < h - 2)
 
-            # Coarse pass: 0.5px steps across [-max_shift, +max_shift]
-            c_x, c_y = evaluate_shifts(cx, cy, np.arange(-max_shift, max_shift + 0.5, 0.5, dtype=np.float32))
-            # Fine pass: 0.05px steps across [-0.45, +0.45] around coarse peak
-            f_x, f_y = evaluate_shifts(c_x, c_y, np.arange(-0.45, 0.46, 0.05, dtype=np.float32))
+                    samp_gx = self._sample_bilinear_vec(gx, px, py)
+                    samp_gy = self._sample_bilinear_vec(gy, px, py)
+                    proj = np.abs(samp_gx * cos_a[None, None, :] + samp_gy * sin_a[None, None, :])
+                    proj = np.where(valid, proj, 0.0)
+
+                    sorted_proj = np.sort(proj, axis=2)
+                    k = int(36 * 0.40)
+                    scores = np.mean(sorted_proj[:, :, k:], axis=2)
+                    idx = np.unravel_index(np.argmax(scores), scores.shape)
+                    if scores[idx] > best_score:
+                        best_score = float(scores[idx])
+                        best_res = (float(x_cand[idx]), float(y_cand[idx]), float(r))
+                return best_res
+
+            # Coarse pass: 0.5px steps across [-max_shift, +max_shift] and [-max_r_shift, +max_r_shift]
+            c_x, c_y, c_r = eval_grid(
+                cx, cy, radius,
+                np.arange(-max_shift, max_shift + 0.5, 0.5, dtype=np.float32),
+                np.arange(-max_r_shift, max_r_shift + 0.5, 0.5, dtype=np.float32) if max_r_shift > 0 else np.array([0.0], dtype=np.float32)
+            )
+            # Fine pass: 0.05px steps for XY, 0.10px for R around coarse peak
+            f_x, f_y, f_r = eval_grid(
+                c_x, c_y, c_r,
+                np.arange(-0.45, 0.46, 0.05, dtype=np.float32),
+                np.arange(-0.40, 0.45, 0.10, dtype=np.float32) if max_r_shift > 0 else np.array([0.0], dtype=np.float32)
+            )
+            if return_radius:
+                return round(f_x, 3), round(f_y, 3), round(f_r, 2)
             return round(f_x, 3), round(f_y, 3)
         except Exception:
+            if return_radius:
+                return cx, cy, radius
             return cx, cy
 
     def _rank_candidate_circles(
@@ -357,10 +385,12 @@ class NozzleDetector:
 
         # Refine candidate within ROI using radial gradient symmetry (using proc_gray for sharp gradients under dim light)
         refine_img = proc_gray if is_dim else gray
-        refined_local = self._refine_upper_arc_symmetry(refine_img, float(best[0]), float(best[1]), float(best[2]), max_shift=4.0)
-        global_x = float(x0 + refined_local[0])
-        global_y = float(y0 + refined_local[1])
-        return global_x, global_y, float(best[2])
+        refined_x, refined_y, refined_r = self._refine_upper_arc_symmetry(
+            refine_img, float(best[0]), float(best[1]), float(best[2]), max_shift=3.5, max_r_shift=3.0, return_radius=True
+        )
+        global_x = float(x0 + refined_x)
+        global_y = float(y0 + refined_y)
+        return global_x, global_y, float(refined_r)
 
     def _find_closest_keypoint(self, keypoints: List[cv2.KeyPoint]) -> cv2.KeyPoint:
         """Selects the detected candidate closest to the optical center."""
