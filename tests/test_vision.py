@@ -90,6 +90,34 @@ class TestNozzleDetector(unittest.TestCase):
         self.assertAlmostEqual(result.center_uv[1], 245, delta=3.0)
         self.assertGreaterEqual(result.confidence, 0.6)
 
+    def test_candidate_circle_ranking_discrimination(self):
+        """Verify _rank_candidate_circles selects the true circular boundary over internal glare."""
+        roi = np.full((280, 280), 50, dtype=np.uint8)
+        # Bright nozzle body with dark circular orifice at (180, 140), radius 22
+        cv2.circle(roi, (180, 140), 35, 200, -1)
+        cv2.circle(roi, (180, 140), 22, 20, -1)
+        # Faint spurious circle closer to center (145, 140), radius 12
+        cv2.circle(roi, (145, 140), 12, 70, -1)
+
+        candidates = np.array([
+            [145.0, 140.0, 12.0],  # Faint background artifact
+            [180.0, 140.0, 22.0],  # True nozzle circular orifice
+        ], dtype=np.float32)
+
+        best = self.detector._rank_candidate_circles(
+            gray_roi=roi,
+            candidates=candidates,
+            frame_w=640,
+            frame_h=480,
+            roi_x0=180,
+            roi_y0=100,
+            d0=140.0
+        )
+        self.assertIsNotNone(best)
+        self.assertAlmostEqual(best[0], 180.0, delta=1.0)
+        self.assertAlmostEqual(best[1], 140.0, delta=1.0)
+        self.assertAlmostEqual(best[2], 22.0, delta=1.0)
+
 
 class TestVisualDebugger(unittest.TestCase):
     def test_frame_generation(self):

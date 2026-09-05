@@ -212,6 +212,59 @@ class NozzleDetector:
         except Exception:
             return cx, cy
 
+    def _rank_candidate_circles(
+        self,
+        gray_roi: np.ndarray,
+        candidates: np.ndarray,
+        frame_w: int,
+        frame_h: int,
+        roi_x0: int,
+        roi_y0: int,
+        d0: float = 140.0
+    ) -> Optional[np.ndarray]:
+        """
+        Ranks candidate circles returned by Hough transform using upper-arc radial gradient
+        projection combined with a soft distance prior from the optical center.
+        """
+        if candidates is None or len(candidates) == 0:
+            return None
+
+        h, w = gray_roi.shape[:2]
+        gx = cv2.Sobel(gray_roi, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray_roi, cv2.CV_32F, 0, 1, ksize=3)
+        up_angles = np.linspace(-np.pi * 0.85, -np.pi * 0.15, 30)
+        cos_up = np.cos(up_angles).astype(np.float32)
+        sin_up = np.sin(up_angles).astype(np.float32)
+
+        scored = []
+        center_x, center_y = frame_w / 2.0, frame_h / 2.0
+
+        for c in candidates:
+            cx, cy, r = float(c[0]), float(c[1]), float(c[2])
+            px = cx + r * cos_up
+            py = cy + r * sin_up
+            valid = (px >= 1) & (px < w - 1) & (py >= 1) & (py < h - 1)
+            if np.sum(valid) < 15:
+                continue
+            ix = np.round(px[valid]).astype(int)
+            iy = np.round(py[valid]).astype(int)
+            proj = gx[iy, ix] * cos_up[valid] + gy[iy, ix] * sin_up[valid]
+            up_score = float(np.mean(np.abs(proj)))
+
+            # Distance weighting relative to optical center
+            global_cx = roi_x0 + cx
+            global_cy = roi_y0 + cy
+            dist = math.hypot(global_cx - center_x, global_cy - center_y)
+            w_dist = 1.0 / (1.0 + (dist / d0) ** 2)
+            total_score = up_score * w_dist
+            scored.append((total_score, c))
+
+        if not scored:
+            return candidates[0]
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][1]
+
     def detect_curvature_circle(self, frame: np.ndarray) -> Optional[Tuple[float, float, float]]:
         """
         High-precision Tier 0 detector using bilateral edge filtering, Hough circular curvature,
@@ -240,12 +293,13 @@ class NozzleDetector:
             minRadius=7,
             maxRadius=25
         )
+        proc_gray = gray
         if circles is None or len(circles) == 0:
             # Low-light & dim-illumination adaptive enhancement via CLAHE
             if gray.mean() < 90 or gray.std() < 35:
                 clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-                enhanced = clahe.apply(gray)
-                bilateral_enh = cv2.bilateralFilter(enhanced, 9, 75, 75)
+                proc_gray = clahe.apply(gray)
+                bilateral_enh = cv2.bilateralFilter(proc_gray, 9, 75, 75)
                 circles = cv2.HoughCircles(
                     bilateral_enh,
                     cv2.HOUGH_GRADIENT,
@@ -260,9 +314,10 @@ class NozzleDetector:
         if circles is None or len(circles) == 0:
             return None
 
-        roi_cx, roi_cy = cx_center - x0, cy_center - y0
-        c_list = sorted(circles[0], key=lambda c: np.hypot(c[0] - roi_cx, c[1] - roi_cy))
-        best = c_list[0]
+        # Rank candidate circles by upper-arc radial gradient contrast and distance prior
+        best = self._rank_candidate_circles(proc_gray, circles[0], w, h, x0, y0)
+        if best is None:
+            return None
 
         # Refine candidate within ROI using upper-arc gradient symmetry
         refined_local = self._refine_upper_arc_symmetry(gray, float(best[0]), float(best[1]), float(best[2]), max_shift=4.0)

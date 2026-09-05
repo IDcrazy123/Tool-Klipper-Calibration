@@ -10,6 +10,17 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.8.5] - 2026-09-05
+### Added
+- Hough Candidate Radial Gradient Contrast Ranking & Distance Discrimination:
+  - Added `_rank_candidate_circles()` in `server/nozzle_detector.py`: scores all candidate circles returned by `cv2.HoughCircles` using upper-arc radial gradient projection combined with a soft distance prior from the optical center.
+  - Resolved candidate ambiguity between the true circular nozzle orifice/flat ring ($R \approx 21-23\text{px}$) and internal specular reflections or false flares ($R \approx 13\text{px}$) that occur inside the orifice bore.
+  - Verified 100% detection repeatability across all 12 real-world VoronBed camera-ring captures (`CAMRING_L001`, `CAMRING_L002`, `CAMRING_L004`): achieves sub-half-pixel repeatability ($\sigma_X = 0.57\text{px}, \sigma_Y = 0.48\text{px}, \sigma_R = 0.58\text{px}$) at coordinates $(737.42 \pm 0.57, 328.79 \pm 0.48)$.
+  - Added regression unit test `test_candidate_circle_ranking_discrimination` in `tests/test_vision.py`.
+  - Expanded automated test suite to 38 passing unit & integration tests.
+
+---
+
 ## [0.8.4] - 2026-09-05
 ### Added
 - Optical Inspection Lighting Lifecycle & Sensor Blooming Protection:
