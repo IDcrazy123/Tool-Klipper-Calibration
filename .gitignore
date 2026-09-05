@@ -1,0 +1,59 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Klipper & Moonraker backups
+*.cfg.calib_backup_*
+*.backup
+*.bak
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temporary calibration runtime frames
+scratch/
+test_output/
+*.jpg
+*.png
+
+# Local reference repositories (keep locally for development)
+References/
