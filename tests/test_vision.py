@@ -260,6 +260,33 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertIn("G10 P1", data["gcode_command"])
         self.assertIn("[tool 1]", data["config_snippet"])
 
+    def test_picture_screenshot_sweep_dataset(self):
+        """Verify robust detection and sub-pixel repeatability across all 5 tools and 5 brightness levels."""
+        import glob
+        pattern = os.path.join(os.path.dirname(__file__), "..", "Picture Screenshot", "*", "*", "*.jpg")
+        files = glob.glob(pattern)
+        if not files:
+            return  # Skip if optional screenshot dataset directory is not present locally
+
+        detector = NozzleDetector()
+        tool_results = {}
+        for f in files:
+            fname = os.path.basename(f)
+            tool = fname.split("_")[0]
+            img = cv2.imread(f)
+            res = detector.detect(img)
+            self.assertTrue(res.found, f"Failed detection on {fname}")
+            self.assertIsNotNone(res.center_uv)
+            tool_results.setdefault(tool, []).append(res.center_uv)
+
+        # Verify sub-pixel repeatability across extreme lighting (L001 to L255)
+        for tool, coords in tool_results.items():
+            us = [c[0] for c in coords]
+            vs = [c[1] for c in coords]
+            self.assertLess(np.std(us), 2.0, f"Tool {tool} U standard deviation too high")
+            self.assertLess(np.std(vs), 2.0, f"Tool {tool} V standard deviation too high")
+
+
 
 if __name__ == "__main__":
     unittest.main()

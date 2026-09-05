@@ -194,15 +194,14 @@ class NozzleDetector:
         self, gray: np.ndarray, cx: float, cy: float, radius: float, max_shift: float = 4.0
     ) -> Tuple[float, float]:
         """
-        Refines nozzle center by optimizing radial gradient consistency along the upper arc
-        (150-deg to 30-deg elevation) with continuous sub-pixel bilinear sampling and two-stage
-        coarse-to-fine optimization (< 0.05px resolution). Completely avoids downward conical
-        specular glare flares.
+        Refines nozzle center by optimizing radial gradient consistency across 360 degrees with
+        robust trimmed-quantile scoring (discarding shadows/flares) and continuous sub-pixel
+        bilinear sampling (< 0.05px resolution).
         """
         try:
             gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
             gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            angles = np.linspace(-np.pi * 0.85, -np.pi * 0.15, 30)
+            angles = np.linspace(0, 2 * np.pi, 36, endpoint=False)
             cos_a = np.cos(angles).astype(np.float32)
             sin_a = np.sin(angles).astype(np.float32)
             h, w = gray.shape[:2]
@@ -220,7 +219,11 @@ class NozzleDetector:
                 samp_gy = self._sample_bilinear_vec(gy, px, py)
                 proj = np.abs(samp_gx * cos_a[None, None, :] + samp_gy * sin_a[None, None, :])
                 proj = np.where(valid, proj, 0.0)
-                scores = np.mean(proj, axis=2)
+                
+                # Trimmed quantile mean: take top 60% of radial projections (drops shadow/glare quadrant)
+                sorted_proj = np.sort(proj, axis=2)
+                k = int(36 * 0.40)
+                scores = np.mean(sorted_proj[:, :, k:], axis=2)
                 best_idx = np.unravel_index(np.argmax(scores), scores.shape)
                 return float(x_cand[best_idx]), float(y_cand[best_idx])
 
@@ -243,8 +246,8 @@ class NozzleDetector:
         d0: Optional[float] = None
     ) -> Optional[np.ndarray]:
         """
-        Ranks candidate circles returned by Hough transform using upper-arc radial gradient
-        projection combined with a soft distance prior from the optical center.
+        Ranks candidate circles returned by Hough transform using omnidirectional robust
+        trimmed-quantile radial gradient projection combined with a soft optical center distance prior.
         """
         if candidates is None or len(candidates) == 0:
             return None
@@ -255,31 +258,35 @@ class NozzleDetector:
         h, w = gray_roi.shape[:2]
         gx = cv2.Sobel(gray_roi, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray_roi, cv2.CV_32F, 0, 1, ksize=3)
-        up_angles = np.linspace(-np.pi * 0.85, -np.pi * 0.15, 30)
-        cos_up = np.cos(up_angles).astype(np.float32)
-        sin_up = np.sin(up_angles).astype(np.float32)
+        angles = np.linspace(0, 2 * np.pi, 36, endpoint=False)
+        cos_a = np.cos(angles).astype(np.float32)
+        sin_a = np.sin(angles).astype(np.float32)
 
         scored = []
         center_x, center_y = frame_w / 2.0, frame_h / 2.0
 
         for c in candidates:
             cx, cy, r = float(c[0]), float(c[1]), float(c[2])
-            px = cx + r * cos_up
-            py = cy + r * sin_up
+            px = cx + r * cos_a
+            py = cy + r * sin_a
             valid = (px >= 1) & (px < w - 1) & (py >= 1) & (py < h - 1)
-            if np.sum(valid) < 15:
+            if np.sum(valid) < 20:
                 continue
             ix = np.round(px[valid]).astype(int)
             iy = np.round(py[valid]).astype(int)
-            proj = gx[iy, ix] * cos_up[valid] + gy[iy, ix] * sin_up[valid]
-            up_score = float(np.mean(np.abs(proj)))
+            proj = np.abs(gx[iy, ix] * cos_a[valid] + gy[iy, ix] * sin_a[valid])
+            
+            # Trimmed quantile mean: take top 60% of radial projections
+            sorted_proj = np.sort(proj)
+            k = int(len(sorted_proj) * 0.40)
+            arc_score = float(np.mean(sorted_proj[k:]))
 
             # Distance weighting relative to optical center
             global_cx = roi_x0 + cx
             global_cy = roi_y0 + cy
             dist = math.hypot(global_cx - center_x, global_cy - center_y)
             w_dist = 1.0 / (1.0 + (dist / d0) ** 2)
-            total_score = up_score * w_dist
+            total_score = arc_score * w_dist
             scored.append((total_score, c))
 
         if not scored:
