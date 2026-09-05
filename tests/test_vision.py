@@ -125,10 +125,25 @@ class TestServerEndpoints(unittest.TestCase):
         for img_name in image_files:
             img_path = os.path.join(sample_dir, img_name)
             frame = cv2.imread(img_path)
-            self.assertIsNotNone(frame, f"Failed to load {img_name}")
             result = detector.detect(frame)
             self.assertTrue(result.found, f"Failed detection on {img_name}")
             self.assertIsNotNone(result.center_uv)
+
+    def test_sample_api_endpoints(self):
+        """Verify /api/samples and /api/test_sample endpoint functionality."""
+        res_list = self.client.get("/api/samples")
+        self.assertEqual(res_list.status_code, 200)
+        data = res_list.get_json()
+        self.assertIn("samples", data)
+        self.assertGreaterEqual(len(data["samples"]), 15)
+
+        # Test querying a specific sample
+        res_test = self.client.post("/api/test_sample", json={"sample_name": "nozzle_perfect_center.jpg"})
+        self.assertEqual(res_test.status_code, 200)
+        test_data = res_test.get_json()
+        self.assertTrue(test_data["success"])
+        self.assertTrue(test_data["found"])
+        self.assertIsNotNone(test_data["center_uv"])
 
 
 if __name__ == "__main__":

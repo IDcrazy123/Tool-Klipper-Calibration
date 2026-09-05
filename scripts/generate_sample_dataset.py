@@ -96,6 +96,31 @@ def main():
         add_debris=True
     )
 
+    # 7. Conical specular glare flare simulation
+    img_flare = np.full((480, 640, 3), 35, dtype=np.uint8)
+    cx, cy = 320, 240
+    # Outer conical body
+    cv2.circle(img_flare, (cx, cy), 42, (180, 180, 180), -1)
+    # Downward specular flare wedge
+    flare_pts = np.array([[cx - 20, cy + 10], [cx + 20, cy + 10], [cx + 60, cy + 120], [cx - 60, cy + 120]], np.int32)
+    cv2.fillPoly(img_flare, [flare_pts], (240, 240, 255))
+    cv2.circle(img_flare, (cx, cy), 18, (12, 12, 12), -1)
+    img_flare = cv2.GaussianBlur(img_flare, (5, 5), 1.5)
+    cv2.imwrite(os.path.join(out_dir, "sim_conical_glare_flare.jpg"), img_flare)
+
+    # 8. Ruby gemstone nozzle simulation
+    img_ruby = np.full((480, 640, 3), 40, dtype=np.uint8)
+    # Metallic outer face
+    cv2.circle(img_ruby, (cx, cy), 42, (200, 200, 210), -1)
+    # Ruby insert (reddish-pink)
+    cv2.circle(img_ruby, (cx, cy), 22, (180, 50, 160), -1)
+    # Central micro orifice
+    cv2.circle(img_ruby, (cx, cy), 6, (10, 10, 10), -1)
+    img_ruby = cv2.GaussianBlur(img_ruby, (3, 3), 1.0)
+    cv2.imwrite(os.path.join(out_dir, "sim_ruby_gemstone.jpg"), img_ruby)
+
+    print("Successfully populated realistic benchmark datasets.")
+
 
 if __name__ == "__main__":
     main()

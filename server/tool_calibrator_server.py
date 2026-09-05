@@ -51,7 +51,7 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.1.0",
+        "version": "0.8.1",
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,
         "calibrated_mpp": solver.mpp
@@ -238,6 +238,54 @@ def calculate_offset():
     except Exception as ex:
         logger.exception("Error in /calculate_offset")
         return jsonify({"success": False, "error": str(ex)}), 400
+
+
+@app.route("/api/samples", methods=["GET"])
+def list_samples():
+    """Lists available benchmark test samples."""
+    sample_dir = os.path.join(os.path.dirname(__file__), "..", "tests", "sample_images")
+    if not os.path.exists(sample_dir):
+        return jsonify({"samples": []})
+    files = sorted([f for f in os.listdir(sample_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+    return jsonify({"samples": files})
+
+
+@app.route("/api/test_sample", methods=["POST"])
+def test_sample():
+    """Runs nozzle detection on a named benchmark image."""
+    try:
+        data = request.get_json(silent=True) or {}
+        sample_name = data.get("sample_name")
+        if not sample_name:
+            return jsonify({"success": False, "error": "Missing 'sample_name'"}), 400
+
+        sample_dir = os.path.join(os.path.dirname(__file__), "..", "tests", "sample_images")
+        sample_path = os.path.abspath(os.path.join(sample_dir, os.path.basename(sample_name)))
+        if not os.path.exists(sample_path):
+            return jsonify({"success": False, "error": f"Sample file not found: {sample_name}"}), 404
+
+        import cv2
+        frame = cv2.imread(sample_path)
+        if frame is None:
+            return jsonify({"success": False, "error": "Failed to decode sample image"}), 400
+
+        result = detector.detect(frame)
+        status_text = f"SAMPLE: {sample_name} (Tier {result.tier})" if result.found else "SEARCHING..."
+        debugger.update_frame(result.annotated_frame, status_text)
+
+        return jsonify({
+            "success": True,
+            "found": result.found,
+            "center_uv": result.center_uv,
+            "radius": result.radius,
+            "confidence": result.confidence,
+            "tier": result.tier,
+            "combo": result.combo,
+            "sample_name": sample_name
+        }), 200
+    except Exception as ex:
+        logger.exception("Error in /api/test_sample")
+        return jsonify({"success": False, "error": str(ex)}), 500
 
 
 def _fetch_live_frame():
