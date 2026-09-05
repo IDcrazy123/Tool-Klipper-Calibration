@@ -224,11 +224,16 @@ def calculate_offset():
         return jsonify({"success": False, "error": str(ex)}), 400
 
 
+def _fetch_live_frame():
+    frame, _ = grabber.grab_frame()
+    return frame
+
+
 @app.route("/preview", methods=["GET"])
 def live_preview():
     """Serves real-time annotated MJPEG preview stream."""
     return Response(
-        debugger.mjpeg_generator(),
+        debugger.mjpeg_generator(frame_fetcher=_fetch_live_frame),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
 
@@ -245,7 +250,19 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host address to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8090, help="Port to listen on (default: 8090)")
     parser.add_argument("--threads", type=int, default=4, help="Waitress worker threads (default: 4)")
+    parser.add_argument("--camera-url", default=None, help="Camera snapshot stream URL")
+    parser.add_argument("--mpp", type=float, default=None, help="Pre-calibrated mm-per-pixel scale")
     args = parser.parse_args()
+
+    # Configure camera URL if provided via CLI flag or env var
+    cam_url = args.camera_url or os.environ.get("CAMERA_STREAM_URL")
+    if cam_url:
+        grabber.set_camera_url(cam_url)
+        logger.info(f"Initialized Camera URL: {grabber.camera_url}")
+
+    if args.mpp:
+        solver.set_mpp(args.mpp)
+        logger.info(f"Initialized Scale MPP: {solver.mpp:.5f} mm/px")
 
     logger.info(f"Starting Tool-Klipper-Calibration Vision Daemon on {args.host}:{args.port}")
     serve(app, host=args.host, port=args.port, threads=args.threads)

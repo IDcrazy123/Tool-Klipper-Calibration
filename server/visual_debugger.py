@@ -49,19 +49,31 @@ class VisualDebugger:
         )
         return frame
 
-    def update_frame(self, frame: np.ndarray, status_overlay: Optional[str] = None) -> None:
+    def update_frame(self, frame: np.ndarray, status_overlay: Optional[str] = None, show_crosshairs: bool = True) -> None:
         """
-        Updates the internal frame buffer with optional status HUD.
+        Updates the internal frame buffer with status HUD and optical reticle.
         """
         display_frame = frame.copy()
         if status_overlay is not None:
             self.hud_text = status_overlay
 
+        h, w = display_frame.shape[:2]
+        cx, cy = w // 2, h // 2
+
+        # Draw subtle optical crosshairs and center circle if enabled
+        if show_crosshairs:
+            # Full screen axis lines in dim amber
+            cv2.line(display_frame, (cx, 0), (cx, h), (0, 140, 200), 1, cv2.LINE_AA)
+            cv2.line(display_frame, (0, cy), (w, cy), (0, 140, 200), 1, cv2.LINE_AA)
+            # Center target bullseye rings
+            cv2.circle(display_frame, (cx, cy), 15, (0, 220, 255), 1, cv2.LINE_AA)
+            cv2.circle(display_frame, (cx, cy), 30, (0, 180, 230), 1, cv2.LINE_AA)
+
         # Draw HUD header bar
-        cv2.rectangle(display_frame, (0, 0), (display_frame.shape[1], 30), (0, 0, 0), -1)
+        cv2.rectangle(display_frame, (0, 0), (w, 32), (15, 23, 42), -1)
         cv2.putText(
-            display_frame, f"STATUS: {self.hud_text}", (10, 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 1, cv2.LINE_AA
+            display_frame, f"STATUS: {self.hud_text}", (12, 21),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (56, 189, 248), 1, cv2.LINE_AA
         )
 
         with self._lock:
@@ -78,13 +90,22 @@ class VisualDebugger:
             return buffer.tobytes()
         return b""
 
-    def mjpeg_generator(self) -> Generator[bytes, None, None]:
+    def mjpeg_generator(self, frame_fetcher: Optional[Any] = None) -> Generator[bytes, None, None]:
         """
         Yields multipart HTTP responses for MJPEG browser streams.
+        Optionally polls frame_fetcher to continuously update live stream.
         """
         frame_interval = 1.0 / max(1, self._fps)
         while True:
             start = time.time()
+            if frame_fetcher is not None:
+                try:
+                    raw_frame = frame_fetcher()
+                    if raw_frame is not None:
+                        self.update_frame(raw_frame)
+                except Exception:
+                    pass
+
             jpeg_bytes = self.get_latest_jpeg()
             if jpeg_bytes:
                 yield (
@@ -93,5 +114,5 @@ class VisualDebugger:
                 )
 
             elapsed = time.time() - start
-            sleep_time = max(0.01, frame_interval - elapsed)
+            sleep_time = max(0.02, frame_interval - elapsed)
             time.sleep(sleep_time)
