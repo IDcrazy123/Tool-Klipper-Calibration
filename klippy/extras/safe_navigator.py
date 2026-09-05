@@ -214,12 +214,12 @@ class SafeNavigator:
             toolhead.manual_move([None, None, effective_safe_z], self.z_speed)
             toolhead.wait_moves()
 
-    def approach_camera(self, toolhead, gcode_move) -> None:
+    def approach_camera(self, toolhead, gcode_move, target_z: Optional[float] = None) -> None:
         """
         Executes 3-tier safe transition into the Camera Station:
         1. Raise Z to Safe_Z.
         2. Rapid XY travel to Camera Safe Approach point.
-        3. Descend Z to focal height.
+        3. Descend Z to focal height (or compensated focal altitude for secondary tools).
         4. Slow creep XY into Camera optical center.
         """
         if not self.is_homed():
@@ -227,6 +227,8 @@ class SafeNavigator:
 
         if self.cam_target_x is None or self.cam_target_y is None:
             raise SafeNavigatorException("Camera target coordinates (camera_x, camera_y) not configured.")
+
+        effective_focal_z = target_z if target_z is not None else self.cam_target_z
 
         # Automatic approach vector towards bed center if not explicitly taught
         if self.cam_approach_x is not None and self.cam_approach_y is not None:
@@ -236,7 +238,7 @@ class SafeNavigator:
 
         # Validate coordinate safety against user's physical printer boundaries
         self.validate_coordinate_safety(x=app_x, y=app_y)
-        self.validate_coordinate_safety(x=self.cam_target_x, y=self.cam_target_y, z=self.cam_target_z)
+        self.validate_coordinate_safety(x=self.cam_target_x, y=self.cam_target_y, z=effective_focal_z)
 
         # Step 1: Vertical lift to safe clearance
         self.move_to_safe_z(toolhead, gcode_move)
@@ -246,7 +248,7 @@ class SafeNavigator:
         toolhead.wait_moves()
 
         # Step 3: Descend Z to focal altitude
-        toolhead.manual_move([None, None, self.cam_target_z], self.z_speed)
+        toolhead.manual_move([None, None, effective_focal_z], self.z_speed)
         toolhead.wait_moves()
 
         # Step 4: Controlled low-speed lateral entry into optical center

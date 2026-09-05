@@ -299,6 +299,68 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("[tool_calibrator_station camera]", content)
         self.assertIn("mpp: 0.015", content)
 
+    def test_generic_tool_discovery(self):
+        """Verifies toolhead discovery across diverse Klipper toolchanger architectures."""
+        calibrator = ToolCalibrator(self.config)
+
+        # Case 1: Explicit TOOLS parameter
+        tools = calibrator._discover_tools(tools_param="2,3")
+        self.assertEqual(tools, [0, 2, 3])
+
+        # Case 2: Config tools parameter
+        calibrator.config.data["tools"] = "0, 1, 2"
+        tools = calibrator._discover_tools(tools_param=None)
+        self.assertEqual(tools, [0, 1, 2])
+        del calibrator.config.data["tools"]
+
+        # Case 3: Auto-discovered from printer objects (e.g. gcode_macro T0, T1, T2)
+        calibrator.printer.lookup_object = lambda name, default=None: None
+        calibrator.printer.lookup_objects = lambda: {
+            "gcode_macro T0": MagicMock(),
+            "gcode_macro T1": MagicMock(),
+            "gcode_macro T2": MagicMock(),
+            "toolhead": self.toolhead,
+        }
+        tools = calibrator._discover_tools(tools_param=None)
+        self.assertEqual(tools, [0, 1, 2])
+
+    def test_calibration_order_z_first(self):
+        """ORDER=Z_FIRST must execute Z probing before XY camera inspection."""
+        calibrator = ToolCalibrator(self.config)
+        execution_order = []
+
+        def mock_query_vision(endpoint, payload=None, timeout=2.0):
+            if endpoint == "detect_nozzle":
+                execution_order.append("XY_DETECT")
+                return {"found": True, "center_uv": [320.0, 240.0], "radius": 45}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            elif endpoint == "health":
+                return {"service": "mock", "version": "1.0"}
+            return {}
+
+        calibrator._query_vision = mock_query_vision
+        original_probe_ref = calibrator.z_backend.probe_reference_tool
+        def mock_probe_ref(tool, gcmd):
+            execution_order.append("Z_PROBE_REF")
+            return {"source": "switch", "baseline_z": 15.0}
+        calibrator.z_backend.probe_reference_tool = mock_probe_ref
+
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 1,
+            "CALIBRATE_Z": 1,
+            "SAVE_CONFIG": 0,
+            "DRY_RUN": 0,
+            "ORDER": "Z_FIRST",
+            "TOOLS": "0"
+        })
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+        # Z should run before XY
+        self.assertIn("Z_PROBE_REF", execution_order)
+        self.assertIn("XY_DETECT", execution_order)
+        self.assertLess(execution_order.index("Z_PROBE_REF"), execution_order.index("XY_DETECT"))
+
 
 if __name__ == "__main__":
     unittest.main()

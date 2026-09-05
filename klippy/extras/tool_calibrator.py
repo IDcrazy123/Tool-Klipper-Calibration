@@ -175,6 +175,115 @@ class ToolCalibrator:
 
         gcmd.respond_info(f"  -> Warning: Centering reached max iterations ({self.max_centering_iterations}).")
 
+    def _discover_tools(self, tools_param: Optional[str] = None) -> List[int]:
+        """
+        Discovers toolhead sequence across ANY Klipper toolchanger setup:
+        1. Explicit TOOLS parameter (e.g. TOOLS=1 or TOOLS=0,1,2,3).
+        2. Configured tools in [tool_calibrator] (e.g. tools: 0, 1, 2, 3).
+        3. [toolchanger] object (toolchanger.tool_numbers or toolchanger.tools).
+        4. Auto-scanned Klipper objects: [tool 0], [tool 1], ... or [gcode_macro T0], [gcode_macro T1], ...
+        5. Fallback to reference_tool.
+        """
+        if tools_param is not None:
+            try:
+                selected = [int(p.strip()) for p in str(tools_param).split(",") if p.strip()]
+            except ValueError:
+                raise SafeNavigatorException(f"Invalid TOOLS parameter: '{tools_param}'. Must be comma-separated integers.")
+            if not selected:
+                raise SafeNavigatorException("TOOLS parameter cannot be empty.")
+            if self.reference_tool not in selected:
+                return [self.reference_tool] + selected
+            return [self.reference_tool] + [t for t in selected if t != self.reference_tool]
+
+        # 1. Configured tools in [tool_calibrator]
+        cfg_tools_str = self.config.get("tools", None)
+        if cfg_tools_str:
+            try:
+                cfg_tools = [int(p.strip()) for p in str(cfg_tools_str).split(",") if p.strip()]
+                if cfg_tools:
+                    return [self.reference_tool] + [t for t in sorted(set(cfg_tools)) if t != self.reference_tool]
+            except ValueError:
+                pass
+
+        # 2. Query [toolchanger] object if loaded
+        toolchanger = self.printer.lookup_object("toolchanger", None)
+        if toolchanger is not None:
+            if hasattr(toolchanger, "tool_numbers") and toolchanger.tool_numbers:
+                all_t = list(toolchanger.tool_numbers)
+                return [self.reference_tool] + [t for t in sorted(set(all_t)) if t != self.reference_tool]
+            if hasattr(toolchanger, "tools") and toolchanger.tools:
+                all_t = []
+                for idx, t in enumerate(toolchanger.tools):
+                    tn = getattr(t, "tool_number", None)
+                    all_t.append(int(tn) if tn is not None else idx)
+                return [self.reference_tool] + [t for t in sorted(set(all_t)) if t != self.reference_tool]
+
+        # 3. Dynamic scan across all loaded Klipper objects (e.g. [tool 0], [tool 1], [gcode_macro T0], [gcode_macro T1])
+        discovered = set()
+        try:
+            loaded_objs = self.printer.lookup_objects() if hasattr(self.printer, "lookup_objects") else {}
+            import re
+            for name in loaded_objs.keys():
+                m_tool = re.match(r"^tool\s+(?:T)?(\d+)$", name, re.IGNORECASE)
+                if m_tool:
+                    discovered.add(int(m_tool.group(1)))
+                    continue
+                m_macro = re.match(r"^gcode_macro\s+T(\d+)$", name, re.IGNORECASE)
+                if m_macro:
+                    discovered.add(int(m_macro.group(1)))
+        except Exception:
+            pass
+
+        if discovered:
+            return [self.reference_tool] + [t for t in sorted(discovered) if t != self.reference_tool]
+
+        return [self.reference_tool]
+
+    def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None) -> List[float]:
+        """Executes optical camera alignment for a single tool."""
+        gcmd.respond_info(f"[T{tool_no}] Entering Camera Station...")
+        self.navigator.approach_camera(toolhead, gcode_move, target_z=target_focal_z)
+        self._center_nozzle(toolhead, gcmd)
+        raw_pos = toolhead.get_position()
+
+        if tool_no == self.reference_tool:
+            ref_xy = [raw_pos[0], raw_pos[1]]
+            gcmd.respond_info(f"[T{tool_no}] Reference Optical Origin set to X{raw_pos[0]:.3f} Y{raw_pos[1]:.3f}")
+            self.navigator.depart_station(toolhead, gcode_move)
+            return ref_xy
+        else:
+            if reference_origin_xy is None:
+                raise SafeNavigatorException(f"Reference tool T{self.reference_tool} optical origin has not been established.")
+            dx = round(raw_pos[0] - reference_origin_xy[0], 3)
+            dy = round(raw_pos[1] - reference_origin_xy[1], 3)
+            tool_offsets["x"] = dx
+            tool_offsets["y"] = dy
+            gcmd.respond_info(f"[T{tool_no}] Calculated XY Offsets: X{dx:+.3f}mm Y{dy:+.3f}mm")
+            self.navigator.depart_station(toolhead, gcode_move)
+            return reference_origin_xy
+
+    def _execute_z_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_z_result: Dict[str, Any], tool_offsets: Dict[str, float]) -> Dict[str, Any]:
+        """Executes Z probing alignment for a single tool."""
+        gcmd.respond_info(f"[T{tool_no}] Entering Z Probe Station...")
+        if self.z_backend_type == "switch":
+            self.navigator.approach_switch(toolhead, gcode_move)
+        else:
+            self.navigator.move_to_safe_z(toolhead, gcode_move)
+            if self.z_backend.probe_x is not None and self.z_backend.probe_y is not None:
+                toolhead.manual_move([self.z_backend.probe_x, self.z_backend.probe_y, None], self.navigator.travel_speed)
+
+        if tool_no == self.reference_tool:
+            ref_z = self.z_backend.probe_reference_tool(tool_no, gcmd)
+            gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established ({ref_z.get('source')})")
+            self.navigator.depart_station(toolhead, gcode_move)
+            return ref_z
+        else:
+            z_res = self.z_backend.probe_secondary_tool(tool_no, reference_z_result, gcmd)
+            tool_offsets["z"] = z_res.get("suggested_z_offset", 0.0)
+            gcmd.respond_info(f"[T{tool_no}] Calculated Z Offset: Z{tool_offsets['z']:+.3f}mm")
+            self.navigator.depart_station(toolhead, gcode_move)
+            return reference_z_result
+
     def cmd_CALIBRATE_TOOL_OFFSETS(self, gcmd) -> None:
         """
         Full 1-Click End-to-End Calibration Command.
@@ -183,19 +292,22 @@ class ToolCalibrator:
             CALIBRATE_Z (int): 1 to run Z probing (default: 1)
             SAVE_CONFIG (int): 1 to persist offsets to disk (default: 1)
             DRY_RUN (int): 1 to simulate without physical touch or disk saves (default: 0)
-            CLEAN_NOZZLE (int): 1 to run nozzle cleaning macro/hook prior to vision (default: 0)
-            TOOLS (str): Comma-separated list of tool indices to calibrate (e.g. TOOLS=1 or TOOLS=1,2)
+            CLEAN_NOZZLE (int): 1 to run nozzle cleaning hook prior to vision if available (default: 0)
+            ORDER (str): 'XY_FIRST' (default) or 'Z_FIRST'
+            COMPENSATE_FOCAL_Z (int): 1 to adjust camera height by measured Z offset (default: 0)
+            TOOLS (str): Comma-separated list of tool indices (e.g. TOOLS=1 or TOOLS=1,2)
         """
         calibrate_xy = gcmd.get_int("CALIBRATE_XY", 1) == 1
         calibrate_z = gcmd.get_int("CALIBRATE_Z", 1) == 1
         save_config = gcmd.get_int("SAVE_CONFIG", 1) == 1
         dry_run = gcmd.get_int("DRY_RUN", 0) == 1
         clean_nozzle = gcmd.get_int("CLEAN_NOZZLE", 0) == 1
+        order = gcmd.get("ORDER", "XY_FIRST").upper()
+        compensate_focal_z = gcmd.get_int("COMPENSATE_FOCAL_Z", 0) == 1
         tools_param = gcmd.get("TOOLS", None)
 
         toolhead = self.printer.lookup_object("toolhead")
         gcode_move = self.printer.lookup_object("gcode_move")
-        toolchanger = self.printer.lookup_object("toolchanger", None)
 
         if not self.navigator.is_homed():
             gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before calibration.")
@@ -209,29 +321,14 @@ class ToolCalibrator:
             gcmd.respond_error(str(ex))
             return
 
-        # Discover tool sequence
-        if tools_param is not None:
-            try:
-                selected = [int(p.strip()) for p in str(tools_param).split(",") if p.strip()]
-            except ValueError:
-                gcmd.respond_error(f"Invalid TOOLS parameter: '{tools_param}'. Must be comma-separated integers.")
-                return
-            if not selected:
-                gcmd.respond_error("TOOLS parameter cannot be empty.")
-                return
-            if self.reference_tool not in selected:
-                ordered_tools = [self.reference_tool] + selected
-            else:
-                ordered_tools = [self.reference_tool] + [t for t in selected if t != self.reference_tool]
-        else:
-            ordered_tools = [self.reference_tool]
-            if toolchanger is not None and hasattr(toolchanger, "tool_numbers"):
-                all_tools = list(toolchanger.tool_numbers)
-                ordered_tools = [self.reference_tool] + [t for t in all_tools if t != self.reference_tool]
-            else:
-                gcmd.respond_info("[tool_calibrator] Note: [toolchanger] object not detected; calibrating active tool only.")
+        # Discover tool sequence across any toolchanger flavor
+        try:
+            ordered_tools = self._discover_tools(tools_param)
+        except SafeNavigatorException as ex:
+            gcmd.respond_error(str(ex))
+            return
 
-        gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Dry Run: {dry_run})")
+        gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
 
         # Execute start_gcode hook
         if self.start_gcode:
@@ -254,59 +351,47 @@ class ToolCalibrator:
 
                 toolhead.wait_moves()
 
-                # Optional nozzle cleaning prior to optical inspection
+                # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
                 if clean_nozzle:
                     if self.clean_nozzle_gcode:
                         gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
                         self.gcode_macro.run_script("clean_nozzle_gcode", self.clean_nozzle_gcode, {"TOOL": tool_no})
+                        toolhead.wait_moves()
                     else:
-                        try:
-                            self.gcode.run_script_from_command(f"_CLEAN_NOZZLE TOOL={tool_no}")
-                        except Exception:
-                            pass
-                    toolhead.wait_moves()
+                        clean_macro = self.printer.lookup_object("gcode_macro _CLEAN_NOZZLE", None)
+                        if clean_macro is not None:
+                            try:
+                                self.gcode.run_script_from_command(f"_CLEAN_NOZZLE TOOL={tool_no}")
+                                toolhead.wait_moves()
+                            except Exception:
+                                pass
+                        else:
+                            gcmd.respond_info(f"[tool_calibrator] Note: CLEAN_NOZZLE requested, but no cleaning macro is configured on this printer. Skipping.")
 
                 tool_offsets: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}
 
-                # Step A: XY Vision Calibration
-                if calibrate_xy:
-                    gcmd.respond_info(f"[T{tool_no}] Entering Camera Station...")
-                    self.navigator.approach_camera(toolhead, gcode_move)
-                    self._center_nozzle(toolhead, gcmd)
-                    raw_pos = toolhead.get_position()
-
-                    if tool_no == self.reference_tool:
-                        reference_origin_xy = [raw_pos[0], raw_pos[1]]
-                        gcmd.respond_info(f"[T{tool_no}] Reference Optical Origin set to X{raw_pos[0]:.3f} Y{raw_pos[1]:.3f}")
-                    else:
-                        dx = round(raw_pos[0] - reference_origin_xy[0], 3)
-                        dy = round(raw_pos[1] - reference_origin_xy[1], 3)
-                        tool_offsets["x"] = dx
-                        tool_offsets["y"] = dy
-                        gcmd.respond_info(f"[T{tool_no}] Calculated XY Offsets: X{dx:+.3f}mm Y{dy:+.3f}mm")
-
-                    self.navigator.depart_station(toolhead, gcode_move)
-
-                # Step B: Z Probing Calibration
-                if calibrate_z and not dry_run:
-                    gcmd.respond_info(f"[T{tool_no}] Entering Z Probe Station...")
-                    if self.z_backend_type == "switch":
-                        self.navigator.approach_switch(toolhead, gcode_move)
-                    else:
-                        # Cartographer moves to probe point
-                        self.navigator.move_to_safe_z(toolhead, gcode_move)
-                        if self.z_backend.probe_x is not None and self.z_backend.probe_y is not None:
-                            toolhead.manual_move([self.z_backend.probe_x, self.z_backend.probe_y, None], self.navigator.travel_speed)
-
-                    if tool_no == self.reference_tool:
-                        reference_z_result = self.z_backend.probe_reference_tool(tool_no, gcmd)
-                        gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established ({reference_z_result.get('source')})")
-                    else:
-                        z_res = self.z_backend.probe_secondary_tool(tool_no, reference_z_result, gcmd)
-                        tool_offsets["z"] = z_res.get("suggested_z_offset", 0.0)
-                        gcmd.respond_info(f"[T{tool_no}] Calculated Z Offset: Z{tool_offsets['z']:+.3f}mm")
-
-                    self.navigator.depart_station(toolhead, gcode_move)
+                # Calibration sequence execution by order
+                if order == "Z_FIRST":
+                    if calibrate_z and not dry_run:
+                        reference_z_result = self._execute_z_calibration(
+                            tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
+                        )
+                    if calibrate_xy:
+                        focal_z = None
+                        if compensate_focal_z and tool_no != self.reference_tool and "z" in tool_offsets:
+                            focal_z = self.navigator.cam_target_z + tool_offsets["z"]
+                        reference_origin_xy = self._execute_xy_calibration(
+                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z
+                        )
+                else:
+                    if calibrate_xy:
+                        reference_origin_xy = self._execute_xy_calibration(
+                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets
+                        )
+                    if calibrate_z and not dry_run:
+                        reference_z_result = self._execute_z_calibration(
+                            tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
+                        )
 
                 results[tool_no] = tool_offsets
 

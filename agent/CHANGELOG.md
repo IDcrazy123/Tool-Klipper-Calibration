@@ -12,12 +12,19 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ## [0.8.0] - 2026-09-05
 ### Added
+- Generic Multi-Toolchanger Architecture Discovery:
+  - Added `_discover_tools()` dynamically detecting toolheads across all Klipper setups: `[toolchanger]` (viesturs), `[tool 0..n]` objects, `[gcode_macro T0..n]`, or explicit config `tools: 0, 1, 2, 3`.
+  - Zero hardcoded assumptions: works out-of-the-box on Jubilee, StealthChanger, TapChanger, DXL, and custom macro-driven toolheads.
+- Flexible Calibration Sequencing & Optical Focal Plane Compensation:
+  - Added `ORDER` parameter to `CALIBRATE_TOOL_OFFSETS` supporting `XY_FIRST` (default) and `Z_FIRST`.
+  - Added `COMPENSATE_FOCAL_Z` support: when Z is probed first, automatically compensates camera focal height for tools with different physical hotend/nozzle lengths so all nozzles sit at the exact optical focal plane.
+- Non-Intrusive, Zero-Dependency Nozzle Cleaning:
+  - Nozzle cleaning made strictly optional (`CLEAN_NOZZLE=0` by default).
+  - Safe inspection: checks for `clean_nozzle_gcode` or `_CLEAN_NOZZLE` macro presence before execution; never raises errors or crashes on printers without cleaning hardware.
+  - `_CLEAN_NOZZLE` macro defaults to a silent no-op.
 - Real-World High-Contrast & Dim Illumination Vision Benchmarks:
   - Added user real-world Voron Stealth Changer camera frames (`nozzle_dim_lighting_eval1.jpg`, `nozzle_high_glare_eval2.jpg`) into regression fixtures.
   - 100% detection rate across all lighting extremes at Tier 1 with sub-pixel precision.
-- Nozzle Cleaning & Purge Integration:
-  - Added `CLEAN_NOZZLE` parameter to `CALIBRATE_ALL_TOOLS` and `CALIBRATE_TOOL` macros.
-  - Added `clean_nozzle_gcode` template hook in `klippy/extras/tool_calibrator.py` and default `_CLEAN_NOZZLE` macro.
 - Selective Tool Calibration:
   - `CALIBRATE_TOOL_OFFSETS` now supports `TOOLS` parameter (e.g. `TOOLS=1` or `TOOLS=1,2`) with automatic reference tool sequencing.
 - Configuration Robustness & Unit Normalization:
@@ -26,7 +33,7 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 - Multi-Threshold Median Slice Optimization in `server/nozzle_detector.py`:
   - Adjusted `minArea` from 250/180 down to 45/35/25 pixels to detect micro-orifices (< 0.4mm nozzle holes) under intense specular cone reflections.
   - Reordered cascades to evaluate Grayscale + Median multi-threshold sweep first, achieving Tier 1 lock on shiny brass nozzles without glare artifacts.
-  - Expanded test suite to 23 automated unit and integration tests.
+  - Expanded test suite to 25 automated unit and integration tests.
 
 ---
 
