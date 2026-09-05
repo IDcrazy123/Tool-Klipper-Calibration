@@ -74,6 +74,22 @@ def set_camera():
         return jsonify({"success": False, "error": str(ex)}), 500
 
 
+@app.route("/set_mpp", methods=["POST"])
+def set_mpp():
+    """Updates the calibrated mm-per-pixel scale."""
+    try:
+        data: Dict[str, Any] = request.get_json(force=True)
+        mpp = data.get("mpp")
+        if not mpp or float(mpp) <= 0:
+            return jsonify({"success": False, "error": "Invalid 'mpp' parameter"}), 400
+
+        solver.set_mpp(float(mpp))
+        return jsonify({"success": True, "mpp": solver.mpp}), 200
+    except Exception as ex:
+        logger.exception("Error in /set_mpp")
+        return jsonify({"success": False, "error": str(ex)}), 500
+
+
 @app.route("/detect_nozzle", methods=["POST"])
 def detect_nozzle():
     """

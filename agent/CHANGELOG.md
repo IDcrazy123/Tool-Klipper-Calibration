@@ -10,6 +10,19 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.7.0] - 2026-09-05
+### Added
+- Automated Star-Pattern Camera Scale & Matrix Calibration:
+  - New G-code command `CALIBRATE_CAMERA_SCALE [DISTANCE=1.0]` in `klippy/extras/tool_calibrator.py`.
+  - Automated 4-direction orthogonal displacement ($\pm X, \pm Y$) measuring real-time pixel shift vs physical travel.
+  - Automatically queries `/calibrate_mpp` and `/solve_matrix` on the vision server.
+  - Atomically saves the solved `mpp` scale directly into `tool_offsets.cfg` (`[tool_calibrator_station camera]`).
+  - New REST endpoint `/set_mpp` on `tool_calibrator_server.py` to synchronize calibrated scale.
+  - User macro `CALIBRATE_CAMERA_SCALE` added to `macros/tool_calibrator_macros.cfg`.
+  - Integration test `test_calibrate_camera_scale_star_pattern` in `tests/test_calibration_cycle.py` (22 total passing tests).
+
+---
+
 ## [0.6.0] - 2026-09-05
 ### Added
 - Interactive Vision Monitor & Diagnostics Web Dashboard:

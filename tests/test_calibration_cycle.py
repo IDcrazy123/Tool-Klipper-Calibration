@@ -270,6 +270,35 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("target_y: 10.000", content)
         self.assertIn("approach_y: 35.000", content)
 
+    def test_calibrate_camera_scale_star_pattern(self):
+        """CALIBRATE_CAMERA_SCALE must run star-pattern moves and save MPP."""
+        calibrator = ToolCalibrator(self.config)
+
+        def mock_query_vision(endpoint, payload=None, timeout=2.0):
+            if endpoint == "detect_nozzle":
+                # Returns dummy center
+                return {"found": True, "center_uv": [320.0, 240.0], "radius": 45}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            elif endpoint == "calibrate_mpp":
+                return {"success": True, "mpp": 0.01542}
+            elif endpoint == "solve_matrix":
+                return {"success": True}
+            return {}
+
+        calibrator._query_vision = mock_query_vision
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        gcmd = DummyGCodeCommand({"DISTANCE": 1.0})
+        calibrator.cmd_CALIBRATE_CAMERA_SCALE(gcmd)
+
+        self.assertTrue(os.path.exists(self.config_path))
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("[tool_calibrator_station camera]", content)
+        self.assertIn("mpp: 0.015", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,6 +68,7 @@ class ToolCalibrator:
 
         # Register G-Code Commands
         self.gcode.register_command("CALIBRATE_TOOL_OFFSETS", self.cmd_CALIBRATE_TOOL_OFFSETS, desc="Automated Full Tool Offset Calibration")
+        self.gcode.register_command("CALIBRATE_CAMERA_SCALE", self.cmd_CALIBRATE_CAMERA_SCALE, desc="Star-pattern Camera Scale and Affine Matrix Calibration")
         self.gcode.register_command("CALIBRATION_TEACH_STATION", self.cmd_CALIBRATION_TEACH_STATION, desc="1-Click Interactive Teaching & Auto-Persistence")
         self.gcode.register_command("CALIBRATION_SET_SAFE_POS", self.cmd_CALIBRATION_SET_SAFE_POS, desc="Interactive Safe Position Teaching")
         self.gcode.register_command("CALIBRATION_ROLLBACK_OFFSETS", self.cmd_CALIBRATION_ROLLBACK_OFFSETS, desc="Rollback to Previous Configuration Backup")
@@ -87,6 +88,12 @@ class ToolCalibrator:
                 self.navigator.cam_approach_x = float(cam_saved["approach_x"])
             if self.navigator.cam_approach_y is None and "approach_y" in cam_saved:
                 self.navigator.cam_approach_y = float(cam_saved["approach_y"])
+            if "mpp" in cam_saved:
+                self.calibrated_mpp = float(cam_saved["mpp"])
+                try:
+                    self._query_vision("set_mpp", {"mpp": self.calibrated_mpp})
+                except Exception:
+                    pass
 
         switch_saved = self.config_manager.load_section("tool_calibrator_station switch")
         if switch_saved:
@@ -385,6 +392,120 @@ class ToolCalibrator:
                 f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
                 f"  Saved to: {self.config_manager.config_path}"
             )
+
+    def cmd_CALIBRATE_CAMERA_SCALE(self, gcmd) -> None:
+        """
+        Executes automated star-pattern displacement to calculate exact mm-per-pixel (MPP)
+        and solves the affine rotation/scaling transformation matrix.
+        Parameters:
+            DISTANCE (float): Calibration displacement distance in mm (default: 1.0mm, range: 0.2 - 5.0mm)
+        """
+        dist = gcmd.get_float("DISTANCE", 1.0)
+        if dist < 0.2 or dist > 5.0:
+            gcmd.respond_error("DISTANCE must be between 0.2mm and 5.0mm.")
+            return
+
+        toolhead = self.printer.lookup_object("toolhead")
+        gcode_move = self.printer.lookup_object("gcode_move")
+
+        if not self.navigator.is_homed():
+            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
+            return
+
+        gcmd.respond_info(f"[tool_calibrator] Starting Star-Pattern Camera Calibration (Displacement: ±{dist:.2f}mm)...")
+
+        # 1. Approach Camera safely
+        self.navigator.approach_camera(toolhead, gcode_move)
+
+        # 2. Initial Center
+        gcmd.respond_info("  -> Performing initial nozzle optical centering...")
+        try:
+            self._center_nozzle(toolhead, gcmd)
+        except Exception as ex:
+            gcmd.respond_info(f"Centering note: {ex}")
+
+        toolhead.wait_moves()
+        self.reactor.pause(self.reactor.monotonic() + 0.2)
+
+        # Baseline detection
+        base_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
+        if not base_resp.get("found"):
+            self.navigator.depart_station(toolhead, gcode_move)
+            gcmd.respond_error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
+            return
+
+        base_uv = base_resp.get("center_uv")
+        center_pos = toolhead.get_position()
+        cx, cy, cz = center_pos[0], center_pos[1], center_pos[2]
+        gcmd.respond_info(f"  -> Baseline established: Pos ({cx:.3f}, {cy:.3f}), UV ({base_uv[0]:.2f}, {base_uv[1]:.2f})")
+
+        # 3. Displacements in 4 orthogonal directions (+X, -X, +Y, -Y)
+        moves = [
+            ("+X", cx + dist, cy, dist, 0.0),
+            ("-X", cx - dist, cy, -dist, 0.0),
+            ("+Y", cx, cy + dist, 0.0, dist),
+            ("-Y", cx, cy - dist, 0.0, -dist)
+        ]
+
+        mpp_samples = []
+        matrix_points = [
+            [[0.0, 0.0], list(base_uv)]
+        ]
+
+        try:
+            for label, tx, ty, rdx, rdy in moves:
+                toolhead.manual_move([tx, ty, None], self.navigator.approach_speed)
+                toolhead.wait_moves()
+                self.reactor.pause(self.reactor.monotonic() + 0.2)
+
+                det = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
+                if not det.get("found"):
+                    gcmd.respond_error(f"Failed to detect nozzle during displacement {label}.")
+                    continue
+
+                curr_uv = det.get("center_uv")
+                pixel_dist = ((curr_uv[0] - base_uv[0])**2 + (curr_uv[1] - base_uv[1])**2)**0.5
+                physical_dist = abs(dist)
+
+                mpp_samples.append([physical_dist, pixel_dist])
+                matrix_points.append([[rdx, rdy], list(curr_uv)])
+                gcmd.respond_info(f"  -> {label} displacement: Shift {pixel_dist:.2f}px (UV: {curr_uv[0]:.2f}, {curr_uv[1]:.2f})")
+
+            # Return to center
+            toolhead.manual_move([cx, cy, None], self.navigator.approach_speed)
+            toolhead.wait_moves()
+
+            if len(mpp_samples) < 3:
+                gcmd.respond_error("Insufficient valid points acquired for camera scale calibration.")
+                self.navigator.depart_station(toolhead, gcode_move)
+                return
+
+            # Query server to calculate average MPP and solve affine matrix
+            mpp_resp = self._query_vision("calibrate_mpp", {"samples": mpp_samples})
+            solved_mpp = float(mpp_resp.get("mpp", 0.0))
+
+            matrix_resp = self._query_vision("solve_matrix", {"calibration_points": matrix_points})
+            matrix_ok = matrix_resp.get("success", False)
+
+            # Persist calibrated MPP into tool_offsets.cfg under [tool_calibrator_station camera]
+            self.config_manager.save_section("tool_calibrator_station camera", {
+                "mpp": solved_mpp,
+                "target_x": round(cx, 3),
+                "target_y": round(cy, 3),
+                "target_z": round(cz, 3),
+                "safe_z": self.navigator.safe_z
+            })
+
+            gcmd.respond_info(
+                f"\n✔ ================= CAMERA CALIBRATION SUCCESS ================\n"
+                f"  Calculated Scale (MPP): {solved_mpp:.5f} mm/pixel\n"
+                f"  Affine Matrix Solved:   {matrix_ok}\n"
+                f"  Saved to Configuration: {self.config_manager.config_path}\n"
+                f"================================================================"
+            )
+
+        finally:
+            self.navigator.depart_station(toolhead, gcode_move)
 
     def cmd_CALIBRATION_SET_SAFE_POS(self, gcmd) -> None:
         """
