@@ -60,3 +60,4 @@ test_output/
 # Local reference repositories (keep locally for development)
 References/
 Picture Screenshot/
+test_annotated_results/
