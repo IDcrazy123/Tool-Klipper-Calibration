@@ -57,7 +57,11 @@ class DummyToolhead:
         pass
 
     def get_status(self, eventtime):
-        return {"homed_axes": "xyz"}
+        return {
+            "homed_axes": "xyz",
+            "axis_minimum": [0.0, 0.0, 0.0, 0.0],
+            "axis_maximum": [300.0, 300.0, 250.0, 0.0]
+        }
 
 
 class DummyReactor:
@@ -239,6 +243,32 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertEqual(calibrator.last_run_status, "SUCCESS")
         # In dry run, file must NOT be written to disk
         self.assertFalse(os.path.exists(self.config_path))
+
+    def test_auto_teach_camera_persists_to_disk(self):
+        """CALIBRATION_TEACH_STATION STATION=CAMERA must auto-derive approach vector and persist."""
+        calibrator = ToolCalibrator(self.config)
+
+        def mock_query_vision(endpoint, payload=None, timeout=2.0):
+            if endpoint == "detect_nozzle":
+                return {"found": True, "center_uv": [320, 240], "radius": 45}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            return {}
+
+        calibrator._query_vision = mock_query_vision
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "AUTO_CENTER": 1, "APPROACH_DIST": 25.0})
+        calibrator.cmd_CALIBRATION_TEACH_STATION(gcmd)
+
+        self.assertTrue(os.path.exists(self.config_path))
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("[tool_calibrator_station camera]", content)
+        self.assertIn("target_x: 150.000", content)
+        self.assertIn("target_y: 10.000", content)
+        self.assertIn("approach_y: 35.000", content)
 
 
 if __name__ == "__main__":

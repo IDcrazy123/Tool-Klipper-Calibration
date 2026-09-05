@@ -10,6 +10,18 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.5.0] - 2026-09-05
+### Added
+- Fully Automated Station Staging & Zero-Manual-Config Workflow:
+  - Vector-based automatic approach waypoint derivation in `SafeNavigator`: automatically projects an inbound trajectory from the station towards the bed center, eliminating all manual calculation.
+  - 1-Click Interactive Teaching (`CALIBRATION_TEACH_STATION`): supports `AUTO_CENTER=1` (sub-millimeter visual servoing) and `AUTO_TOUCH=1` (automatic contact Z probing).
+  - Auto-Persistence via `ConfigManager.save_section()`: stores station coordinates directly in `tool_offsets.cfg` (`[tool_calibrator_station ...]`), removing the need to edit `printer.cfg` manually.
+  - Auto-Inheritance from `[tools_calibrate]`: detects existing switch endstop pin locations (`pin_loc_x`, `pin_loc_y`, `pin_loc_z`) without duplicate user configuration.
+  - New 1-Click macros: `AUTO_TEACH_CAMERA` and `AUTO_TEACH_SWITCH`.
+  - Expanded test suite to 17 automated tests covering vector derivation, section persistence, and 1-click station teaching.
+
+---
+
 ## [0.4.0] - 2026-09-05
 ### Added
 - G-Code Macro Suite in `macros/`:

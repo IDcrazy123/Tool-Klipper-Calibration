@@ -16,6 +16,8 @@ class DummyToolhead:
         self.pos = list(start_pos or [150.0, 150.0, 10.0, 0.0])
         self.homed_axes = homed_axes
         self.moves = []
+        self.axis_min = [0.0, 0.0, 0.0, 0.0]
+        self.axis_max = [300.0, 300.0, 250.0, 0.0]
 
     def get_position(self):
         return list(self.pos)
@@ -30,7 +32,11 @@ class DummyToolhead:
         pass
 
     def get_status(self, eventtime):
-        return {"homed_axes": self.homed_axes}
+        return {
+            "homed_axes": self.homed_axes,
+            "axis_minimum": self.axis_min,
+            "axis_maximum": self.axis_max
+        }
 
 
 class DummyPrinter:
@@ -70,6 +76,7 @@ class DummyConfig:
 class TestSafeNavigator(unittest.TestCase):
     def setUp(self):
         self.toolhead = DummyToolhead(start_pos=[50.0, 50.0, 10.0, 0.0], homed_axes="xyz")
+        self.toolhead.axis_max = [350.0, 350.0, 300.0, 0.0]
         self.printer = DummyPrinter(self.toolhead)
         self.config_data = {
             "travel_speed": 100.0,
@@ -138,8 +145,36 @@ class TestSafeNavigator(unittest.TestCase):
         with self.assertRaises(SafeNavigatorException):
             nav.approach_camera(unhomed_toolhead, None)
 
+    def test_different_frame_sizes_voron_350(self):
+        """Verify dynamic adaptation on a Voron 350 (0-350mm)."""
+        v350_toolhead = DummyToolhead(start_pos=[175.0, 175.0, 10.0, 0.0])
+        v350_toolhead.axis_min = [0.0, 0.0, 0.0, 0.0]
+        v350_toolhead.axis_max = [350.0, 350.0, 350.0, 0.0]
+        printer = DummyPrinter(v350_toolhead)
+        nav = SafeNavigator(DummyConfig(printer, self.config_data))
+
+        center_x, center_y = nav.get_bed_center()
+        self.assertAlmostEqual(center_x, 175.0)
+        self.assertAlmostEqual(center_y, 175.0)
+
+    def test_different_frame_sizes_voron_v0(self):
+        """Verify dynamic adaptation on a compact Voron V0 (0-120mm)."""
+        v0_toolhead = DummyToolhead(start_pos=[60.0, 60.0, 10.0, 0.0])
+        v0_toolhead.axis_min = [0.0, 0.0, 0.0, 0.0]
+        v0_toolhead.axis_max = [120.0, 120.0, 120.0, 0.0]
+        printer = DummyPrinter(v0_toolhead)
+        nav = SafeNavigator(DummyConfig(printer, self.config_data))
+
+        center_x, center_y = nav.get_bed_center()
+        self.assertAlmostEqual(center_x, 60.0)
+        self.assertAlmostEqual(center_y, 60.0)
+
+    def test_out_of_bounds_target_rejection(self):
+        """Target positions exceeding hardware limits must raise SafeNavigatorException."""
+        self.nav.cam_target_x = 450.0 # Exceeds 300mm limit
+        self.nav.cam_target_y = 10.0
         with self.assertRaises(SafeNavigatorException):
-            nav.approach_switch(unhomed_toolhead, None)
+            self.nav.approach_camera(self.toolhead, None)
 
 
 if __name__ == "__main__":

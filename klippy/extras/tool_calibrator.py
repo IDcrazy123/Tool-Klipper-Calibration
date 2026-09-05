@@ -63,11 +63,55 @@ class ToolCalibrator:
         self.cached_offsets: Dict[int, Dict[str, float]] = {}
         self.last_run_status = "UNINITIALIZED"
 
+        # Auto-load saved station waypoints from tool_offsets.cfg if not explicitly set in printer.cfg
+        self._load_saved_stations()
+
         # Register G-Code Commands
         self.gcode.register_command("CALIBRATE_TOOL_OFFSETS", self.cmd_CALIBRATE_TOOL_OFFSETS, desc="Automated Full Tool Offset Calibration")
+        self.gcode.register_command("CALIBRATION_TEACH_STATION", self.cmd_CALIBRATION_TEACH_STATION, desc="1-Click Interactive Teaching & Auto-Persistence")
         self.gcode.register_command("CALIBRATION_SET_SAFE_POS", self.cmd_CALIBRATION_SET_SAFE_POS, desc="Interactive Safe Position Teaching")
         self.gcode.register_command("CALIBRATION_ROLLBACK_OFFSETS", self.cmd_CALIBRATION_ROLLBACK_OFFSETS, desc="Rollback to Previous Configuration Backup")
         self.gcode.register_command("CALIBRATION_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets")
+
+    def _load_saved_stations(self) -> None:
+        """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
+        cam_saved = self.config_manager.load_section("tool_calibrator_station camera")
+        if cam_saved:
+            if self.navigator.cam_target_x is None and "target_x" in cam_saved:
+                self.navigator.cam_target_x = float(cam_saved["target_x"])
+            if self.navigator.cam_target_y is None and "target_y" in cam_saved:
+                self.navigator.cam_target_y = float(cam_saved["target_y"])
+            if "target_z" in cam_saved:
+                self.navigator.cam_target_z = float(cam_saved["target_z"])
+            if self.navigator.cam_approach_x is None and "approach_x" in cam_saved:
+                self.navigator.cam_approach_x = float(cam_saved["approach_x"])
+            if self.navigator.cam_approach_y is None and "approach_y" in cam_saved:
+                self.navigator.cam_approach_y = float(cam_saved["approach_y"])
+
+        switch_saved = self.config_manager.load_section("tool_calibrator_station switch")
+        if switch_saved:
+            if self.navigator.switch_target_x is None and "target_x" in switch_saved:
+                self.navigator.switch_target_x = float(switch_saved["target_x"])
+            if self.navigator.switch_target_y is None and "target_y" in switch_saved:
+                self.navigator.switch_target_y = float(switch_saved["target_y"])
+            if "target_z" in switch_saved:
+                self.navigator.switch_target_z = float(switch_saved["target_z"])
+            if self.navigator.switch_approach_x is None and "approach_x" in switch_saved:
+                self.navigator.switch_approach_x = float(switch_saved["approach_x"])
+            if self.navigator.switch_approach_y is None and "approach_y" in switch_saved:
+                self.navigator.switch_approach_y = float(switch_saved["approach_y"])
+
+        # Auto-inherit switch position from tools_calibrate if available and not configured
+        if self.navigator.switch_target_x is None or self.navigator.switch_target_y is None:
+            tools_cal = self.printer.lookup_object("tools_calibrate", None)
+            if tools_cal is not None:
+                if hasattr(tools_cal, "pin_loc_x"):
+                    self.navigator.switch_target_x = float(tools_cal.pin_loc_x)
+                if hasattr(tools_cal, "pin_loc_y"):
+                    self.navigator.switch_target_y = float(tools_cal.pin_loc_y)
+                if hasattr(tools_cal, "pin_loc_z"):
+                    self.navigator.switch_target_z = float(tools_cal.pin_loc_z)
+                logger.info(f"Auto-inherited Z-switch coordinates from tools_calibrate: ({self.navigator.switch_target_x}, {self.navigator.switch_target_y}, {self.navigator.switch_target_z})")
 
     def _query_vision(self, endpoint: str, payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Dict[str, Any]:
         """
@@ -251,15 +295,107 @@ class ToolCalibrator:
             self.navigator.depart_station(toolhead, gcode_move)
             gcmd.respond_error(f"[tool_calibrator] Calibration Aborted: {ex}")
 
+    def cmd_CALIBRATION_TEACH_STATION(self, gcmd) -> None:
+        """
+        1-Click Interactive Teaching & Auto-Persistence Command.
+        Automatically centers (via visual servoing) or probes contact height,
+        computes safe approach vector towards bed center, and saves directly to tool_offsets.cfg!
+
+        Usage:
+            CALIBRATION_TEACH_STATION STATION=CAMERA [AUTO_CENTER=1] [APPROACH_DIST=25]
+            CALIBRATION_TEACH_STATION STATION=SWITCH [AUTO_TOUCH=1] [APPROACH_DIST=20]
+        """
+        station = gcmd.get("STATION", "").upper()
+        if station not in ("CAMERA", "SWITCH", "Z_SWITCH"):
+            gcmd.respond_error("STATION must be CAMERA or SWITCH.")
+            return
+
+        toolhead = self.printer.lookup_object("toolhead")
+        if not self.navigator.is_homed():
+            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before teaching station.")
+            return
+
+        if station == "CAMERA":
+            auto_center = gcmd.get_int("AUTO_CENTER", 1) == 1
+            approach_dist = gcmd.get_float("APPROACH_DIST", 25.0)
+
+            if auto_center:
+                gcmd.respond_info("[tool_calibrator] Auto-centering nozzle over camera via visual servoing...")
+                try:
+                    self._center_nozzle(toolhead, gcmd)
+                except Exception as ex:
+                    gcmd.respond_info(f"Auto-centering note: {ex}. Proceeding with current manual position.")
+
+            pos = toolhead.get_position()
+            target_x, target_y, target_z = round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)
+            app_x, app_y = self.navigator.calculate_auto_approach(target_x, target_y, approach_dist)
+
+            self.navigator.set_camera_waypoints(target_x, target_y, target_z, app_x, app_y)
+
+            # Auto-persist to tool_offsets.cfg
+            self.config_manager.save_section("tool_calibrator_station camera", {
+                "target_x": target_x,
+                "target_y": target_y,
+                "target_z": target_z,
+                "approach_x": app_x,
+                "approach_y": app_y,
+                "approach_z": target_z,
+                "safe_z": self.navigator.safe_z
+            })
+
+            gcmd.respond_info(
+                f"✔ [CAMERA Station Configured & Saved Automatically]\n"
+                f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
+                f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
+                f"  Saved to: {self.config_manager.config_path}"
+            )
+
+        elif station in ("SWITCH", "Z_SWITCH"):
+            auto_touch = gcmd.get_int("AUTO_TOUCH", 1) == 1
+            approach_dist = gcmd.get_float("APPROACH_DIST", 20.0)
+
+            pos = toolhead.get_position()
+            target_x, target_y, target_z = round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)
+
+            if auto_touch and self.z_backend_type == "switch":
+                gcmd.respond_info("[tool_calibrator] Auto-touching switch pin to determine contact height...")
+                try:
+                    res = self.z_backend.probe_reference_tool(self.reference_tool, gcmd)
+                    target_z = round(res.get("trigger_z", pos[2]), 3)
+                except Exception as ex:
+                    gcmd.respond_info(f"Auto-touch note: {ex}. Using current Z height.")
+
+            app_x, app_y = self.navigator.calculate_auto_approach(target_x, target_y, approach_dist)
+            self.navigator.set_switch_waypoints(target_x, target_y, target_z, app_x, app_y)
+
+            # Auto-persist to tool_offsets.cfg
+            self.config_manager.save_section("tool_calibrator_station switch", {
+                "target_x": target_x,
+                "target_y": target_y,
+                "target_z": target_z,
+                "approach_x": app_x,
+                "approach_y": app_y,
+                "approach_z": target_z,
+                "safe_z": self.navigator.safe_z
+            })
+
+            gcmd.respond_info(
+                f"✔ [SWITCH Station Configured & Saved Automatically]\n"
+                f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
+                f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
+                f"  Saved to: {self.config_manager.config_path}"
+            )
+
     def cmd_CALIBRATION_SET_SAFE_POS(self, gcmd) -> None:
         """
         Interactive Teaching Command to save current toolhead position.
-        Usage: CALIBRATION_SET_SAFE_POS STATION=CAMERA|Z_SWITCH TYPE=APPROACH|TARGET|SAFE_Z
+        Usage: CALIBRATION_SET_SAFE_POS STATION=CAMERA|Z_SWITCH TYPE=APPROACH|TARGET|SAFE_Z [SAVE=1]
         """
         toolhead = self.printer.lookup_object("toolhead")
         pos = toolhead.get_position()
         station = gcmd.get("STATION", "").upper()
         pos_type = gcmd.get("TYPE", "").upper()
+        save_to_disk = gcmd.get_int("SAVE", 1) == 1
 
         if station == "CAMERA":
             if pos_type == "APPROACH":
@@ -274,7 +410,17 @@ class ToolCalibrator:
             elif pos_type == "SAFE_Z":
                 self.navigator.safe_z = round(pos[2], 3)
                 gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
-        elif station == "Z_SWITCH":
+
+            if save_to_disk:
+                self.config_manager.save_section("tool_calibrator_station camera", {
+                    "target_x": self.navigator.cam_target_x,
+                    "target_y": self.navigator.cam_target_y,
+                    "target_z": self.navigator.cam_target_z,
+                    "approach_x": self.navigator.cam_approach_x,
+                    "approach_y": self.navigator.cam_approach_y,
+                    "safe_z": self.navigator.safe_z
+                })
+        elif station in ("SWITCH", "Z_SWITCH"):
             if pos_type == "APPROACH":
                 self.navigator.switch_approach_x = round(pos[0], 3)
                 self.navigator.switch_approach_y = round(pos[1], 3)
@@ -284,8 +430,18 @@ class ToolCalibrator:
                 self.navigator.switch_target_y = round(pos[1], 3)
                 self.navigator.switch_target_z = round(pos[2], 3)
                 gcmd.respond_info(f"Z-Switch Target Pin set to X:{pos[0]:.3f} Y:{pos[1]:.3f} Z:{pos[2]:.3f}")
+
+            if save_to_disk:
+                self.config_manager.save_section("tool_calibrator_station switch", {
+                    "target_x": self.navigator.switch_target_x,
+                    "target_y": self.navigator.switch_target_y,
+                    "target_z": self.navigator.switch_target_z,
+                    "approach_x": self.navigator.switch_approach_x,
+                    "approach_y": self.navigator.switch_approach_y,
+                    "safe_z": self.navigator.safe_z
+                })
         else:
-            gcmd.respond_error("Invalid STATION. Must be CAMERA or Z_SWITCH.")
+            gcmd.respond_error("Invalid STATION. Must be CAMERA or SWITCH.")
 
     def cmd_CALIBRATION_ROLLBACK_OFFSETS(self, gcmd) -> None:
         """Emergency rollback command restoring previous configuration backup."""

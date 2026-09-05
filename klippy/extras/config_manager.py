@@ -61,18 +61,42 @@ class ConfigManager:
                 except OSError:
                     pass
 
-    def save_tool_offsets(self, tool_number: int, offsets: Dict[str, float]) -> None:
+    def load_section(self, section_name: str) -> Dict[str, str]:
         """
-        Atomically updates or creates the [tool N] section with new gcode offsets.
+        Loads key-value pairs from a specific section in tool_offsets.cfg.
+        Returns an empty dict if the section or file does not exist.
+        """
+        if not os.path.exists(self.config_path):
+            return {}
 
-        Args:
-            tool_number: Tool index (e.g. 0, 1, 2).
-            offsets: Dict containing 'x', 'y', and/or 'z' float values.
+        clean_section = section_name.strip("[]")
+        target_header = f"[{clean_section}]"
+        results: Dict[str, str] = {}
+        in_section = False
+
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    in_section = (line == target_header)
+                    continue
+
+                if in_section and line and not line.startswith("#"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        results[k.strip()] = v.strip()
+                    elif "=" in line:
+                        k, v = line.split("=", 1)
+                        results[k.strip()] = v.strip()
+
+        return results
+
+    def save_section(self, section_name: str, values: Dict[str, Any]) -> None:
         """
-        # Step 1: Create backup of current state
+        Atomically updates or creates any [section_name] with key-value pairs.
+        """
         self.create_backup()
 
-        # Step 2: Read existing config lines or initialize new header
         lines: List[str] = []
         if os.path.exists(self.config_path):
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -84,47 +108,45 @@ class ConfigManager:
                 "# Include this in printer.cfg via: [include tool_offsets.cfg]\n\n"
             ]
 
-        section_name = f"[tool {tool_number}]"
+        clean_section = section_name.strip("[]")
+        target_header = f"[{clean_section}]"
         section_start = -1
         section_end = len(lines)
 
-        # Locate section boundaries
         for i, raw_line in enumerate(lines):
             line = raw_line.strip()
-            if line.startswith(section_name):
+            if line == target_header:
                 section_start = i
-            elif section_start != -1 and line.startswith("[") and not line.startswith(section_name):
+            elif section_start != -1 and line.startswith("[") and line.endswith("]"):
                 section_end = i
                 break
 
-        # Format new offset parameters
-        offset_strings = {}
-        for axis, val in offsets.items():
-            offset_strings[f"gcode_{axis.lower()}_offset"] = f"{val:.3f}"
+        formatted_values = {}
+        for k, v in values.items():
+            if isinstance(v, float):
+                formatted_values[k] = f"{v:.3f}"
+            else:
+                formatted_values[k] = str(v)
 
         if section_start != -1:
-            # Section exists, update existing keys or append missing keys before next section
             existing_keys = set()
             for idx in range(section_start + 1, section_end):
                 line = lines[idx].strip()
-                for key, val_str in offset_strings.items():
+                for key, val_str in formatted_values.items():
                     if line.startswith(f"{key}:") or line.startswith(f"{key}="):
                         lines[idx] = f"{key}: {val_str}\n"
                         existing_keys.add(key)
 
-            # Insert missing keys into the section
-            missing_keys = [k for k in offset_strings if k not in existing_keys]
+            missing_keys = [k for k in formatted_values if k not in existing_keys]
             if missing_keys:
-                insert_lines = [f"{k}: {offset_strings[k]}\n" for k in missing_keys]
+                insert_lines = [f"{k}: {formatted_values[k]}\n" for k in missing_keys]
                 lines[section_end:section_end] = insert_lines
         else:
-            # Section does not exist; append new section at end
-            new_block = [f"\n{section_name}\n"]
-            for k, val_str in offset_strings.items():
+            new_block = [f"\n{target_header}\n"]
+            for k, val_str in formatted_values.items():
                 new_block.append(f"{k}: {val_str}\n")
             lines.extend(new_block)
 
-        # Step 3: Atomic write to temporary file, then atomic rename
         tmp_path = f"{self.config_path}.tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -132,13 +154,22 @@ class ConfigManager:
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Atomic replace
             os.replace(tmp_path, self.config_path)
-            logger.info(f"Successfully committed offsets for Tool {tool_number} to {self.config_path}")
+            logger.info(f"Successfully committed section {target_header} to {self.config_path}")
         except Exception as ex:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise ConfigManagerException(f"Failed to atomically write config: {ex}")
+
+    def save_tool_offsets(self, tool_number: int, offsets: Dict[str, float]) -> None:
+        """
+        Atomically updates or creates the [tool N] section with new gcode offsets.
+        """
+        offset_strings = {}
+        for axis, val in offsets.items():
+            offset_strings[f"gcode_{axis.lower()}_offset"] = val
+
+        self.save_section(f"tool {tool_number}", offset_strings)
 
     def rollback(self) -> str:
         """

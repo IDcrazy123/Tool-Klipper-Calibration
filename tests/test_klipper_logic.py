@@ -64,6 +64,23 @@ class TestConfigManager(unittest.TestCase):
             content = f.read()
         self.assertIn("gcode_x_offset: 0.100", content)
 
+    def test_save_and_load_station_section(self):
+        """Verify saving and loading custom sections like [tool_calibrator_station camera]."""
+        station_data = {
+            "target_x": 150.123,
+            "target_y": 10.456,
+            "target_z": 22.000,
+            "approach_x": 150.123,
+            "approach_y": 35.456,
+            "safe_z": 35.000
+        }
+        self.manager.save_section("tool_calibrator_station camera", station_data)
+        loaded = self.manager.load_section("tool_calibrator_station camera")
+
+        self.assertEqual(float(loaded["target_x"]), 150.123)
+        self.assertEqual(float(loaded["target_y"]), 10.456)
+        self.assertEqual(float(loaded["approach_y"]), 35.456)
+
 
 if __name__ == "__main__":
     unittest.main()
