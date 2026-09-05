@@ -24,7 +24,8 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
   - `_CLEAN_NOZZLE` macro defaults to a silent no-op.
 - Real-World High-Contrast & Dim Illumination Vision Benchmarks:
   - Added user real-world Voron Stealth Changer camera frames (`nozzle_dim_lighting_eval1.jpg`, `nozzle_high_glare_eval2.jpg`) into regression fixtures.
-  - 100% detection rate across all lighting extremes at Tier 1 with sub-pixel precision.
+  - Added 13 real-world multi-nozzle screenshots (`Screenshot 2026-09-05 *.png`) capturing 5 distinct toolheads into automated test suite.
+  - 100% detection rate across all 13 captures at Tier 1 Combo 1 with 1.0 confidence.
 - Selective Tool Calibration:
   - `CALIBRATE_TOOL_OFFSETS` now supports `TOOLS` parameter (e.g. `TOOLS=1` or `TOOLS=1,2`) with automatic reference tool sequencing.
 - Configuration Robustness & Unit Normalization:

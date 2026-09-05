@@ -119,8 +119,8 @@ class TestServerEndpoints(unittest.TestCase):
             return
 
         detector = NozzleDetector(frame_width=640, frame_height=480)
-        image_files = [f for f in os.listdir(sample_dir) if f.endswith(".jpg")]
-        self.assertGreaterEqual(len(image_files), 5)
+        image_files = [f for f in os.listdir(sample_dir) if f.lower().endswith((".jpg", ".png"))]
+        self.assertGreaterEqual(len(image_files), 15)
 
         for img_name in image_files:
             img_path = os.path.join(sample_dir, img_name)
