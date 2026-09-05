@@ -5,7 +5,7 @@ Safely saves calibrated tool offsets into an isolated tool_offsets.cfg file
 using atomic temporary writes and automatic timestamped backups.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import datetime
 import glob
 import logging

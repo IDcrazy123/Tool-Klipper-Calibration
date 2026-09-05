@@ -10,6 +10,24 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.8.6] - 2026-09-05
+### Added
+- Dual 1st-Order Affine & 2nd-Order Polynomial Transformation Solver:
+  - Upgraded `solve_matrix` in `server/affine_transform.py`: automatically performs 1st-order affine fit ($[x, y, 1]$ basis) for 3 to 5 calibration points (such as the 5-point star-pattern displacement in `CALIBRATE_CAMERA_SCALE`), and 2nd-order polynomial fit ($[x^2, y^2, xy, x, y, 1]$) for $\ge 6$ points.
+  - Updated `calculate_offset` with dynamic matrix rank dispatch, ensuring smooth sub-pixel visual servoing under both transformation models.
+  - Added missing `set_mpp()` setter in `TransformationSolver` to support live `/set_mpp` REST synchronization.
+- Resolution-Adaptive ROI & Distance Prior Scaling:
+  - Upgraded `detect_curvature_circle()` in `server/nozzle_detector.py`: scaled central ROI radius adaptively (`r_roi = min(int(min(w, h) * 0.38), 260)`), accommodating larger initial toolhead offsets on 720p/1080p camera streams.
+  - Scaled candidate distance prior $d_0$ dynamically with sensor resolution ($d_0 = \max(140.0, \min(w, h) \times 0.22)$).
+- Codebase Logic Verification & Namespace Protection:
+  - Fixed missing `Dict` and `Any` typing imports in `klippy/extras/safe_navigator.py` and `config_manager.py`.
+  - Initialized and synchronized in-memory `calibrated_mpp` state on `ToolCalibrator`.
+  - Renamed wrapper macro in `macros/tool_calibrator_macros.cfg` to `CALIBRATE_CAMERA` to prevent recursion and command collision with registered Python G-code `CALIBRATE_CAMERA_SCALE`.
+  - Added automated unit tests `test_solve_matrix_affine_star_pattern` and `test_set_mpp` in `tests/test_vision.py`.
+  - Expanded automated test suite to 40 passing unit & integration tests.
+
+---
+
 ## [0.8.5] - 2026-09-05
 ### Added
 - Hough Candidate Radial Gradient Contrast Ranking & Distance Discrimination:

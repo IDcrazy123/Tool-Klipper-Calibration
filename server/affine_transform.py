@@ -57,6 +57,13 @@ class TransformationSolver:
         logger.info(f"Calibrated MPP: {self.mpp:.5f} mm/pixel (from {len(filtered)}/{len(raw_mpp)} samples)")
         return self.mpp
 
+    def set_mpp(self, mpp: float) -> None:
+        """Sets the calibrated millimeters-per-pixel scale factor."""
+        if mpp <= 0:
+            raise ValueError(f"MPP must be positive, got {mpp}")
+        self.mpp = float(mpp)
+        logger.info(f"Updated MPP scale to: {self.mpp:.5f} mm/pixel")
+
     def normalize_coords(self, uv: Tuple[float, float]) -> Tuple[float, float]:
         """
         Normalizes pixel coordinates relative to the optical center in range [-1.0, 1.0].
@@ -68,7 +75,8 @@ class TransformationSolver:
 
     def solve_matrix(self, calibration_points: List[Tuple[List[float], List[float]]]) -> bool:
         """
-        Solves 2nd-order polynomial mapping matrix between camera UV and machine XY.
+        Solves spatial mapping matrix between camera UV and machine XY.
+        Supports 2nd-order polynomial fit for n >= 6, and 1st-order affine fit for 3 <= n < 6.
 
         Args:
             calibration_points: List of ([real_x, real_y], [pixel_u, pixel_v]) coordinates.
@@ -77,8 +85,8 @@ class TransformationSolver:
             bool: True if matrix was successfully solved.
         """
         n = len(calibration_points)
-        if n < 6:
-            raise ValueError(f"At least 6 calibration points required for 2nd-order fit, got {n}.")
+        if n < 3:
+            raise ValueError(f"At least 3 calibration points required for transformation fit, got {n}.")
 
         real_coords = np.empty((n, 2))
         pixel_coords = np.empty((n, 2))
@@ -90,13 +98,18 @@ class TransformationSolver:
             pixel_coords[i] = [nx, ny]
 
         x, y = pixel_coords[:, 0], pixel_coords[:, 1]
-        # 2nd-order polynomial feature basis: [x^2, y^2, x*y, x, y, 1]
-        A = np.vstack([x**2, y**2, x * y, x, y, np.ones(n)]).T
+        if n >= 6:
+            # 2nd-order polynomial feature basis: [x^2, y^2, x*y, x, y, 1]
+            A = np.vstack([x**2, y**2, x * y, x, y, np.ones(n)]).T
+        else:
+            # 1st-order affine feature basis: [x, y, 1] (ideal for 3 to 5 star-pattern points)
+            A = np.vstack([x, y, np.ones(n)]).T
 
         # Solve least squares: A * M = real_coords
         solution, residuals, rank, s = np.linalg.lstsq(A, real_coords, rcond=None)
         self.transform_matrix = solution.T
-        logger.info(f"Solved 2nd-order transform matrix (rank={rank}). Shape: {self.transform_matrix.shape}")
+        order_desc = "2nd-order polynomial" if n >= 6 else "1st-order affine"
+        logger.info(f"Solved {order_desc} transform matrix (rank={rank}). Shape: {self.transform_matrix.shape}")
         return True
 
     def calculate_offset(self, detected_uv: Tuple[float, float]) -> Tuple[float, float]:
@@ -112,8 +125,12 @@ class TransformationSolver:
         nx, ny = self.normalize_coords(detected_uv)
 
         if self.transform_matrix is not None:
-            # Construct polynomial feature vector
-            v = np.array([nx**2, ny**2, nx * ny, nx, ny, 1.0])
+            if self.transform_matrix.shape[1] == 6:
+                # 2nd-order polynomial feature vector
+                v = np.array([nx**2, ny**2, nx * ny, nx, ny, 1.0])
+            else:
+                # 1st-order affine feature vector
+                v = np.array([nx, ny, 1.0])
             # Apply matrix and negative visual-servoing damping factor
             offset = -1.0 * (self.damping_factor * (self.transform_matrix @ v))
             return (round(float(offset[0]), 3), round(float(offset[1]), 3))

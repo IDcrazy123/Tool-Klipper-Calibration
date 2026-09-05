@@ -64,6 +64,35 @@ class TestAffineTransform(unittest.TestCase):
         self.assertAlmostEqual(offset_x, -0.11, delta=0.02)
         self.assertAlmostEqual(offset_y, 0.0, delta=0.02)
 
+    def test_solve_matrix_affine_star_pattern(self):
+        """Verify 5-point star pattern displacement solves 1st-order affine matrix accurately."""
+        # 5 points: center + 4 orthogonal displacements of 1.0mm (100 pixels)
+        star_points = [
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[1.0, 0.0], [420.0, 240.0]],
+            [[-1.0, 0.0], [220.0, 240.0]],
+            [[0.0, 1.0], [320.0, 340.0]],
+            [[0.0, -1.0], [320.0, 140.0]]
+        ]
+        success = self.solver.solve_matrix(star_points)
+        self.assertTrue(success)
+        self.assertEqual(self.solver.transform_matrix.shape, (2, 3))
+
+        # Query offset for nozzle at (370, 240) -> du = +50px = +0.5mm
+        off_x, off_y = self.solver.calculate_offset((370.0, 240.0))
+        # -1 * 0.55 * 0.5 = -0.275mm
+        self.assertAlmostEqual(off_x, -0.275, delta=0.01)
+        self.assertAlmostEqual(off_y, 0.0, delta=0.01)
+
+    def test_set_mpp(self):
+        """Verify set_mpp updates scale and enables linear offset fallback."""
+        self.solver.transform_matrix = None
+        self.solver.set_mpp(0.0125)
+        self.assertEqual(self.solver.mpp, 0.0125)
+        off_x, off_y = self.solver.calculate_offset((340.0, 240.0))
+        # du = +20, -1 * 0.55 * 20 * 0.0125 = -0.1375mm
+        self.assertAlmostEqual(off_x, -0.138, delta=0.01)
+
 
 class TestNozzleDetector(unittest.TestCase):
     def setUp(self):

@@ -5,7 +5,7 @@ Implements the 3-tier safe navigation state machine (Safe_Z -> Safe_Approach -> 
 to prevent toolhead collision with camera shrouds, docks, and bed clamps.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 import logging
 
 logger = logging.getLogger("tool_calibrator.safe_navigator")

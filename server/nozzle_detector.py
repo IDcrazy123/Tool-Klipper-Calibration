@@ -220,7 +220,7 @@ class NozzleDetector:
         frame_h: int,
         roi_x0: int,
         roi_y0: int,
-        d0: float = 140.0
+        d0: Optional[float] = None
     ) -> Optional[np.ndarray]:
         """
         Ranks candidate circles returned by Hough transform using upper-arc radial gradient
@@ -228,6 +228,9 @@ class NozzleDetector:
         """
         if candidates is None or len(candidates) == 0:
             return None
+
+        if d0 is None:
+            d0 = max(140.0, min(frame_w, frame_h) * 0.22)
 
         h, w = gray_roi.shape[:2]
         gx = cv2.Sobel(gray_roi, cv2.CV_32F, 1, 0, ksize=3)
@@ -272,7 +275,7 @@ class NozzleDetector:
         """
         h, w = frame.shape[:2]
         cx_center, cy_center = w / 2.0, h / 2.0
-        r_roi = min(int(min(w, h) * 0.35), 140)
+        r_roi = min(int(min(w, h) * 0.38), 260)
 
         x0 = max(0, int(cx_center - r_roi))
         x1 = min(w, int(cx_center + r_roi))

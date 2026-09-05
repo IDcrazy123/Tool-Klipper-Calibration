@@ -75,6 +75,7 @@ class ToolCalibrator:
 
         # Calibration State
         self.cached_offsets: Dict[int, Dict[str, float]] = {}
+        self.calibrated_mpp: Optional[float] = None
         self.last_run_status = "UNINITIALIZED"
 
         # Auto-load saved station waypoints from tool_offsets.cfg if not explicitly set in printer.cfg
@@ -660,6 +661,7 @@ class ToolCalibrator:
 
             matrix_resp = self._query_vision("solve_matrix", {"calibration_points": matrix_points})
             matrix_ok = matrix_resp.get("success", False)
+            self.calibrated_mpp = solved_mpp
 
             # Persist calibrated MPP into tool_offsets.cfg under [tool_calibrator_station camera]
             self.config_manager.save_section("tool_calibrator_station camera", {

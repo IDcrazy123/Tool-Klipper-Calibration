@@ -298,6 +298,7 @@ class TestCalibrationCycle(unittest.TestCase):
 
         self.assertIn("[tool_calibrator_station camera]", content)
         self.assertIn("mpp: 0.015", content)
+        self.assertEqual(calibrator.calibrated_mpp, 0.01542)
 
     def test_generic_tool_discovery(self):
         """Verifies toolhead discovery across diverse Klipper toolchanger architectures."""
