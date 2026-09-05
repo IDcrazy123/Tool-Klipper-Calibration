@@ -1,0 +1,17 @@
+[Unit]
+Description=Tool-Klipper-Calibration Machine Vision Background Service
+After=network-online.target crowsnest.service klipper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%REPO_DIR%
+ExecStart=%VENV_DIR%/bin/python3 -m server.tool_calibrator_server --port 8090
+Restart=always
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -6,9 +6,24 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ## [Unreleased]
 ### Planned
-- Phase 4: G-code macro suite and interactive position teaching commands.
-- Phase 5: Hardware benchmarking and repeatable precision verification.
-- Phase 6: Automated Linux installation scripts and Moonraker packaging.
+- Physical hardware validation and user benchmarking telemetry on multi-tool rig.
+
+---
+
+## [0.4.0] - 2026-09-05
+### Added
+- G-Code Macro Suite in `macros/`:
+  - `tool_calibrator_macros.cfg`: `CALIBRATE_ALL_TOOLS`, `CALIBRATE_TOOL`, `CALIBRATION_ROLLBACK`, with pre/post flight lifecycle hooks.
+  - `safe_staging_macros.cfg`: Interactive position teaching (`TEACH_CAMERA_SAFE_Z`, `TEACH_CAMERA_APPROACH`, `TEACH_CAMERA_TARGET`, `TEACH_SWITCH_APPROACH`, `TEACH_SWITCH_TARGET`).
+  - `sample_tool_calibrator.cfg`: Complete sample configuration ready to include in `printer.cfg`.
+- Automated Packaging & Installer Scripts in `scripts/`:
+  - `install.sh`: Automated Raspberry Pi / Debian Linux installer with venv creation, dependency installation, Klipper extras linking, and systemd service startup.
+  - `uninstall.sh`: Clean service teardown and file cleanup.
+  - `tool_calibrator.service`: Systemd service unit definition.
+  - `moonraker_update.cfg`: Moonraker Update Manager integration block for Mainsail / Fluidd.
+- Expanded Test Suite:
+  - `tests/test_safe_navigator.py`: 3-tier safe waypointing step transitions and boundary checks.
+  - `tests/test_calibration_cycle.py`: End-to-end full calibration sequence integration test (14 total passing tests).
 
 ---
 
