@@ -154,13 +154,17 @@ Cartographer 3D V4 eddy-current probes feature high-precision nozzle-touch homin
    - When a nozzle is longer ($Z_n > Z_{ref} \implies \Delta Z > 0$), positive offset adjusts Klipper's toolhead coordinate frame downwards, preserving identical layer heights. When a nozzle is shorter ($Z_n < Z_{ref} \implies \Delta Z < 0$), negative offset brings the tool closer.
 2. **PEI Bed Thermal Safety Guard (`ERR_PRE_002`):**
    - Before dispatching any touch commands, `_check_thermal_safety()` queries extruder temperature. If temperature exceeds `carto_max_touch_temp` (default 150°C), probing immediately halts with `[ERR_PRE_002]`.
-3. **Bed Center Coordinate Auto-Derivation:**
-   - Both baseline and secondary touch probing execute at the bed's exact geometric center $((X_{min} + X_{max})/2, (Y_{min} + Y_{max})/2)$ when `carto_probe_x/y` are omitted. Probing at identical coordinates completely cancels out bed tilt, frame expansion, and mesh curvature.
+3. **Bed Coordinate Auto-Derivation (`zero_reference_position` / Bed Center):**
+   - Both baseline and secondary touch probing prioritize `[bed_mesh]` `zero_reference_position`. If unconfigured, defaults to the bed's exact geometric center $((X_{min} + X_{max})/2, (Y_{min} + Y_{max})/2)$. Probing at identical coordinates completely cancels out bed tilt, frame expansion, and mesh curvature.
 4. **Immediate Post-Probe Liftoff Retraction:**
    - Following every touch contact, the toolhead immediately retracts $+5.0\text{mm}$ (`carto_retract_z`) at $15\text{mm/s}$ before initiating dock transit or tool selection moves.
+5. **Dynamic Command & Sensor Resolution:**
+   - As documented in Cartographer's `scanner.py`, commands are registered dynamically based on sensor naming: `CARTOGRAPHER_TOUCH` for `sensor: cartographer`, and `SCANNER_TOUCH` for `sensor: scanner` (Survey Touch). `CartographerBackend` auto-resolves registered commands dynamically, eliminating `Unknown command` errors across firmware releases.
+6. **Cartographer Parameter Forwarding:**
+   - Supports Cartographer 3D's official touch tuning parameters: `SPEED` (`carto_touch_speed`), `TOLERANCE` (`carto_touch_tolerance`), and `RETRIES` (`carto_touch_retries`).
 
 ### Rationale
-- Completely eliminates bed sticker melting, eliminates bed tilt systematic errors, and ensures safe multi-tool Z calibration with sub-micron repeatability.
+- Completely eliminates bed sticker melting, eliminates bed tilt systematic errors, adapts to all Cartographer sensor versions, and ensures safe multi-tool Z calibration with sub-micron repeatability.
 
 
 

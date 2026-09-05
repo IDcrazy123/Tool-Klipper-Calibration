@@ -246,6 +246,35 @@ kinematics: corexy
         self.assertIn("ERR_PRE_002", str(ctx.exception))
         self.assertIn("exceeds safe Cartographer touch limit", str(ctx.exception))
 
+    def test_resolve_touch_cmd_scanner(self):
+        """When SCANNER_TOUCH is registered in Klipper gcode commands, resolve dynamically."""
+        self.gcode.commands = {"SCANNER_TOUCH": MagicMock()}
+        backend = CartographerBackend(self.config)
+        self.assertEqual(backend.touch_probe_gcode, "SCANNER_TOUCH")
+        self.assertEqual(backend.touch_home_gcode, "SCANNER_TOUCH")
+
+    def test_build_command_str_with_parameters(self):
+        """Official Cartographer SPEED, TOLERANCE, and RETRIES parameters should be appended."""
+        cfg = DummyConfig(self.printer, {
+            "touch_probe_gcode": "CARTOGRAPHER_TOUCH",
+            "carto_touch_speed": 2.5,
+            "carto_touch_tolerance": 0.0080,
+            "carto_touch_retries": 5,
+            "touch_model_config_path": self.printer_cfg_path
+        })
+        backend = CartographerBackend(cfg)
+        expected = "CARTOGRAPHER_TOUCH SPEED=2.5 TOLERANCE=0.0080 RETRIES=5"
+        self.assertEqual(backend.touch_probe_gcode, expected)
+
+    def test_get_probe_xy_with_bed_mesh_zero_ref_pos(self):
+        """When bed_mesh provides zero_ref_pos, get_probe_xy should prioritize it."""
+        mock_mesh = MagicMock()
+        mock_mesh.zero_ref_pos = [175.5, 175.5]
+        self.printer.objects["bed_mesh"] = mock_mesh
+        backend = CartographerBackend(self.config)
+        px, py = backend.get_probe_xy()
+        self.assertEqual((px, py), (175.5, 175.5))
+
 
 class TestSwitchBackend(unittest.TestCase):
     def test_switch_probe_relative_offset(self):

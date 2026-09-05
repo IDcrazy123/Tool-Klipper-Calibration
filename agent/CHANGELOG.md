@@ -12,13 +12,16 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ## [0.8.3] - 2026-09-05
 ### Added
-- Cartographer Touch V4 Relative Delta Z Backend Implementation:
+- Cartographer Touch V4 Relative Delta Z Backend & Official Specification Alignment:
+  - Researched and integrated official Cartographer 3D source code (`scanner.py` v4.4.0) and documentation specifications into `CartographerBackend`.
+  - Dynamic command resolution: automatically detects registered Klipper commands (`CARTOGRAPHER_TOUCH`, `SCANNER_TOUCH`, `CARTOGRAPHER_TOUCH_HOME`) matching the active sensor naming (`sensor: cartographer` vs `sensor: scanner`).
+  - Added official Cartographer parameter forwarding: supports `carto_touch_speed` (`SPEED=...`), `carto_touch_tolerance` (`TOLERANCE=...`), and `carto_touch_retries` (`RETRIES=...`).
+  - Aligned probing location priority: checks `bed_mesh` `zero_reference_position` first, defaulting to exact geometric bed center $((X_{min} + X_{max})/2, (Y_{min} + Y_{max})/2)$ to cancel bed tilt/mesh distortion.
   - Developed and verified mathematically sound multi-tool relative delta Z-offset calculation: $\Delta Z = Z_n - Z_{ref}$.
   - Corrected offset sign convention: longer nozzles ($Z_n > Z_{ref}$) yield positive offsets ($+\Delta Z$) to prevent bed collisions, while shorter nozzles ($Z_n < Z_{ref}$) yield negative offsets ($-\Delta Z$).
-  - Implemented thermal safety pre-check (`ERR_PRE_002`): queries toolhead extruder temperature prior to touch probing and aborts if temperature exceeds `carto_max_touch_temp` (default $150^\circ\text{C}$), safeguarding PEI bed sheets against melting or puncture.
-  - Added automatic bed-center coordinate fallback via `get_probe_xy()`: when `carto_probe_x` and `carto_probe_y` are unspecified, probing defaults to the exact bed center $((X_{min} + X_{max})/2, (Y_{min} + Y_{max})/2)$, eliminating bed mesh and tilt distortion bias.
+  - Implemented thermal safety pre-check (`ERR_PRE_002`): queries toolhead extruder temperature prior to touch probing and aborts if temperature exceeds `carto_max_touch_temp` (default $150^\circ\text{C}$ / `scanner_touch_max_temp`), safeguarding PEI bed sheets against melting or puncture.
   - Added automatic safe liftoff retraction (`carto_retract_z = 5.0mm`) executed at $15\text{mm/s}$ immediately after every touch contact to protect nozzle tips and bed coating during toolchanger transit.
-  - Added comprehensive test suite in `tests/test_z_backends.py` covering relative delta Z calculations, bed center auto-fallback, thermal protection abort, and switch probe compatibility, bringing the test suite to 33 passing automated tests.
+  - Expanded test suite in `tests/test_z_backends.py` to 10 dedicated tests covering command resolution, parameter injection, and `zero_reference_position`, bringing total passing automated tests to 36.
 
 ---
 

@@ -19,8 +19,23 @@ class BaseZBackend(ABC):
     def get_probe_xy(self) -> Tuple[float, float]:
         """
         Returns designated probing coordinates (X, Y).
-        Defaults to the exact bed center to eliminate bed mesh / tilt bias.
+        Defaults to bed_mesh zero_reference_position if available,
+        otherwise the exact bed center to eliminate bed mesh / tilt bias.
         """
+        try:
+            bed_mesh = self.printer.lookup_object("bed_mesh", None)
+            if bed_mesh is not None:
+                zrp = getattr(bed_mesh, "zero_ref_pos", None)
+                if zrp and len(zrp) >= 2:
+                    return round(float(zrp[0]), 3), round(float(zrp[1]), 3)
+                bmc = getattr(bed_mesh, "bmc", None)
+                if bmc is not None and hasattr(bmc, "zero_ref_pos"):
+                    bzrp = getattr(bmc, "zero_ref_pos")
+                    if bzrp and len(bzrp) >= 2:
+                        return round(float(bzrp[0]), 3), round(float(bzrp[1]), 3)
+        except Exception:
+            pass
+
         try:
             toolhead = self.printer.lookup_object("toolhead")
             status = toolhead.get_status(self.printer.get_reactor().monotonic())

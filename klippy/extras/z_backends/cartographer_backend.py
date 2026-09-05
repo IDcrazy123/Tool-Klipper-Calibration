@@ -23,8 +23,11 @@ class CartographerBackend(BaseZBackend):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self.touch_home_gcode = config.get("touch_home_gcode", "CARTOGRAPHER_TOUCH_HOME")
-        self.touch_probe_gcode = config.get("touch_probe_gcode", "CARTOGRAPHER_TOUCH_PROBE")
+        self.configured_touch_home_gcode = config.get("touch_home_gcode", None)
+        self.configured_touch_probe_gcode = config.get("touch_probe_gcode", None)
+        self.touch_speed = config.getfloat("carto_touch_speed", None, above=0.0)
+        self.touch_retries = config.getint("carto_touch_retries", None, minval=1)
+        self.touch_tolerance = config.getfloat("carto_touch_tolerance", None, above=0.0)
         self.probe_x = config.getfloat("carto_probe_x", None)
         self.probe_y = config.getfloat("carto_probe_y", None)
         self.max_touch_temp = config.getfloat("carto_max_touch_temp", 150.0, above=50.0, maxval=200.0)
@@ -33,6 +36,47 @@ class CartographerBackend(BaseZBackend):
             config.get("touch_model_config_path", "~/printer_data/config/printer.cfg")
         )
         self.touch_model_z_offset = self._load_touch_model_offset()
+
+    def _resolve_touch_cmd(self, configured: Optional[str], primary: str, fallbacks: Tuple[str, ...]) -> str:
+        """Finds the active command registered in Klipper gcode command registry."""
+        if configured:
+            return configured
+        if hasattr(self.gcode, "commands") and self.gcode.commands:
+            if primary in self.gcode.commands:
+                return primary
+            for fb in fallbacks:
+                if fb in self.gcode.commands:
+                    return fb
+        return primary
+
+    def _build_command_str(self, base_cmd: str) -> str:
+        """Appends official Cartographer SPEED, TOLERANCE, RETRIES parameters if configured."""
+        parts = [base_cmd]
+        if self.touch_speed is not None and "SPEED=" not in base_cmd:
+            parts.append(f"SPEED={self.touch_speed:.1f}")
+        if self.touch_tolerance is not None and "TOLERANCE=" not in base_cmd:
+            parts.append(f"TOLERANCE={self.touch_tolerance:.4f}")
+        if self.touch_retries is not None and "RETRIES=" not in base_cmd:
+            parts.append(f"RETRIES={self.touch_retries}")
+        return " ".join(parts)
+
+    @property
+    def touch_home_gcode(self) -> str:
+        raw = self._resolve_touch_cmd(
+            self.configured_touch_home_gcode,
+            "CARTOGRAPHER_TOUCH_HOME",
+            ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
+        )
+        return self._build_command_str(raw)
+
+    @property
+    def touch_probe_gcode(self) -> str:
+        raw = self._resolve_touch_cmd(
+            self.configured_touch_probe_gcode,
+            "CARTOGRAPHER_TOUCH",
+            ("SCANNER_TOUCH", "CARTOGRAPHER_TOUCH_HOME")
+        )
+        return self._build_command_str(raw)
 
     def _load_touch_model_offset(self) -> float:
         """Parses saved touch-model z_offset from the #*# auto-save section."""
@@ -101,8 +145,9 @@ class CartographerBackend(BaseZBackend):
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.wait_moves()
 
-        gcmd.respond_info(f"[tool_calibrator] Running {self.touch_home_gcode} on Reference Tool T{tool_number}")
-        self.gcode.run_script_from_command(self.touch_home_gcode)
+        cmd = self.touch_home_gcode
+        gcmd.respond_info(f"[tool_calibrator] Running {cmd} on Reference Tool T{tool_number}")
+        self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
 
         measured_z = self._get_last_z_result()
@@ -131,8 +176,9 @@ class CartographerBackend(BaseZBackend):
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.wait_moves()
 
-        gcmd.respond_info(f"[tool_calibrator] Running {self.touch_probe_gcode} on Tool T{tool_number}")
-        self.gcode.run_script_from_command(self.touch_probe_gcode)
+        cmd = self.touch_probe_gcode
+        gcmd.respond_info(f"[tool_calibrator] Running {cmd} on Tool T{tool_number}")
+        self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
 
         measured_z = self._get_last_z_result()
