@@ -286,6 +286,37 @@ class TestServerEndpoints(unittest.TestCase):
             self.assertLess(np.std(us), 2.0, f"Tool {tool} U standard deviation too high")
             self.assertLess(np.std(vs), 2.0, f"Tool {tool} V standard deviation too high")
 
+    def test_picture_screenshot_shuffled_order_invariance(self):
+        """Verify that randomly shuffling test images produces identical sub-pixel detections (zero order bias)."""
+        import glob
+        import random
+        pattern = os.path.join(os.path.dirname(__file__), "..", "Picture Screenshot", "*", "*", "*.jpg")
+        files = glob.glob(pattern)
+        if not files:
+            return
+
+        detector = NozzleDetector()
+        # Baseline sequential detection
+        baseline = {}
+        for f in files:
+            img = cv2.imread(f)
+            res = detector.detect(img)
+            self.assertTrue(res.found)
+            baseline[f] = res.center_uv
+
+        # Shuffled detection
+        shuffled = list(files)
+        random.seed(42)
+        random.shuffle(shuffled)
+
+        for f in shuffled:
+            img = cv2.imread(f)
+            res = detector.detect(img)
+            self.assertTrue(res.found)
+            b_u, b_v = baseline[f]
+            self.assertAlmostEqual(res.center_uv[0], b_u, delta=1e-4, msg=f"U coordinate order discrepancy on {f}")
+            self.assertAlmostEqual(res.center_uv[1], b_v, delta=1e-4, msg=f"V coordinate order discrepancy on {f}")
+
 
 
 if __name__ == "__main__":

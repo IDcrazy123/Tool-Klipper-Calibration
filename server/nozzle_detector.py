@@ -323,34 +323,41 @@ class NozzleDetector:
             minRadius=7,
             maxRadius=25
         )
-        proc_gray = gray
-        if circles is None or len(circles) == 0:
-            # Low-light & dim-illumination adaptive enhancement via CLAHE
-            if gray.mean() < 90 or gray.std() < 35:
-                clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-                proc_gray = clahe.apply(gray)
-                bilateral_enh = cv2.bilateralFilter(proc_gray, 9, 75, 75)
-                circles = cv2.HoughCircles(
-                    bilateral_enh,
-                    cv2.HOUGH_GRADIENT,
-                    dp=1,
-                    minDist=8,
-                    param1=50,
-                    param2=14,
-                    minRadius=7,
-                    maxRadius=25
-                )
+        all_candidates = []
+        if circles is not None and len(circles) > 0:
+            all_candidates.extend(circles[0])
 
-        if circles is None or len(circles) == 0:
+        proc_gray = gray
+        is_dim = (gray.mean() < 90 or gray.std() < 35)
+        if is_dim:
+            # Low-light & dim-illumination adaptive enhancement via CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            proc_gray = clahe.apply(gray)
+            bilateral_enh = cv2.bilateralFilter(proc_gray, 9, 75, 75)
+            enh_circles = cv2.HoughCircles(
+                bilateral_enh,
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=8,
+                param1=50,
+                param2=14,
+                minRadius=7,
+                maxRadius=25
+            )
+            if enh_circles is not None and len(enh_circles) > 0:
+                all_candidates.extend(enh_circles[0])
+
+        if not all_candidates:
             return None
 
         # Rank candidate circles by upper-arc radial gradient contrast and distance prior
-        best = self._rank_candidate_circles(proc_gray, circles[0], w, h, x0, y0)
+        best = self._rank_candidate_circles(proc_gray, np.array(all_candidates), w, h, x0, y0)
         if best is None:
             return None
 
-        # Refine candidate within ROI using upper-arc gradient symmetry
-        refined_local = self._refine_upper_arc_symmetry(gray, float(best[0]), float(best[1]), float(best[2]), max_shift=4.0)
+        # Refine candidate within ROI using radial gradient symmetry (using proc_gray for sharp gradients under dim light)
+        refine_img = proc_gray if is_dim else gray
+        refined_local = self._refine_upper_arc_symmetry(refine_img, float(best[0]), float(best[1]), float(best[2]), max_shift=4.0)
         global_x = float(x0 + refined_local[0])
         global_y = float(y0 + refined_local[1])
         return global_x, global_y, float(best[2])

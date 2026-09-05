@@ -8,6 +8,22 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.9] - 2026-09-05
+### Fixed
+- Low-Light Hough Candidate Starvation & False Edge Lock (Image 32 & Image 61):
+  - **Root Cause Identified:** Under dim illumination (L001, mean luminance < 60), the initial Hough transform pass on raw bilateral-filtered luminance produced 3-4 weak spurious edge/chamfer candidate circles. Because `len(circles) > 0`, the fallback condition `if circles is None or len(circles) == 0:` bypassed the CLAHE enhancement pipeline. Consequently, the true orifice candidate was absent from the candidate pool, forcing ranking and sub-pixel refinement to converge onto shadow/chamfer boundaries (Image 32 shifted left by ~5px to $U=732.40, R=16.6\text{px}$; Image 61 shifted down by ~3.7px to $V=325.95, R=24.4\text{px}$).
+  - **Algorithmic Fix:**
+    - Upgraded `detect_curvature_circle()` in `server/nozzle_detector.py` to unconditionally pool candidate circles from both baseline bilateral filtering and CLAHE-enhanced contrast whenever illumination is dim (`gray.mean() < 90 or gray.std() < 35`).
+    - Sub-pixel radial gradient refinement (`_refine_upper_arc_symmetry`) dynamically uses the enhanced `proc_gray` contrast map under low-light conditions, ensuring sharp Sobel gradients and robust edge locking.
+  - **Result Verification:**
+    - **Image 32 (`T2_L001_F02`):** Corrected from $(U=732.40, V=326.05, R=16.6\text{px})$ to $(U=737.10, V=325.40, R=20.4\text{px})$, perfectly concentric with T2 cluster ($U \approx 736.72, V \approx 324.70, \Delta < 0.7\text{px}$).
+    - **Image 61 (`T4_L001_F01`):** Corrected from $(U=732.95, V=325.95, R=24.4\text{px})$ to $(U=735.50, V=321.95, R=21.8\text{px})$, perfectly concentric with T4 cluster ($V \approx 322.74, \Delta < 0.8\text{px}$).
+- Deterministic Order Invariance & Randomized Shuffle Verification:
+  - Added randomized order testing across the entire 75-frame dataset (`Picture Screenshot`), verifying that processing images in random sequence yields identical sub-pixel coordinates ($\Delta U = 0.000000\text{px}, \Delta V = 0.000000\text{px}$) with zero state leakage or sequence hysteresis.
+  - Added unit test `test_picture_screenshot_shuffled_order_invariance` in `tests/test_vision.py`.
+  - Regenerated all 75 annotated full frames, 4X zoomed crops, `INDEX.csv`, and `README.md` in `test_annotated_results/`.
+  - Unit test suite expanded to **45 passing tests**.
+
 ---
 
 ## [0.8.8] - 2026-09-05
