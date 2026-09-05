@@ -6,11 +6,34 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ## [Unreleased]
 ### Planned
-- Phase 2: Background Vision Service implementation with 3-tier OpenCV cascade.
-- Phase 3: Klipper Core Extension implementation with 3-tier safe navigation and dual Z backends.
 - Phase 4: G-code macro suite and interactive position teaching commands.
 - Phase 5: Hardware benchmarking and repeatable precision verification.
 - Phase 6: Automated Linux installation scripts and Moonraker packaging.
+
+---
+
+## [0.3.0] - 2026-09-05
+### Added
+- Core Klipper extension in `klippy/extras/`:
+  - `safe_navigator.py`: 3-tier safe waypointing kinematics controller (`Safe_Z`, `Safe_Approach`, `Target`).
+  - `config_manager.py`: Atomic persistence with isolated `tool_offsets.cfg` and rolling timestamped backups.
+  - `z_backends/base_z.py`: Abstract Z probe interface.
+  - `z_backends/switch_backend.py`: Physical switch endstop probing with `tools_calibrate` conflict prevention.
+  - `z_backends/cartographer_backend.py`: Cartographer V4 Touch Home & Touch Probe backend.
+  - `tool_calibrator.py`: Primary Klipper module orchestrating G-codes (`CALIBRATE_TOOL_OFFSETS`, `CALIBRATION_SET_SAFE_POS`, `CALIBRATION_ROLLBACK_OFFSETS`, `CALIBRATION_STATUS`).
+- Unit tests in `tests/test_klipper_logic.py` verifying atomic persistence, formatting, and rollback.
+
+---
+
+## [0.2.0] - 2026-09-05
+### Added
+- External machine vision background service in `server/`:
+  - `stream_grabber.py`: Snapshot acquisition from Crowsnest/camera-streamer with HTTP timeout protection.
+  - `nozzle_detector.py`: 3-tier cascade (`Standard`, `Relaxed`, `Super-Relaxed`) with dual preprocessors (Gamma + YUV Adaptive Gaussian, Triangle threshold).
+  - `affine_transform.py`: Star-pattern mm-per-pixel (`mpp`) calibration and 2nd-order polynomial matrix inversion with 0.55 damping.
+  - `visual_debugger.py`: Thread-safe MJPEG streamer and dynamic HUD overlay for web preview.
+  - `tool_calibrator_server.py`: Flask + Waitress HTTP daemon running on port 8090.
+- Unit tests in `tests/test_vision.py` with synthetic circular nozzle images.
 
 ---
 

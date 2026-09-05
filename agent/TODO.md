@@ -8,7 +8,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 
 - [x] **Phase 1: Architecture, Documentation & Environment Setup** *(Completed)*
 - [x] **Phase 2: Vision Background Service Implementation (`server/`)** *(Completed)*
-- [ ] **Phase 3: Klipper Core Extension Implementation (`klippy/extras/`)**
+- [x] **Phase 3: Klipper Core Extension Implementation (`klippy/extras/`)** *(Completed)*
 - [ ] **Phase 4: User Macro Suite & Hook Integration (`macros/`)**
 - [ ] **Phase 5: Offline Synthetic Testing & Dry-Run Benchmarking**
 - [ ] **Phase 6: Automated Packaging, Install Scripts & Release**
@@ -31,12 +31,12 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 2.5:** Develop `tool_calibrator_server.py` exposing REST JSON endpoints on port 8090 (`/health`, `/detect_nozzle`, `/calibrate_mpp`, `/preview`).
 
 ### Phase 3: Klipper Core Extension (`klippy/extras/`)
-- [ ] **Task 3.1:** Implement `tool_calibrator.py` core orchestrator class and G-code dispatcher.
-- [ ] **Task 3.2:** Develop `safe_navigator.py` implementing 3-tier waypoint transitions and motion boundaries.
-- [ ] **Task 3.3:** Build `z_backends/base_z.py` abstract interface.
-- [ ] **Task 3.4:** Implement `z_backends/switch_backend.py` supporting physical endstop probing.
-- [ ] **Task 3.5:** Implement `z_backends/cartographer_backend.py` supporting Cartographer V4 Touch Home & Touch Probe.
-- [ ] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
+- [x] **Task 3.1:** Implement `tool_calibrator.py` core orchestrator class and G-code dispatcher.
+- [x] **Task 3.2:** Develop `safe_navigator.py` implementing 3-tier waypoint transitions and motion boundaries.
+- [x] **Task 3.3:** Build `z_backends/base_z.py` abstract interface.
+- [x] **Task 3.4:** Implement `z_backends/switch_backend.py` supporting physical endstop probing.
+- [x] **Task 3.5:** Implement `z_backends/cartographer_backend.py` supporting Cartographer V4 Touch Home & Touch Probe.
+- [x] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
 
 ### Phase 4: Macro Suite & Hook Integration (`macros/`)
 - [ ] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.
