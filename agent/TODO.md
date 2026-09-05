@@ -7,7 +7,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 ## 📊 Phase Overview & Status
 
 - [x] **Phase 1: Architecture, Documentation & Environment Setup** *(Completed)*
-- [ ] **Phase 2: Vision Background Service Implementation (`server/`)**
+- [x] **Phase 2: Vision Background Service Implementation (`server/`)** *(Completed)*
 - [ ] **Phase 3: Klipper Core Extension Implementation (`klippy/extras/`)**
 - [ ] **Phase 4: User Macro Suite & Hook Integration (`macros/`)**
 - [ ] **Phase 5: Offline Synthetic Testing & Dry-Run Benchmarking**
@@ -24,11 +24,11 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 1.4:** Create root `README.md` and `README.vi.md`.
 
 ### Phase 2: Vision Background Service (`server/`)
-- [ ] **Task 2.1:** Implement `stream_grabber.py` to acquire low-latency MJPEG snapshot frames from Crowsnest.
-- [ ] **Task 2.2:** Build `nozzle_detector.py` featuring TAMV-derived 3-tier cascade (Standard, Relaxed, Super-Relaxed).
-- [ ] **Task 2.3:** Implement `affine_transform.py` for star-pattern mm-per-pixel (`mpp`) calibration and matrix inversion.
-- [ ] **Task 2.4:** Build `visual_debugger.py` to stream live MJPEG previews with crosshairs and detected circles.
-- [ ] **Task 2.5:** Develop `tool_calibrator_server.py` exposing REST JSON endpoints on port 8090 (`/health`, `/detect_nozzle`, `/calibrate_mpp`, `/preview`).
+- [x] **Task 2.1:** Implement `stream_grabber.py` to acquire low-latency MJPEG snapshot frames from Crowsnest.
+- [x] **Task 2.2:** Build `nozzle_detector.py` featuring TAMV-derived 3-tier cascade (Standard, Relaxed, Super-Relaxed).
+- [x] **Task 2.3:** Implement `affine_transform.py` for star-pattern mm-per-pixel (`mpp`) calibration and matrix inversion.
+- [x] **Task 2.4:** Build `visual_debugger.py` to stream live MJPEG previews with crosshairs and detected circles.
+- [x] **Task 2.5:** Develop `tool_calibrator_server.py` exposing REST JSON endpoints on port 8090 (`/health`, `/detect_nozzle`, `/calibrate_mpp`, `/preview`).
 
 ### Phase 3: Klipper Core Extension (`klippy/extras/`)
 - [ ] **Task 3.1:** Implement `tool_calibrator.py` core orchestrator class and G-code dispatcher.
