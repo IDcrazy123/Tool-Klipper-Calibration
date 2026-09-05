@@ -199,32 +199,32 @@ class NozzleDetector:
         # Alg 2: Grayscale + Median Blur (multi-threshold slice sweep - optimal for micro-orifices)
         # Alg 0: Gamma + YUV Adaptive Gaussian (for low-contrast or dark nozzles)
         # Alg 1: Gamma + Triangle Threshold (for shiny brass tip glare)
-        cascades = [
-            (2, self.standard_detector, 1, 1),
-            (0, self.standard_detector, 1, 2),
-            (1, self.standard_detector, 1, 3),
-            (2, self.relaxed_detector, 2, 4),
-            (0, self.relaxed_detector, 2, 5),
-            (1, self.relaxed_detector, 2, 6),
-            (2, self.super_relaxed_detector, 3, 7),
+        # Tiered cascade stages: evaluate preprocessors within each tier and select
+        # the candidate closest to the optical center to prevent latching onto peripheral debris.
+        tier_stages = [
+            (1, self.standard_detector, [(2, 1), (0, 2), (1, 3)]),
+            (2, self.relaxed_detector, [(2, 4), (0, 5), (1, 6)]),
+            (3, self.super_relaxed_detector, [(2, 7)]),
         ]
-
-        # Prioritize last successful combo if available
-        if self.last_successful_combo is not None:
-            cascades.sort(key=lambda c: 0 if c[3] == self.last_successful_combo else 1)
 
         chosen_keypoint: Optional[cv2.KeyPoint] = None
         matched_tier = 0
         matched_combo = 0
 
-        for alg, detector, tier, combo_id in cascades:
-            preprocessed = self.preprocess_image(frame, algorithm=alg)
-            keypoints = detector.detect(preprocessed)
-            if keypoints:
-                chosen_keypoint = self._find_closest_keypoint(keypoints) if len(keypoints) > 1 else keypoints[0]
+        for tier, detector, combos in tier_stages:
+            tier_candidates = []
+            for alg, combo_id in combos:
+                preprocessed = self.preprocess_image(frame, algorithm=alg)
+                keypoints = detector.detect(preprocessed)
+                for kp in keypoints:
+                    dist = math.hypot(kp.pt[0] - self.image_center[0], kp.pt[1] - self.image_center[1])
+                    tier_candidates.append((dist, kp, combo_id))
+            if tier_candidates:
+                tier_candidates.sort(key=lambda item: item[0])
+                chosen_keypoint = tier_candidates[0][1]
+                matched_combo = tier_candidates[0][2]
                 matched_tier = tier
-                matched_combo = combo_id
-                self.last_successful_combo = combo_id
+                self.last_successful_combo = matched_combo
                 break
 
         # Draw visual overlay on debug frame
