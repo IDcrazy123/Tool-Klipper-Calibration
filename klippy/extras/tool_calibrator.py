@@ -156,13 +156,18 @@ class ToolCalibrator:
 
             vision_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
             if not vision_resp.get("found"):
-                raise SafeNavigatorException(f"[ERR_CV_201] Nozzle orifice not found during centering attempt {iteration}.")
+                # Retry once after brief settling pause to handle transient motion blur
+                self.reactor.pause(self.reactor.monotonic() + 0.25)
+                vision_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
+                if not vision_resp.get("found"):
+                    raise SafeNavigatorException(f"[ERR_CV_201] Nozzle orifice not found during centering attempt {iteration}.")
 
             center_uv = vision_resp.get("center_uv")
             offset_resp = self._query_vision("calculate_offset", {"center_uv": center_uv})
             dx, dy = offset_resp.get("offset_xy", [0.0, 0.0])
 
-            gcmd.respond_info(f"  -> Centering Step {iteration}: Delta X{dx:+.3f}mm Y{dy:+.3f}mm (UV: {center_uv})")
+            tier_desc = "Tier 0 Curvature" if vision_resp.get("combo") == 10 else f"Tier {vision_resp.get('tier', 1)}"
+            gcmd.respond_info(f"  -> Centering Step {iteration}: Delta X{dx:+.3f}mm Y{dy:+.3f}mm (UV: {center_uv}, {tier_desc})")
 
             # Check if converged within tolerance
             if abs(dx) <= self.tolerance_mm and abs(dy) <= self.tolerance_mm:

@@ -16,6 +16,7 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
   - Overhauled `server/templates/index.html` with modern Rich Aesthetics: Inter typography, glassmorphism, dynamic Zoom 1.0X/2.0X/3.5X controls, and visual detection result HUD with sub-pixel coordinates $(X, Y, R)$ and confidence meter.
   - Added REST endpoints `GET /api/samples` and `POST /api/test_sample` in `server/tool_calibrator_server.py` allowing instant 1-click testing of live camera or benchmark datasets directly in the web UI.
   - Expanded `scripts/generate_sample_dataset.py` with realistic optical simulators (`sim_conical_glare_flare.jpg`, `sim_ruby_gemstone.jpg`) generating conical glare flares and translucent ruby gemstone structures for continuous regression testing.
+  - Enhanced visual servoing `_center_nozzle()` in `klippy/extras/tool_calibrator.py` with automatic retry after mechanical settling to prevent transient motion blur aborts, and added real-time optical tier reporting (`Tier 0 Curvature`, `Tier 1 Standard`, etc.) to Klipper console responses.
   - Added automated unit test `test_sample_api_endpoints` in `tests/test_vision.py`, expanding test coverage to 26 automated unit tests.
 
 ---
