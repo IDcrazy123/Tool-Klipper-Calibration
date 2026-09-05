@@ -274,8 +274,8 @@ class ToolCalibrator:
             self.navigator.approach_switch(toolhead, gcode_move)
         else:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
-            if self.z_backend.probe_x is not None and self.z_backend.probe_y is not None:
-                toolhead.manual_move([self.z_backend.probe_x, self.z_backend.probe_y, None], self.navigator.travel_speed)
+            probe_x, probe_y = self.z_backend.get_probe_xy()
+            toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
 
         if tool_no == self.reference_tool:
             ref_z = self.z_backend.probe_reference_tool(tool_no, gcmd)

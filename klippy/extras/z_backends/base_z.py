@@ -3,7 +3,7 @@ Abstract Base Interface for Z Calibration Backends in Tool-Klipper-Calibration.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 
 class BaseZBackend(ABC):
@@ -15,6 +15,22 @@ class BaseZBackend(ABC):
         self.config = config
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object("gcode")
+
+    def get_probe_xy(self) -> Tuple[float, float]:
+        """
+        Returns designated probing coordinates (X, Y).
+        Defaults to the exact bed center to eliminate bed mesh / tilt bias.
+        """
+        try:
+            toolhead = self.printer.lookup_object("toolhead")
+            status = toolhead.get_status(self.printer.get_reactor().monotonic())
+            axis_min = status.get("axis_minimum", [0.0, 0.0, 0.0])
+            axis_max = status.get("axis_maximum", [300.0, 300.0, 300.0])
+            cx = (axis_min[0] + axis_max[0]) / 2.0
+            cy = (axis_min[1] + axis_max[1]) / 2.0
+            return round(cx, 3), round(cy, 3)
+        except Exception:
+            return 150.0, 150.0
 
     @abstractmethod
     def probe_reference_tool(self, tool_number: int, gcmd) -> Dict[str, Any]:

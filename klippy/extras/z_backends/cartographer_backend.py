@@ -2,9 +2,11 @@
 Cartographer Touch V4 Z-Backend Implementation for Tool-Klipper-Calibration.
 
 Integrates with Cartographer 3D eddy-current nozzle touch home and probing routines.
+Accurately computes relative delta Z offsets across multi-toolheads with thermal safety,
+auto bed-center fallback, and safe nozzle liftoff retraction.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import logging
 import os
 from .base_z import BaseZBackend
@@ -15,6 +17,8 @@ logger = logging.getLogger("tool_calibrator.cartographer_backend")
 class CartographerBackend(BaseZBackend):
     """
     Measures toolhead contact heights using Cartographer Touch routines.
+    Computes precise relative delta Z-offsets between Reference Tool (T0)
+    and secondary tools (T1..Tn).
     """
 
     def __init__(self, config) -> None:
@@ -23,6 +27,8 @@ class CartographerBackend(BaseZBackend):
         self.touch_probe_gcode = config.get("touch_probe_gcode", "CARTOGRAPHER_TOUCH_PROBE")
         self.probe_x = config.getfloat("carto_probe_x", None)
         self.probe_y = config.getfloat("carto_probe_y", None)
+        self.max_touch_temp = config.getfloat("carto_max_touch_temp", 150.0, above=50.0, maxval=200.0)
+        self.retract_z = config.getfloat("carto_retract_z", 5.0, above=1.0, maxval=30.0)
         self.touch_model_config_path = os.path.expanduser(
             config.get("touch_model_config_path", "~/printer_data/config/printer.cfg")
         )
@@ -52,6 +58,32 @@ class CartographerBackend(BaseZBackend):
             logger.warning(f"Could not parse Cartographer touch-model offset: {ex}")
         return 0.0
 
+    def get_probe_xy(self) -> Tuple[float, float]:
+        """
+        Returns designated touch probing coordinates (X, Y).
+        Defaults to the exact bed center to eliminate bed mesh / tilt bias.
+        """
+        if self.probe_x is not None and self.probe_y is not None:
+            return self.probe_x, self.probe_y
+        return super().get_probe_xy()
+
+    def _check_thermal_safety(self, tool_number: int, gcmd) -> None:
+        """Ensures nozzle temperature does not exceed safe touch limit (protecting PEI bed)."""
+        extruder_name = f"extruder{tool_number}" if tool_number > 0 else "extruder"
+        extruder = self.printer.lookup_object(extruder_name, None)
+        if extruder is not None and hasattr(extruder, "get_status"):
+            try:
+                status = extruder.get_status(self.printer.get_reactor().monotonic())
+                temp = status.get("temperature", 0.0)
+                if temp > self.max_touch_temp:
+                    raise gcmd.error(
+                        f"[ERR_PRE_002] Tool T{tool_number} nozzle temperature ({temp:.1f}°C) exceeds safe Cartographer touch limit ({self.max_touch_temp:.1f}°C). Cool nozzle before touch probing."
+                    )
+            except Exception as ex:
+                if "ERR_PRE_002" in str(ex):
+                    raise
+                logger.debug(f"Thermal check skipped for {extruder_name}: {ex}")
+
     def _get_last_z_result(self) -> Optional[float]:
         """Queries the last measured probe Z result from printer objects."""
         for obj_name in ("cartographer", "scanner", "probe"):
@@ -61,6 +93,11 @@ class CartographerBackend(BaseZBackend):
         return None
 
     def probe_reference_tool(self, tool_number: int, gcmd) -> Dict[str, Any]:
+        """
+        Executes baseline Cartographer touch measurement for Reference Tool (T0).
+        Records the physical contact height Z_ref.
+        """
+        self._check_thermal_safety(tool_number, gcmd)
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.wait_moves()
 
@@ -68,15 +105,29 @@ class CartographerBackend(BaseZBackend):
         self.gcode.run_script_from_command(self.touch_home_gcode)
         toolhead.wait_moves()
 
+        measured_z = self._get_last_z_result()
+        if measured_z is None:
+            measured_z = float(toolhead.get_position()[2])
+
+        # Immediate safe liftoff from the bed surface
+        cur_pos = toolhead.get_position()
+        toolhead.manual_move([None, None, cur_pos[2] + self.retract_z], 15.0)
+        toolhead.wait_moves()
+
         return {
             "source": "cartographer_touch_reference",
-            "contact_z": 0.0,
+            "contact_z": measured_z,
             "suggested_z_offset": 0.0,
             "touch_model_z_offset": self.touch_model_z_offset,
             "tool_number": tool_number
         }
 
     def probe_secondary_tool(self, tool_number: int, reference_result: Dict[str, Any], gcmd) -> Dict[str, Any]:
+        """
+        Executes Cartographer touch measurement for secondary tools (T1..Tn).
+        Computes relative physical delta: delta_z = measured_z - ref_contact_z.
+        """
+        self._check_thermal_safety(tool_number, gcmd)
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.wait_moves()
 
@@ -86,14 +137,20 @@ class CartographerBackend(BaseZBackend):
 
         measured_z = self._get_last_z_result()
         if measured_z is None:
-            # Fallback: toolhead Z position minus touch model offset
-            cur_z = float(toolhead.get_position()[2])
-            measured_z = cur_z - self.touch_model_z_offset
+            measured_z = float(toolhead.get_position()[2])
+
+        # Immediate safe liftoff from the bed surface
+        cur_pos = toolhead.get_position()
+        toolhead.manual_move([None, None, cur_pos[2] + self.retract_z], 15.0)
+        toolhead.wait_moves()
+
+        ref_z = reference_result.get("contact_z", 0.0)
+        delta_z = round(measured_z - ref_z, 3)
 
         return {
             "source": "cartographer_touch",
             "contact_z": measured_z,
-            "suggested_z_offset": round(measured_z, 3),
+            "suggested_z_offset": delta_z,
             "touch_model_z_offset": self.touch_model_z_offset,
             "tool_number": tool_number
         }

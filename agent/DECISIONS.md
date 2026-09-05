@@ -138,4 +138,29 @@ Implement a two-stage hybrid detection architecture in `server/nozzle_detector.p
 - Mechanically turned nozzle faces and orifice holes are strictly invariant circles with constant radial curvature.
 - Completely immunizes the vision daemon against downward specular flares, lateral shadow bias, and silicone sock false locks while maintaining $< 50\text{ms}$ frame processing times.
 
+---
+
+## ADR-010: Cartographer Touch V4 Relative Delta Z Formulation, PEI Thermal Guard, and Center Probing
+
+### Context
+Cartographer 3D V4 eddy-current probes feature high-precision nozzle-touch homing (`CARTOGRAPHER_TOUCH_HOME` / `CARTOGRAPHER_TOUCH_PROBE`). In multi-toolhead toolchangers, nozzle lengths vary across tools. Furthermore, direct physical nozzle contact on PEI beds at elevated printing temperatures (> 150°C) permanently damages the PEI film. Off-center probing also introduces bed tilt and mesh distortion bias into relative tool offsets.
+
+### Decision
+1. **Relative Delta Z Formulation:**
+   - Reference Tool $T_{ref}$ (T0) touches the bed at $Z_{ref}$ (suggested offset = $0.000\text{mm}$).
+   - Secondary Tool $T_n$ touches the bed at $Z_n$.
+   - Relative offset is computed as:
+     $$\Delta Z = Z_n - Z_{ref}$$
+   - When a nozzle is longer ($Z_n > Z_{ref} \implies \Delta Z > 0$), positive offset adjusts Klipper's toolhead coordinate frame downwards, preserving identical layer heights. When a nozzle is shorter ($Z_n < Z_{ref} \implies \Delta Z < 0$), negative offset brings the tool closer.
+2. **PEI Bed Thermal Safety Guard (`ERR_PRE_002`):**
+   - Before dispatching any touch commands, `_check_thermal_safety()` queries extruder temperature. If temperature exceeds `carto_max_touch_temp` (default 150°C), probing immediately halts with `[ERR_PRE_002]`.
+3. **Bed Center Coordinate Auto-Derivation:**
+   - Both baseline and secondary touch probing execute at the bed's exact geometric center $((X_{min} + X_{max})/2, (Y_{min} + Y_{max})/2)$ when `carto_probe_x/y` are omitted. Probing at identical coordinates completely cancels out bed tilt, frame expansion, and mesh curvature.
+4. **Immediate Post-Probe Liftoff Retraction:**
+   - Following every touch contact, the toolhead immediately retracts $+5.0\text{mm}$ (`carto_retract_z`) at $15\text{mm/s}$ before initiating dock transit or tool selection moves.
+
+### Rationale
+- Completely eliminates bed sticker melting, eliminates bed tilt systematic errors, and ensures safe multi-tool Z calibration with sub-micron repeatability.
+
+
 

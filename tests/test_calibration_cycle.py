@@ -134,11 +134,11 @@ class DummyConfig:
     def get(self, key, default=None):
         return self.data.get(key, default)
 
-    def getint(self, key, default=None, minval=None, maxval=None):
+    def getint(self, key, default=None, minval=None, maxval=None, above=None, below=None, **kwargs):
         val = self.data.get(key, default)
         return int(val) if val is not None else default
 
-    def getfloat(self, key, default=None, above=None, below=None):
+    def getfloat(self, key, default=None, minval=None, maxval=None, above=None, below=None, **kwargs):
         val = self.data.get(key, default)
         return float(val) if val is not None else default
 
