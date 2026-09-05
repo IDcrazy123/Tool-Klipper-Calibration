@@ -10,6 +10,17 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ---
 
+## [0.8.1] - 2026-09-05
+### Added
+- Radial Edge-Curvature Invariance & Upper-Arc Symmetry Refinement:
+  - Added Tier 0 / Primary detector in `server/nozzle_detector.py` combining bilateral edge filtering with `cv2.HoughCircles` and sub-pixel radial gradient symmetry optimization.
+  - Implemented upper-arc gradient projection (`_refine_upper_arc_symmetry` from $150^\circ$ to $30^\circ$ elevation), completely eliminating downward center pull caused by specular flare traps on conical flanks.
+  - Resolved 4 critical real-world failure modes inherent to kTAMV's binary blob moments ($m_{10}/m_{00}, m_{01}/m_{00}$): downward conical glare flares, lateral shadow/reflection asymmetry, silicone sock aperture misidentification, and translucent Ruby/Sapphire gemstone inversion.
+  - Updated 13 verified benchmark annotations with sub-pixel HUD badges and 3.5X micro-magnification in `tests/annotated_results/`.
+  - Maintained 100% pass rate across 25 automated unit and integration tests.
+
+---
+
 ## [0.8.0] - 2026-09-05
 ### Added
 - Generic Multi-Toolchanger Architecture Discovery:

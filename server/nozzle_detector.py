@@ -174,6 +174,85 @@ class NozzleDetector:
             blurred = cv2.medianBlur(gray, 5)
             return cv2.cvtColor(blurred, cv2.COLOR_GRAY2BGR)
 
+    def _refine_upper_arc_symmetry(
+        self, gray: np.ndarray, cx: float, cy: float, radius: float, max_shift: float = 4.0
+    ) -> Tuple[float, float]:
+        """
+        Refines nozzle center by optimizing radial gradient consistency along the upper arc
+        (150-deg to 30-deg elevation), completely avoiding downward conical specular glare flares.
+        """
+        try:
+            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            angles = np.linspace(-np.pi * 0.85, -np.pi * 0.15, 30)
+            cos_a = np.cos(angles).astype(np.float32)
+            sin_a = np.sin(angles).astype(np.float32)
+
+            best_score = -1e9
+            best_c = (cx, cy)
+            shifts = np.arange(-max_shift, max_shift + 0.5, 0.5, dtype=np.float32)
+            h, w = gray.shape[:2]
+
+            for dy in shifts:
+                y = cy + dy
+                for dx in shifts:
+                    x = cx + dx
+                    px = x + radius * cos_a
+                    py = y + radius * sin_a
+                    if px.min() < 1 or px.max() >= w - 1 or py.min() < 1 or py.max() >= h - 1:
+                        continue
+                    ix = np.round(px).astype(int)
+                    iy = np.round(py).astype(int)
+                    proj = gx[iy, ix] * cos_a + gy[iy, ix] * sin_a
+                    score = float(np.mean(np.abs(proj)))
+                    if score > best_score:
+                        best_score = score
+                        best_c = (float(x), float(y))
+            return best_c
+        except Exception:
+            return cx, cy
+
+    def detect_curvature_circle(self, frame: np.ndarray) -> Optional[Tuple[float, float, float]]:
+        """
+        High-precision Tier 0 detector using bilateral edge filtering, Hough circular curvature,
+        and upper-arc radial gradient refinement in the central region of interest.
+        """
+        h, w = frame.shape[:2]
+        cx_center, cy_center = w / 2.0, h / 2.0
+        r_roi = min(int(min(w, h) * 0.35), 140)
+
+        x0 = max(0, int(cx_center - r_roi))
+        x1 = min(w, int(cx_center + r_roi))
+        y0 = max(0, int(cy_center - r_roi))
+        y1 = min(h, int(cy_center + r_roi))
+        roi = frame[y0:y1, x0:x1]
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+
+        circles = cv2.HoughCircles(
+            bilateral,
+            cv2.HOUGH_GRADIENT,
+            dp=1,
+            minDist=8,
+            param1=60,
+            param2=16,
+            minRadius=7,
+            maxRadius=25
+        )
+        if circles is None or len(circles) == 0:
+            return None
+
+        roi_cx, roi_cy = cx_center - x0, cy_center - y0
+        c_list = sorted(circles[0], key=lambda c: np.hypot(c[0] - roi_cx, c[1] - roi_cy))
+        best = c_list[0]
+
+        # Refine candidate within ROI using upper-arc gradient symmetry
+        refined_local = self._refine_upper_arc_symmetry(gray, float(best[0]), float(best[1]), float(best[2]), max_shift=4.0)
+        global_x = float(x0 + refined_local[0])
+        global_y = float(y0 + refined_local[1])
+        return global_x, global_y, float(best[2])
+
     def _find_closest_keypoint(self, keypoints: List[cv2.KeyPoint]) -> cv2.KeyPoint:
         """Selects the detected candidate closest to the optical center."""
         cx, cy = self.image_center
@@ -184,7 +263,9 @@ class NozzleDetector:
 
     def detect(self, frame: np.ndarray) -> DetectionResult:
         """
-        Runs the 3-tier cascade detection pipeline on the provided frame.
+        Runs the multi-stage detection pipeline on the provided frame:
+        1. Primary: Radial Edge-Curvature Gradient Invariance with Upper-Arc Symmetry.
+        2. Fallback: 3-tier cascade SimpleBlobDetector with multi-algorithm preprocessing.
 
         Returns:
             DetectionResult with detected sub-pixel coordinates and annotated image.
@@ -195,37 +276,50 @@ class NozzleDetector:
         self.frame_height = height
         self.image_center = (width / 2.0, height / 2.0)
 
-        # Detection cascade combinations: (preprocessor_alg, detector, tier, combo_id)
-        # Alg 2: Grayscale + Median Blur (multi-threshold slice sweep - optimal for micro-orifices)
-        # Alg 0: Gamma + YUV Adaptive Gaussian (for low-contrast or dark nozzles)
-        # Alg 1: Gamma + Triangle Threshold (for shiny brass tip glare)
-        # Tiered cascade stages: evaluate preprocessors within each tier and select
-        # the candidate closest to the optical center to prevent latching onto peripheral debris.
-        tier_stages = [
-            (1, self.standard_detector, [(2, 1), (0, 2), (1, 3)]),
-            (2, self.relaxed_detector, [(2, 4), (0, 5), (1, 6)]),
-            (3, self.super_relaxed_detector, [(2, 7)]),
-        ]
-
-        chosen_keypoint: Optional[cv2.KeyPoint] = None
+        pt_x: Optional[float] = None
+        pt_y: Optional[float] = None
+        radius: float = 0.0
         matched_tier = 0
         matched_combo = 0
 
-        for tier, detector, combos in tier_stages:
-            tier_candidates = []
-            for alg, combo_id in combos:
-                preprocessed = self.preprocess_image(frame, algorithm=alg)
-                keypoints = detector.detect(preprocessed)
-                for kp in keypoints:
-                    dist = math.hypot(kp.pt[0] - self.image_center[0], kp.pt[1] - self.image_center[1])
-                    tier_candidates.append((dist, kp, combo_id))
-            if tier_candidates:
-                tier_candidates.sort(key=lambda item: item[0])
-                chosen_keypoint = tier_candidates[0][1]
-                matched_combo = tier_candidates[0][2]
-                matched_tier = tier
-                self.last_successful_combo = matched_combo
-                break
+        # Tier 0 / Primary: Curvature Gradient Invariance
+        curv_result = self.detect_curvature_circle(frame)
+        if curv_result is not None:
+            pt_x, pt_y, radius = curv_result
+            matched_tier = 1
+            matched_combo = 10  # Curvature Invariant combo ID
+            self.last_successful_combo = matched_combo
+        else:
+            # Fallback: 3-tier cascade SimpleBlobDetector
+            tier_stages = [
+                (1, self.standard_detector, [(2, 1), (0, 2), (1, 3)]),
+                (2, self.relaxed_detector, [(2, 4), (0, 5), (1, 6)]),
+                (3, self.super_relaxed_detector, [(2, 7)]),
+            ]
+
+            chosen_keypoint: Optional[cv2.KeyPoint] = None
+            for tier, detector, combos in tier_stages:
+                tier_candidates = []
+                for alg, combo_id in combos:
+                    preprocessed = self.preprocess_image(frame, algorithm=alg)
+                    keypoints = detector.detect(preprocessed)
+                    for kp in keypoints:
+                        dist = math.hypot(kp.pt[0] - self.image_center[0], kp.pt[1] - self.image_center[1])
+                        tier_candidates.append((dist, kp, combo_id))
+                if tier_candidates:
+                    tier_candidates.sort(key=lambda item: item[0])
+                    chosen_keypoint = tier_candidates[0][1]
+                    matched_combo = tier_candidates[0][2]
+                    matched_tier = tier
+                    self.last_successful_combo = matched_combo
+                    break
+
+            if chosen_keypoint is not None:
+                raw_x, raw_y = chosen_keypoint.pt
+                radius = chosen_keypoint.size / 2.0
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                # Upper arc refinement to counteract glare flare
+                pt_x, pt_y = self._refine_upper_arc_symmetry(gray, raw_x, raw_y, radius, max_shift=3.0)
 
         # Draw visual overlay on debug frame
         cx, cy = int(self.image_center[0]), int(self.image_center[1])
@@ -235,30 +329,29 @@ class NozzleDetector:
         cv2.line(annotated, (cx, 0), (cx, height), (255, 255, 255), 1, cv2.LINE_AA)
         cv2.line(annotated, (0, cy), (width, cy), (255, 255, 255), 1, cv2.LINE_AA)
 
-        if chosen_keypoint is not None:
-            pt_x, pt_y = chosen_keypoint.pt
-            radius = int(chosen_keypoint.size / 2.0)
+        if pt_x is not None and pt_y is not None:
+            r_int = max(2, int(round(radius)))
             center = (int(round(pt_x)), int(round(pt_y)))
 
-            # Color coding: Green (Standard), Orange (Relaxed), Blue (Super-Relaxed)
+            # Color coding: Green (Standard/Curvature), Orange (Relaxed), Blue (Super-Relaxed)
             color_map = {1: (0, 255, 0), 2: (0, 165, 255), 3: (255, 100, 0)}
             circle_color = color_map.get(matched_tier, (0, 255, 0))
 
             # Draw transparent overlay circle over nozzle
             overlay = annotated.copy()
-            cv2.circle(overlay, center, radius, circle_color, -1, cv2.LINE_AA)
+            cv2.circle(overlay, center, r_int, circle_color, -1, cv2.LINE_AA)
             cv2.addWeighted(overlay, 0.35, annotated, 0.65, 0, annotated)
 
             # Draw crisp circle boundary and center cross
-            cv2.circle(annotated, center, radius, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.circle(annotated, center, r_int, (0, 0, 0), 1, cv2.LINE_AA)
             cv2.line(annotated, (center[0] - 6, center[1]), (center[0] + 6, center[1]), (0, 0, 255), 2)
             cv2.line(annotated, (center[0], center[1] - 6), (center[0], center[1] + 6), (0, 0, 255), 2)
 
-            confidence = 1.0 if matched_tier == 1 else (0.85 if matched_tier == 2 else 0.65)
+            confidence = 0.98 if matched_combo == 10 else (1.0 if matched_tier == 1 else (0.85 if matched_tier == 2 else 0.65))
             return DetectionResult(
                 found=True,
                 center_uv=(round(pt_x, 3), round(pt_y, 3)),
-                radius=round(chosen_keypoint.size / 2.0, 2),
+                radius=round(radius, 2),
                 confidence=confidence,
                 tier=matched_tier,
                 combo=matched_combo,

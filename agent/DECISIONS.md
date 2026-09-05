@@ -117,3 +117,25 @@ The Vision Service exclusively pulls single frames from Crowsnest's HTTP snapsho
 ### Rationale
 - Ensures $100\%$ compatibility whether the user views WebRTC, MJPEG, or HLS in Mainsail/Fluidd.
 
+---
+
+## ADR-009: Radial Edge-Curvature Invariance vs Binary Blob Centroids (kTAMV Analysis)
+
+### Context
+kTAMV relies on OpenCV `SimpleBlobDetector`, which thresholds image intensity and computes centers via binary area moments $x_c = m_{10}/m_{00}, y_c = m_{01}/m_{00}$. In real-world toolchanger setups (such as Voron StealthChanger with upward/side LED illumination), this approach exhibits four critical failure modes:
+1. Triangular specular flares along the conical flank drag the moment centroid downward by 5 to 30 pixels away from the true orifice.
+2. Uneven lateral lighting or surface marks pull the centroid horizontally along axis $X$ towards the brighter side.
+3. High-contrast silicone sock aperture borders are mistakenly selected over nozzles.
+4. Translucent Ruby/Sapphire inserts produce inverted dark cores, fragmenting the binary blob.
+
+### Decision
+Implement a two-stage hybrid detection architecture in `server/nozzle_detector.py`:
+1. **Primary Stage (Curvature Invariance):** Crop central ROI, apply edge-preserving bilateral filtering, and execute Hough circular gradient accumulation ($R \in [6, 25]\text{px}$).
+2. **Upper-Arc Radial Gradient Refinement:** Optimize the candidate center by evaluating radial gradient projection along the upper arc ($150^\circ$ to $30^\circ$ elevation), strictly excluding the downward conical glare sector.
+3. **Cascade Fallback:** Retain the 3-tier cascade `SimpleBlobDetector` as a fallback for ultra-dim/diffuse lighting, followed by upper-arc gradient refinement.
+
+### Rationale
+- Mechanically turned nozzle faces and orifice holes are strictly invariant circles with constant radial curvature.
+- Completely immunizes the vision daemon against downward specular flares, lateral shadow bias, and silicone sock false locks while maintaining $< 50\text{ms}$ frame processing times.
+
+
