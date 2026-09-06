@@ -58,12 +58,47 @@ MAX_PREVIEW_STREAMS = 2
 
 
 def _check_auth(req) -> bool:
-    """Verifies optional API token or active calibration session."""
+    """Verifies optional API token."""
     expected = calibration_lock.get("token")
     if not expected:
         return True
-    header_token = req.headers.get("X-Calibration-Token") or req.headers.get("Authorization", "").replace("Bearer ", "")
+    header_token = (
+        req.headers.get("X-API-Token")
+        or req.headers.get("Authorization", "").replace("Bearer ", "")
+        or req.headers.get("X-Calibration-Token")
+    )
     return header_token == expected
+
+
+def _check_session_ownership(req) -> Tuple[bool, Optional[str]]:
+    """
+    Ensures that if an exclusive calibration session lock is held,
+    the incoming request originates from the lock holder.
+    """
+    with lock_mutex:
+        now = time.time()
+        active_session = calibration_lock.get("session_id")
+        locked_at = calibration_lock.get("locked_at", 0.0)
+
+        if active_session is not None and (now - locked_at > 600):
+            calibration_lock["session_id"] = None
+            calibration_lock["locked_at"] = 0.0
+            active_session = None
+
+        if active_session is None:
+            return True, None
+
+    header_session = req.headers.get("X-Session-Token") or req.headers.get("X-Calibration-Token")
+    body_session = None
+    data = req.get_json(silent=True) if req.is_json else {}
+    if isinstance(data, dict):
+        body_session = data.get("session_token") or data.get("session_id")
+
+    req_session = header_session or body_session
+    if not req_session or req_session != active_session:
+        return False, "Session locked by another client or session token mismatch"
+
+    return True, None
 
 
 @app.route("/", methods=["GET"])
@@ -81,6 +116,7 @@ def health_check():
         "version": "0.8.8",
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,
+        "has_matrix": solver.transform_matrix is not None,
         "calibrated_mpp": solver.mpp,
         "session_locked": calibration_lock["session_id"] is not None
     }), 200
@@ -120,13 +156,20 @@ def release_lock():
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
-    req_session = data.get("session_id") or data.get("session_token")
+    req_session = (
+        request.headers.get("X-Session-Token")
+        or request.headers.get("X-Calibration-Token")
+        or data.get("session_id")
+        or data.get("session_token")
+    )
     with lock_mutex:
-        if calibration_lock["session_id"] is None or req_session is None or calibration_lock["session_id"] == req_session:
-            calibration_lock["session_id"] = None
-            calibration_lock["locked_at"] = 0.0
-            return jsonify({"success": True}), 200
-        return jsonify({"success": False, "error": "Session ID mismatch"}), 403
+        if calibration_lock["session_id"] is None:
+            return jsonify({"success": True, "message": "No active lock"}), 200
+        if not req_session or calibration_lock["session_id"] != req_session:
+            return jsonify({"success": False, "error": "Session ID mismatch or missing session token"}), 403
+        calibration_lock["session_id"] = None
+        calibration_lock["locked_at"] = 0.0
+        return jsonify({"success": True}), 200
 
 
 @app.route("/set_camera", methods=["POST"])
@@ -135,6 +178,9 @@ def set_camera():
     """Updates the snapshot camera URL."""
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data: Dict[str, Any] = request.get_json(force=True)
         new_url = data.get("camera_url") or data.get("url")
@@ -153,6 +199,9 @@ def set_mpp():
     """Updates the calibrated mm-per-pixel scale."""
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data: Dict[str, Any] = request.get_json(force=True)
         mpp = data.get("mpp")
@@ -166,6 +215,7 @@ def set_mpp():
     except Exception as ex:
         logger.exception("Error in /set_mpp")
         return jsonify({"success": False, "error": str(ex)}), 500
+
 
 
 @app.route("/detect_nozzle", methods=["POST"])
@@ -262,6 +312,11 @@ def calibrate_mpp():
     Computes millimeters per pixel from displacement samples:
     Payload: { "samples": [[dist_mm, dist_px], ...] }
     """
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
         samples = data.get("samples", [])
@@ -286,6 +341,9 @@ def solve_matrix():
     """
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
         points = data.get("calibration_points", [])
@@ -310,6 +368,9 @@ def set_matrix_endpoint():
     """Loads a pre-computed transformation matrix into the solver."""
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
         mat = data.get("matrix")
@@ -317,6 +378,7 @@ def set_matrix_endpoint():
             return jsonify({"success": False, "error": "Missing 'matrix' parameter"}), 400
         solver.set_matrix(mat)
         return jsonify({"success": True, "matrix": solver.get_matrix()}), 200
+
     except ValueError as ex:
         return jsonify({"success": False, "error": str(ex)}), 400
     except Exception as ex:

@@ -122,14 +122,14 @@ if [ -f "${MOONRAKER_CONF}" ]; then
     if ! grep -q "\[update_manager tool_calibrator\]" "${MOONRAKER_CONF}"; then
         echo -e "${CYAN}[+] Tự động thêm [update_manager tool_calibrator] vào ${MOONRAKER_CONF}...${NC}"
         cp "${MOONRAKER_CONF}" "${MOONRAKER_CONF}.bak"
-        cat >> "${MOONRAKER_CONF}" << 'EOF'
+        cat >> "${MOONRAKER_CONF}" << EOF
 
 [update_manager tool_calibrator]
 type: git_repo
-path: ~/Tool-Klipper-Calibration
+path: ${REPO_DIR}
 origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 primary_branch: main
-virtualenv: ~/Tool-Klipper-Calibration/env
+virtualenv: ${VENV_DIR}
 requirements: server/requirements.txt
 is_system_service: True
 managed_services:
@@ -138,6 +138,7 @@ managed_services:
 info_tags:
     desc=Tool-Klipper-Calibration Automated Vision & Z Alignment
 EOF
+
         echo -e "${GREEN}[✔] Đã cấu hình Update Manager trong moonraker.conf! (Đã sao lưu file .bak)${NC}"
     else
         echo -e "${GREEN}[✔] Khối [update_manager tool_calibrator] đã tồn tại trong moonraker.conf.${NC}"

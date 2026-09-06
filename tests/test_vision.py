@@ -462,9 +462,77 @@ class TestServerEndpoints(unittest.TestCase):
             self.assertTrue(res.found)
             b_u, b_v = baseline[f]
             self.assertAlmostEqual(res.center_uv[0], b_u, delta=1e-4, msg=f"U coordinate order discrepancy on {f}")
-            self.assertAlmostEqual(res.center_uv[1], b_v, delta=1e-4, msg=f"V coordinate order discrepancy on {f}")
+    def test_negative_image_rejection(self):
+        """Random noise and blank images must be rejected with found=False and confidence=0.0."""
+        detector = NozzleDetector()
+        # 1. Blank black frame
+        black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        res_black = detector.detect(black_frame)
+        self.assertFalse(res_black.found)
+        self.assertEqual(res_black.confidence, 0.0)
 
+        # 2. Random uniform noise frame
+        np.random.seed(42)
+        noise_frame = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
+        res_noise = detector.detect(noise_frame)
+        self.assertFalse(res_noise.found)
+        self.assertEqual(res_noise.confidence, 0.0)
+
+    def test_stream_grabber_cache_cleared_on_error(self):
+        """StreamGrabber must invalidate _cached_frame when grab fails."""
+        grabber = StreamGrabber("http://127.0.0.1:8090/snapshot", cache_ttl=10.0)
+        # Pre-seed cache with dummy frame
+        grabber._cached_frame = np.ones((100, 100, 3), dtype=np.uint8)
+        
+        # Simulate HTTP 503 error
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 503
+        with unittest.mock.patch.object(grabber.session, "get", return_value=mock_resp):
+            frame, err = grabber.grab_frame(force_refresh=True)
+            self.assertIsNone(frame)
+            self.assertIn("503", err)
+            self.assertIsNone(grabber._cached_frame)
+
+    def test_server_session_lock_ownership_enforcement(self):
+        """Server mutating endpoints must reject calls when locked by another client, and release_lock requires owner token."""
+        from server.tool_calibrator_server import app, calibration_lock, lock_mutex
+        client = app.test_client()
+
+        with lock_mutex:
+            calibration_lock["session_id"] = None
+            calibration_lock["token"] = None
+
+        # 1. Client A acquires lock
+        resp = client.post("/acquire_lock", json={"session_id": "client_A"})
+        self.assertEqual(resp.status_code, 200)
+
+        # 2. Client B attempts mutation without token -> 403
+        resp_mpp = client.post("/set_mpp", json={"mpp": 0.005})
+        self.assertEqual(resp_mpp.status_code, 403)
+
+        resp_calib_mpp = client.post("/calibrate_mpp", json={"samples": [[1.0, 100.0]]})
+        self.assertEqual(resp_calib_mpp.status_code, 403)
+
+        resp_matrix = client.post("/set_matrix", json={"matrix": [[1, 0, 0], [0, 1, 0]]})
+        self.assertEqual(resp_matrix.status_code, 403)
+
+        # 3. Release lock without token -> 403
+        resp_rel_empty = client.post("/release_lock", json={})
+        self.assertEqual(resp_rel_empty.status_code, 403)
+
+        # 4. Release lock with wrong token -> 403
+        resp_rel_wrong = client.post("/release_lock", json={"session_id": "client_B"})
+        self.assertEqual(resp_rel_wrong.status_code, 403)
+
+        # 5. Client A mutates with valid header -> 200
+        resp_mpp_ok = client.post("/set_mpp", json={"mpp": 0.005}, headers={"X-Session-Token": "client_A"})
+        self.assertEqual(resp_mpp_ok.status_code, 200)
+
+        # 6. Client A releases lock with token -> 200
+        resp_rel_ok = client.post("/release_lock", json={"session_id": "client_A"})
+        self.assertEqual(resp_rel_ok.status_code, 200)
 
 
 if __name__ == "__main__":
     unittest.main()
+

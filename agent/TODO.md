@@ -43,7 +43,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 3.8:** Decouple XY optical calibration and Z probing calibration so unmeasured axes are never overwritten.
 - [x] **Task 3.9:** Hardening: Safe lookup for tools_calibrate in switch_backend, eliminate kin-desync set_position, targeted backup rollback, and camera thermal check (`max_camera_temp`).
 - [x] **Task 3.10:** Direct Python G-code aliases (`AUTO_TEACH_CAMERA`, etc.), section collision avoidance via unified `[tool_offsets]` module, and safe `TOOL_CALIBRATOR_STATUS` registration.
-
+- [x] **Task 3.11:** Core stabilization: Dynamic tool offset application (`apply_tool_offsets`), carriage XY offset compensation during Z probe, active tool thermal guards, switch pin proxy normalization, phantom tool prevention, strict majority consensus burst filter, session lock ownership protection, and atomic config saving.
 
 ### Phase 4: Macro Suite & Hook Integration (`macros/`)
 - [x] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.
@@ -53,13 +53,16 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 4.5:** Implement Interactive Navigation (`CALIBRATION_NAVIGATE`), Vision Testing (`TEST_NOZZLE_VISION`), and Single-Tool Centering (`CENTER_NOZZLE`).
 - [x] **Task 4.6:** Author Complete 6-Step Operational Standard Operating Procedure (`docs/QUY_TRINH_VAN_HANH.md`).
 - [x] **Task 4.7:** Implement decoupled macros `CALIBRATE_TOOLS_XY`, `CALIBRATE_TOOLS_Z`, `CALIBRATE_TOOL_XY`, `CALIBRATE_TOOL_Z`.
+- [x] **Task 4.8:** Deduplicate macro suite against Python commands to prevent Klipper startup collisions.
 
 ### Phase 5: Verification & Benchmarking
 - [x] **Task 5.1:** Offline unit tests using synthetic nozzle sample images across diverse illumination profiles (14 unit/integration tests).
 - [x] **Task 5.2:** Contactless dry-run validation (`DRY_RUN=1`) supported in macro suite without disk writes.
-- [ ] **Task 5.3:** Physical machine hardware validation by user on live toolchanger rig.
+- [x] **Task 5.3:** Dynamic vision confidence based on contrast and gradient continuity; negative noise/blank rejection.
+- [ ] **Task 5.4:** Physical machine hardware validation by user on live toolchanger rig.
 
 ### Phase 6: Packaging & Automated Deployment
 - [x] **Task 6.1:** Write automated Linux installer script `scripts/install.sh` (virtualenv, dependencies, systemd unit).
-- [x] **Task 6.2:** Create uninstaller script `scripts/uninstall.sh`.
-- [x] **Task 6.3:** Verify Moonraker Update Manager integration snippet (`scripts/moonraker_update.cfg`).
+- [x] **Task 6.2:** Create uninstaller script `scripts/uninstall.sh` with custom $KLIPPER_DIR support.
+- [x] **Task 6.3:** Verify Moonraker Update Manager integration snippet with accurate repo/venv paths.
+

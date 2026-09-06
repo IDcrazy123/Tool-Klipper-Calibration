@@ -214,6 +214,42 @@ class TestToolOffsetsAndCommands(unittest.TestCase):
         self.assertIn("t2_z: -0.0100", content)
         shutil.rmtree(temp_dir)
 
+    def test_tool_offsets_applied_to_tool_objects(self):
+        """Verify ToolOffsets applies offsets to printer [tool 1] object and runs SET_TOOL_OFFSET command."""
+        from klippy.extras.tool_offsets import ToolOffsets, load_config
+        mock_printer = MagicMock()
+        mock_config = MagicMock()
+        mock_config.get_printer.return_value = mock_printer
+        mock_config.get_name.return_value = "tool_offsets"
+        mock_config.get_prefix_options.return_value = ["t1_x", "t1_y", "t1_z"]
+        mock_config.getfloat.side_effect = lambda k, default=None: {"t1_x": 0.1234, "t1_y": -0.4567, "t1_z": 0.089}.get(k, default)
+
+        tool1_obj = MagicMock()
+        tool1_obj.gcode_x_offset = 0.0
+        tool1_obj.gcode_y_offset = 0.0
+        tool1_obj.gcode_z_offset = 0.0
+
+        mock_gcode = MagicMock()
+        mock_gcode.commands = {"SET_TOOL_OFFSET": MagicMock()}
+
+        def fake_lookup(name, default=None):
+            if name in ("tool 1", "tool T1"):
+                return tool1_obj
+            if name == "gcode":
+                return mock_gcode
+            return default
+
+        mock_printer.lookup_object.side_effect = fake_lookup
+
+        to = load_config(mock_config)
+        to._handle_ready()
+
+        self.assertAlmostEqual(tool1_obj.gcode_x_offset, 0.1234, delta=1e-4)
+        self.assertAlmostEqual(tool1_obj.gcode_y_offset, -0.4567, delta=1e-4)
+        self.assertAlmostEqual(tool1_obj.gcode_z_offset, 0.089, delta=1e-4)
+        mock_gcode.run_script_from_command.assert_called_with("SET_TOOL_OFFSET TOOL=1 X=0.1234 Y=-0.4567 Z=0.0890")
+
 
 if __name__ == "__main__":
     unittest.main()
+

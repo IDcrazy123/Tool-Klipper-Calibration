@@ -22,9 +22,17 @@ if [ "${EUID}" -eq 0 ]; then
 fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KLIPPER_DIR="${HOME}/klipper"
+KLIPPER_DIR="${KLIPPER_DIR:-${HOME}/klipper}"
+if [ ! -d "${KLIPPER_DIR}" ] && [ -t 0 ]; then
+    echo -e "${YELLOW}[!] Thư mục Klipper mặc định (${KLIPPER_DIR}) không tồn tại.${NC}"
+    read -rp "Nhập đường dẫn đến thư mục Klipper của bạn: " USER_KLIPPER_DIR
+    if [ -n "${USER_KLIPPER_DIR}" ]; then
+        KLIPPER_DIR="${USER_KLIPPER_DIR}"
+    fi
+fi
 SERVICE_FILE="/etc/systemd/system/tool_calibrator.service"
 ASVC_FILE="${HOME}/printer_data/moonraker.asvc"
+
 
 CONFIG_DIR="${HOME}/printer_data/config"
 if [ ! -d "${CONFIG_DIR}" ] && [ -d "${HOME}/klipper_config" ]; then

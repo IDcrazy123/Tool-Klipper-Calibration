@@ -255,9 +255,13 @@ class SafeNavigator:
         toolhead.manual_move([self.cam_target_x, self.cam_target_y, None], self.approach_speed)
         toolhead.wait_moves()
 
-    def approach_switch(self, toolhead, gcode_move, z_clearance: float = 5.0) -> None:
+    def approach_switch(self, toolhead, gcode_move, z_clearance: float = 5.0, offset_xy: Optional[Tuple[float, float]] = None) -> None:
         """
         Executes 3-tier safe transition into the Physical Z Switch Station.
+        If offset_xy=(dx, dy) is provided, compensates target carriage coordinates so the
+        tool nozzle touches the exact physical switch pin:
+            target_x = switch_target_x - dx
+            target_y = switch_target_y - dy
         """
         if not self.is_homed():
             raise SafeNavigatorException("Printer axes must be homed before entering switch station.")
@@ -265,15 +269,19 @@ class SafeNavigator:
         if self.switch_target_x is None or self.switch_target_y is None:
             raise SafeNavigatorException("Z Switch coordinates (zswitch_x_pos, zswitch_y_pos) not configured.")
 
+        dx, dy = (0.0, 0.0) if offset_xy is None else offset_xy
+        eff_target_x = round(self.switch_target_x - dx, 4)
+        eff_target_y = round(self.switch_target_y - dy, 4)
+
         # Automatic approach vector towards bed center if not explicitly taught
         if self.switch_approach_x is not None and self.switch_approach_y is not None:
-            app_x, app_y = self.switch_approach_x, self.switch_approach_y
+            app_x, app_y = round(self.switch_approach_x - dx, 4), round(self.switch_approach_y - dy, 4)
         else:
-            app_x, app_y = self.calculate_auto_approach(self.switch_target_x, self.switch_target_y, 20.0)
+            app_x, app_y = self.calculate_auto_approach(eff_target_x, eff_target_y, 20.0)
 
         # Validate coordinates
         self.validate_coordinate_safety(x=app_x, y=app_y)
-        self.validate_coordinate_safety(x=self.switch_target_x, y=self.switch_target_y)
+        self.validate_coordinate_safety(x=eff_target_x, y=eff_target_y)
 
         # Step 1: Raise to Safe_Z
         self.move_to_safe_z(toolhead, gcode_move)
@@ -287,9 +295,10 @@ class SafeNavigator:
         toolhead.manual_move([None, None, target_z], self.z_speed)
         toolhead.wait_moves()
 
-        # Step 4: Move onto switch pin apex
-        toolhead.manual_move([self.switch_target_x, self.switch_target_y, None], self.approach_speed)
+        # Step 4: Move onto switch pin apex with XY compensation
+        toolhead.manual_move([eff_target_x, eff_target_y, None], self.approach_speed)
         toolhead.wait_moves()
+
 
     def depart_station(self, toolhead, gcode_move) -> None:
         """

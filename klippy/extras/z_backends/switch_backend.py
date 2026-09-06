@@ -12,6 +12,28 @@ from .base_z import BaseZBackend
 logger = logging.getLogger("tool_calibrator.switch_backend")
 
 
+class PinAdapterConfig:
+    """
+    Adapter proxy providing 'pin' option to upstream tools_calibrate
+    when user configured 'switch_pin' in [tool_calibrator].
+    """
+
+    def __init__(self, real_config, pin_value: str) -> None:
+        self._config = real_config
+        self._pin_value = pin_value
+
+    def get(self, option: str, default: Any = None, **kwargs) -> Any:
+        if option == "pin":
+            val = self._config.get("pin", None)
+            if val is not None:
+                return val
+            return self._pin_value
+        return self._config.get(option, default, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._config, name)
+
+
 class SwitchBackend(BaseZBackend):
     """
     Measures toolhead contact heights against a fixed physical switch endstop.
@@ -47,11 +69,12 @@ class SwitchBackend(BaseZBackend):
                     from .. import tools_calibrate
                 except ImportError:
                     import tools_calibrate
+                adapter = PinAdapterConfig(config, self.switch_pin)
                 self.probe = tools_calibrate.PrinterProbeMultiAxis(
-                    config,
-                    tools_calibrate.ProbeEndstopWrapper(config, 'x'),
-                    tools_calibrate.ProbeEndstopWrapper(config, 'y'),
-                    tools_calibrate.ProbeEndstopWrapper(config, 'z')
+                    adapter,
+                    tools_calibrate.ProbeEndstopWrapper(adapter, 'x'),
+                    tools_calibrate.ProbeEndstopWrapper(adapter, 'y'),
+                    tools_calibrate.ProbeEndstopWrapper(adapter, 'z')
                 )
                 query_endstops = self.printer.load_object(config, 'query_endstops')
                 query_endstops.register_endstop(
@@ -59,7 +82,12 @@ class SwitchBackend(BaseZBackend):
                     "ToolCalibratorSwitch"
                 )
             except Exception as ex:
-                logger.warning(f"Could not initialize dedicated switch probe wrapper: {ex}")
+                err_msg = f"[tool_calibrator] Failed to initialize switch probe with pin '{self.switch_pin}': {ex}"
+                logger.error(err_msg)
+                if hasattr(config, "error") and callable(config.error):
+                    raise config.error(err_msg)
+                raise
+
 
     def _get_active_probe(self):
         """Returns the active probe object from internal or tools_calibrate instance."""

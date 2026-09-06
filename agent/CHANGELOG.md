@@ -8,6 +8,37 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.17] - 2026-09-06
+### Fixed
+- **[P1] Elimination of Duplicate G-Code Macros**:
+  - Removed duplicate G-code macro definitions (`AUTO_TEACH_CAMERA`, `AUTO_TEACH_SWITCH`, `CENTER_NOZZLE`, `TEST_NOZZLE_VISION`) from `macros/safe_staging_macros.cfg`, establishing single-point ownership in `klippy/extras/tool_calibrator.py` and resolving Klipper startup crash (`already registered`).
+- **[P1] Dynamic Runtime Application of Tool Offsets**:
+  - Updated `klippy/extras/tool_offsets.py` and `klippy/extras/tool_calibrator.py` to listen for `klippy:ready` and apply calibrated offsets to toolchanger runtime (`tool.py` / `SET_TOOL_OFFSET`). Added `cmd_APPLY_TOOL_OFFSETS` command for manual runtime re-application.
+- **[P1] Carriage XY Compensation During Z Probing**:
+  - In `tool_calibrator.py` and `safe_navigator.py`, secondary tools approaching the physical Z switch or touch sensor now offset the machine carriage by `(ref_x - tool_x, ref_y - tool_y)`, ensuring all nozzles contact the exact physical switch pin center.
+- **[P1] Active Tool Dynamic Thermal Guarding**:
+  - Replaced hardcoded `reference_tool` checks in `tool_calibrator.py` with dynamic active tool resolution (`_get_active_tool_no()`), verifying the active tool's extruder temperature. Extended thermal checks to `CALIBRATION_NAVIGATE (STATION=CAMERA)`, `CALIBRATION_TEACH_STATION`, and `CALIBRATE_CAMERA_SCALE`.
+- **[P1] Switch Backend Pin Config Parameter Normalization**:
+  - Implemented `PinAdapterConfig` proxy in `klippy/extras/z_backends/switch_backend.py` to map `switch_pin` to `pin` for upstream `tools_calibrate.py` wrapper, raising an immediate `config.error` instead of silently swallowing exceptions.
+- **[P2] Tool Auto-Discovery Hardening**:
+  - Prioritized toolchanger configured tool lists in `_get_known_printer_tools()`, preventing phantom tool creation from extruder indices (e.g. T5 using extruder1 no longer discovers non-existent T1).
+- **[P2] Strict Majority Consensus Burst Filtering**:
+  - Upgraded `_sample_burst()` in `tool_calibrator.py` to require strict majority consensus (`> total // 2` and `>= 2`) when sample dispersion exceeds 15px, calculating median coordinates strictly within the inlier cluster.
+- **[P2] Session Lock Ownership & Mutating Endpoint Protection**:
+  - Enforced session token verification in `server/tool_calibrator_server.py` across `/set_camera*`, `/set_mpp`, `/calibrate_mpp`, `/solve_matrix`, and `/set_matrix`. Disallowed empty session tokens in `/release_lock` and separated API tokens (`X-API-Token`) from session tokens (`X-Session-Token`).
+- **[P2] Vision Health Matrix Sync Consistency**:
+  - Added `has_matrix` field to `/health` endpoint matching `matrix_solved`, preventing Klipper client from overwriting active calibration with stale files.
+- **[P2] Frame Cache Invalidation on Stream Error**:
+  - In `server/stream_grabber.py`, explicitly cleared `self._cached_frame = None` across all error branches and HTTP 503/404 responses.
+- **[P2] Atomic Configuration Persistence & Single Backup**:
+  - Refactored `klippy/extras/config_manager.py` to build the entire configuration file update in memory and write atomically with a single timestamped backup per session.
+- **[P2] Robust Pre-Calibration Exception Cleanup**:
+  - Enclosed `start_gcode` and initial `move_to_safe_z` in `tool_calibrator.py` within `try...finally` block to ensure session locks are released and state is reset on early failure.
+- **[P2] Script Path Interpolation & Custom Paths**:
+  - In `scripts/install.sh`, unquoted heredoc `<< EOF` for Moonraker configuration to interpolate actual repository and venv paths. In `scripts/uninstall.sh`, added support for `$KLIPPER_DIR` environment variable and interactive prompt fallback.
+- **Dynamic Vision Confidence & False Positive Rejection**:
+  - Implemented dynamic confidence in `server/nozzle_detector.py` measuring inner orifice vs. outer rim contrast and radial gradient continuity, while filtering noise and blank frames using spatial Laplacian variance.
+
 ## [0.8.16] - 2026-09-06
 ### Fixed
 - **Auto-Teach & Staging Alias Registration**:

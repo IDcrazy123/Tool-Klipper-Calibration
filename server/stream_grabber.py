@@ -134,6 +134,7 @@ class StreamGrabber:
                 err_msg = f"HTTP {resp.status_code} while fetching snapshot from {self.camera_url}"
                 logger.warning(err_msg)
                 with self._cache_lock:
+                    self._cached_frame = None
                     self._cached_error = err_msg
                     self._cached_time = now
                 return None, err_msg
@@ -145,6 +146,7 @@ class StreamGrabber:
                 err_msg = f"Failed to decode JPEG image from {self.camera_url}"
                 logger.warning(err_msg)
                 with self._cache_lock:
+                    self._cached_frame = None
                     self._cached_error = err_msg
                     self._cached_time = now
                 return None, err_msg
@@ -160,6 +162,7 @@ class StreamGrabber:
             err_msg = f"Timeout ({self.timeout}s) connecting to camera at {self.camera_url}"
             logger.error(err_msg)
             with self._cache_lock:
+                self._cached_frame = None
                 self._cached_error = err_msg
                 self._cached_time = now
             return None, err_msg
@@ -167,6 +170,7 @@ class StreamGrabber:
             err_msg = f"Connection refused connecting to camera at {self.camera_url}"
             logger.error(err_msg)
             with self._cache_lock:
+                self._cached_frame = None
                 self._cached_error = err_msg
                 self._cached_time = now
             return None, err_msg
@@ -174,6 +178,8 @@ class StreamGrabber:
             err_msg = f"Unexpected error grabbing frame: {str(ex)}"
             logger.exception(err_msg)
             with self._cache_lock:
+                self._cached_frame = None
                 self._cached_error = err_msg
                 self._cached_time = now
             return None, err_msg
+

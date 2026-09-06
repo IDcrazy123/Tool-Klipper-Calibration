@@ -4,9 +4,12 @@ Integration test for full calibration cycle in ToolCalibrator.
 
 import unittest
 import os
+import re
+import glob
 import tempfile
 import shutil
 from unittest.mock import MagicMock, patch
+
 
 from klippy.extras.tool_calibrator import ToolCalibrator
 from klippy.extras.safe_navigator import SafeNavigatorException
@@ -102,7 +105,10 @@ class DummyGCode:
         self.executed_scripts = []
 
     def register_command(self, name, func, desc=None):
+        if name in self.commands:
+            raise Exception(f"Command '{name}' already registered")
         self.commands[name] = func
+
 
     def run_script_from_command(self, script):
         self.executed_scripts.append(script)
@@ -431,11 +437,12 @@ class TestCalibrationCycle(unittest.TestCase):
         res = calibrator._sample_burst(self.toolhead, samples=3)
         self.assertIsNotNone(res)
         self.assertTrue(res["found"])
-        self.assertEqual(res["center_uv"], [320.2, 240.1])
-        self.assertEqual(res["radius_px"], 40.5)
-        self.assertEqual(res["burst_count"], 3)
+        self.assertEqual(res["center_uv"], [320.1, 240.05])
+        self.assertEqual(res["radius_px"], 40.25)
+        self.assertEqual(res["burst_count"], 2)
         self.assertEqual(res["burst_total"], 3)
-        self.assertEqual(res["spread_px"], 75.0)
+        self.assertEqual(res["spread_px"], 0.2)
+
 
     def test_burst_sampling_partial_drop(self):
         """Burst sampling handles dropped/unfound frames gracefully if at least 1 valid frame is captured."""
@@ -684,8 +691,10 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertEqual(calibrator.navigator.safe_z, 70.0)
 
         # Re-initialize calibrator to verify load_saved_stations restores 70.0mm
+        self.gcode.commands.clear()
         new_calibrator = ToolCalibrator(self.config)
         self.assertEqual(new_calibrator.navigator.safe_z, 70.0)
+
 
     def test_teaching_step_by_step_no_none_strings(self):
         """Teaching SAFE_Z before TARGET must never write the literal string 'None' to config."""
@@ -716,6 +725,10 @@ class TestCalibrationCycle(unittest.TestCase):
 
     def test_batch_saving_creates_single_backup(self):
         """Multi-tool calibration must execute atomic batch save with a single backup per session."""
+        # Pre-seed config file so create_backup has a source file
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write("[tool_offsets]\nt1_x: 0.0\n")
+
         calibrator = ToolCalibrator(self.config)
         gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 1, "SAVE_CONFIG": 1})
 
@@ -735,10 +748,9 @@ class TestCalibrationCycle(unittest.TestCase):
         calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
 
         # Inspect backup directory: exactly 1 backup file created for the 2-tool run
-        backup_dir = os.path.join(tempfile.gettempdir(), "tool_calibrator_backups")
-        if os.path.isdir(backup_dir):
-            backups = [f for f in os.listdir(backup_dir) if f.startswith("tool_offsets_")]
-            self.assertGreaterEqual(len(backups), 1)
+        backups = [f for f in os.listdir(self.test_dir) if f.startswith("tool_offsets.cfg.calib_backup_")]
+        self.assertEqual(len(backups), 1)
+
 
     def test_switch_teaching_records_contact_z(self):
         """cmd_CALIBRATION_TEACH_STATION on SWITCH must read contact_z from probe result."""
@@ -778,7 +790,116 @@ class TestCalibrationCycle(unittest.TestCase):
         # Must have lifted to at least Safe_Z (35.0)
         self.assertGreaterEqual(self.toolhead.pos[2], 35.0)
 
+    def test_no_duplicate_macros_with_python_commands(self):
+        """Verify macros/safe_staging_macros.cfg does not define commands colliding with Python module."""
+        calibrator = ToolCalibrator(self.config)
+        macro_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "macros", "safe_staging_macros.cfg"))
+        self.assertTrue(os.path.exists(macro_path))
+        with open(macro_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        macro_names = re.findall(r"^\[gcode_macro\s+([^\]]+)\]", content, re.MULTILINE | re.IGNORECASE)
+        for m_name in macro_names:
+            m_name = m_name.strip()
+            # Registering each macro in DummyGCode must NOT collide with already registered python commands!
+            self.assertNotIn(m_name, self.gcode.commands)
+
+    def test_z_probing_secondary_tool_xy_compensation(self):
+        """Verify secondary tool Z probing compensates carriage position by XY offsets."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.z_backend_type = "switch"
+        calibrator.navigator.switch_target_x = 200.0
+        calibrator.navigator.switch_target_y = 200.0
+        calibrator.navigator.approach_switch = MagicMock()
+
+        gcmd = DummyGCodeCommand()
+        # Secondary tool with X=+2.0, Y=-1.0 offset
+        tool_offsets = {"x": 2.0, "y": -1.0}
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"contact_z": 5.0, "suggested_z_offset": 0.1})
+
+        calibrator._execute_z_calibration(1, self.toolhead, self.printer.gcode_move, gcmd, {"contact_z": 4.9}, tool_offsets)
+        calibrator.navigator.approach_switch.assert_called_once_with(
+            self.toolhead, self.printer.gcode_move, offset_xy=(2.0, -1.0)
+        )
+
+    def test_camera_thermal_check_on_active_tool(self):
+        """Active tool T1 at 180°C must block CENTER_NOZZLE and CALIBRATION_NAVIGATE even if T0 is 25°C."""
+        calibrator = ToolCalibrator(self.config)
+        t0_ext = MagicMock()
+        t0_ext.get_status.return_value = {"temperature": 25.0}
+        t0_ext.name = "extruder"
+        t1_ext = MagicMock()
+        t1_ext.get_status.return_value = {"temperature": 180.0}
+        t1_ext.name = "extruder1"
+
+        self.printer.objects["extruder"] = t0_ext
+        self.printer.objects["extruder1"] = t1_ext
+
+        # Set active toolhead extruder to T1
+        self.toolhead.get_extruder = MagicMock(return_value=t1_ext)
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA"})
+
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATION_NAVIGATE(gcmd)
+        self.assertIn("ERR_PRE_002", str(ctx.exception))
+
+        with self.assertRaises(Exception) as ctx2:
+            calibrator.cmd_CALIBRATION_CENTER_NOZZLE(DummyGCodeCommand())
+        self.assertIn("ERR_PRE_002", str(ctx2.exception))
+
+    def test_tool_discovery_no_phantom_extruder_tools(self):
+        """Toolchanger with tools [0, 5] must not discover phantom T1 from extruder1."""
+        calibrator = ToolCalibrator(self.config)
+        tc = MagicMock()
+        tc.tool_numbers = [0, 5]
+        tc.tools = {0: MagicMock(), 5: MagicMock()}
+        self.printer.objects["toolchanger"] = tc
+
+        self.printer.lookup_objects = MagicMock(return_value=[
+            ("toolchanger", tc),
+            ("extruder", MagicMock()),
+            ("extruder1", MagicMock()),
+        ])
+
+        discovered = calibrator._discover_tools()
+        self.assertEqual(discovered, [0, 5])
+
+    def test_burst_filter_strict_majority_rejection(self):
+        """Burst filter with 2-2 tie across 15px spread must reject and not return phantom median."""
+        calibrator = ToolCalibrator(self.config)
+        frames = [
+            {"found": True, "center_uv": [300.0, 200.0], "radius": 40.0, "confidence": 0.9},
+            {"found": True, "center_uv": [301.0, 200.0], "radius": 40.0, "confidence": 0.9},
+            {"found": True, "center_uv": [500.0, 200.0], "radius": 40.0, "confidence": 0.9},
+            {"found": True, "center_uv": [501.0, 200.0], "radius": 40.0, "confidence": 0.9},
+        ]
+        calibrator._query_vision = MagicMock(side_effect=frames)
+
+        result = calibrator._sample_burst(self.toolhead, samples=4)
+        self.assertIsNotNone(result)
+        self.assertFalse(result["found"])
+        self.assertIn("without strict majority consensus", result["reason"])
+
+    def test_pre_calibration_failure_releases_lock(self):
+        """If start_gcode or move_to_safe_z fails after acquire_lock, lock must be released."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 0})
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator._query_vision = MagicMock(side_effect=[
+            {"success": True, "session_token": "tok_123"}, # acquire_lock
+            {"service": "test", "version": "1.0"}, # health
+            {"success": True} # release_lock
+        ])
+        calibrator.navigator.move_to_safe_z = MagicMock(side_effect=Exception("Z rail limit exceeded"))
+
+        with self.assertRaises(Exception):
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        self.assertIn("FAILED", calibrator.last_run_status)
+        calibrator._query_vision.assert_called_with("release_lock", {"session_id": "tok_123", "session_token": "tok_123"}, timeout=2.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

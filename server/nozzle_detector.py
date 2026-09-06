@@ -265,7 +265,59 @@ class NozzleDetector:
                 return cx, cy, radius
             return cx, cy
 
+    def _evaluate_edge_confidence(
+        self,
+        gray: np.ndarray,
+        cx: float,
+        cy: float,
+        radius: float
+    ) -> Tuple[float, float, float]:
+        """
+        Evaluates physical orifice contrast between inner bore and outer rim,
+        and directional gradient continuity.
+        Returns:
+            (confidence, contrast, continuity)
+        """
+        h, w = gray.shape[:2]
+        if radius < 2.0:
+            return 0.0, 0.0, 0.0
+
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        mask_in = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.circle(mask_in, (int(round(cx)), int(round(cy))), max(1, int(round(radius * 0.6))), 255, -1)
+        mask_out = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.circle(mask_out, (int(round(cx)), int(round(cy))), max(2, int(round(radius * 1.4))), 255, -1)
+        cv2.circle(mask_out, (int(round(cx)), int(round(cy))), max(1, int(round(radius * 1.1))), 0, -1)
+
+        in_cnt = int(np.sum(mask_in > 0))
+        out_cnt = int(np.sum(mask_out > 0))
+        if in_cnt == 0 or out_cnt == 0:
+            return 0.0, 0.0, 0.0
+
+        in_mean = float(np.mean(blurred[mask_in > 0]))
+        out_mean = float(np.mean(blurred[mask_out > 0]))
+        contrast = abs(in_mean - out_mean)
+
+        num_samples = 36
+        angles = np.linspace(0, 2 * np.pi, num_samples, endpoint=False)
+        cos_a = np.cos(angles).astype(np.float32)
+        sin_a = np.sin(angles).astype(np.float32)
+        delta_r = max(1.5, min(3.5, radius * 0.2))
+        px_in = np.clip(np.round(cx + (radius - delta_r) * cos_a).astype(int), 0, w - 1)
+        py_in = np.clip(np.round(cy + (radius - delta_r) * sin_a).astype(int), 0, h - 1)
+        px_out = np.clip(np.round(cx + (radius + delta_r) * cos_a).astype(int), 0, w - 1)
+        py_out = np.clip(np.round(cy + (radius + delta_r) * sin_a).astype(int), 0, h - 1)
+
+        diffs = np.abs(blurred[py_out, px_out].astype(np.float32) - blurred[py_in, px_in].astype(np.float32))
+        continuity = float(np.mean(diffs > 8.0))
+
+        contrast_score = min(1.0, contrast / 50.0)
+        conf = (0.5 * contrast_score) + (0.5 * continuity)
+        return float(np.clip(conf, 0.0, 1.0)), contrast, continuity
+
+
     def _rank_candidate_circles(
+
         self,
         gray_roi: np.ndarray,
         candidates: np.ndarray,
@@ -471,6 +523,19 @@ class NozzleDetector:
         cv2.line(annotated, (0, cy), (width, cy), (255, 255, 255), 1, cv2.LINE_AA)
 
         if pt_x is not None and pt_y is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            conf_val, contrast, continuity = self._evaluate_edge_confidence(gray, pt_x, pt_y, radius)
+
+            # False positive rejection: random noise, blank textures, or untextured frames
+            lap_std = float(cv2.Laplacian(gray, cv2.CV_32F).std())
+            if lap_std < 0.5 or lap_std > 120.0 or contrast < 1.0 or continuity < 0.15:
+                pt_x, pt_y = None, None
+            else:
+                tier_mult = 1.0 if matched_tier == 1 else (0.88 if matched_tier == 2 else 0.70)
+                dynamic_conf = round(float(np.clip(conf_val * tier_mult, 0.40, 0.99)), 3)
+
+
+        if pt_x is not None and pt_y is not None:
             r_int = max(2, int(round(radius)))
             center = (int(round(pt_x)), int(round(pt_y)))
 
@@ -488,16 +553,16 @@ class NozzleDetector:
             cv2.line(annotated, (center[0] - 6, center[1]), (center[0] + 6, center[1]), (0, 0, 255), 2)
             cv2.line(annotated, (center[0], center[1] - 6), (center[0], center[1] + 6), (0, 0, 255), 2)
 
-            confidence = 0.98 if matched_combo == 10 else (1.0 if matched_tier == 1 else (0.85 if matched_tier == 2 else 0.65))
             return DetectionResult(
                 found=True,
                 center_uv=(round(pt_x, 3), round(pt_y, 3)),
                 radius=round(radius, 2),
-                confidence=confidence,
+                confidence=dynamic_conf,
                 tier=matched_tier,
                 combo=matched_combo,
                 annotated_frame=annotated
             )
+
 
         # Draw red warning circle when no nozzle detected
         cv2.circle(annotated, (cx, cy), 20, (0, 0, 255), 2, cv2.LINE_AA)

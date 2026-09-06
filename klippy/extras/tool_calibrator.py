@@ -40,6 +40,7 @@ class ToolCalibrator:
         if srv_url is None:
             srv_url = config.get("service_url", "http://localhost:8090")
         self.server_url = srv_url.rstrip("/")
+        self.api_token = config.get("api_token", None)
 
         self.reference_tool = config.getint("reference_tool", 0)
         self.configured_tools_str = config.get("tools", None)
@@ -215,8 +216,8 @@ class ToolCalibrator:
             logger.warning(f"Could not contact vision service health: {ex}")
             return
 
-        has_mpp = health.get("calibrated_mpp", False)
-        has_matrix = health.get("has_matrix", False)
+        has_mpp = bool(health.get("calibrated_mpp", False) or health.get("mpp", None))
+        has_matrix = bool(health.get("matrix_solved", health.get("has_matrix", False)))
 
         if self.camera_stream_url:
             try:
@@ -253,10 +254,15 @@ class ToolCalibrator:
         url = f"{self.server_url}/{endpoint.lstrip('/')}"
         data_bytes = json.dumps(payload).encode("utf-8") if payload else None
         headers = {"Content-Type": "application/json", "User-Agent": "ToolCalibrator/1.0"}
+        if getattr(self, "api_token", None):
+            headers["X-API-Token"] = self.api_token
+            headers["Authorization"] = f"Bearer {self.api_token}"
         if getattr(self, "session_token", None):
+            headers["X-Session-Token"] = self.session_token
             headers["X-Calibration-Token"] = self.session_token
 
         req = urllib.request.Request(url, data=data_bytes, headers=headers)
+
         result_holder: List[Any] = []
         error_holder: List[Exception] = []
         done_flag = threading.Event()
@@ -319,18 +325,15 @@ class ToolCalibrator:
         if not valid_frames:
             return None
 
-        u_vals = [float(f["center_uv"][0]) for f in valid_frames]
-        v_vals = [float(f["center_uv"][1]) for f in valid_frames]
-        r_vals = [float(f.get("radius_px", f.get("radius", 0.0))) for f in valid_frames if f.get("radius_px") or f.get("radius")]
+        u_raw = [float(f["center_uv"][0]) for f in valid_frames]
+        v_raw = [float(f["center_uv"][1]) for f in valid_frames]
+        raw_spread_px = 0.0
+        if len(u_raw) > 1:
+            raw_spread_px = round(max(max(u_raw) - min(u_raw), max(v_raw) - min(v_raw)), 2)
 
-        spread_px = 0.0
-        if len(u_vals) > 1:
-            u_spread = max(u_vals) - min(u_vals)
-            v_spread = max(v_vals) - min(v_vals)
-            spread_px = round(max(u_spread, v_spread), 2)
-
+        accepted_frames = valid_frames
         # Check consensus when dispersion exceeds 15.0 px
-        if len(valid_frames) > 1 and spread_px > 15.0:
+        if len(valid_frames) > 1 and raw_spread_px > 15.0:
             consensus_cluster = []
             for f in valid_frames:
                 u0, v0 = float(f["center_uv"][0]), float(f["center_uv"][1])
@@ -341,21 +344,30 @@ class ToolCalibrator:
                 if len(cluster) > len(consensus_cluster):
                     consensus_cluster = cluster
 
-            majority_needed = (len(valid_frames) + 1) // 2
-            if len(consensus_cluster) < 2 or len(consensus_cluster) < majority_needed:
+            # Strict majority required: strictly > total // 2
+            if len(consensus_cluster) <= (len(valid_frames) // 2) or len(consensus_cluster) < 2:
                 logger.warning(
-                    f"[tool_calibrator] Inconsistent burst rejected: spread={spread_px}px across {len(valid_frames)} frames with no consensus."
+                    f"[tool_calibrator] Inconsistent burst rejected: spread={raw_spread_px}px across {len(valid_frames)} frames with no strict majority consensus ({len(consensus_cluster)}/{len(valid_frames)})."
                 )
                 return {
                     "found": False,
-                    "reason": f"Inconsistent burst dispersion ({spread_px}px) without consensus"
+                    "reason": f"Inconsistent burst dispersion ({raw_spread_px}px) without strict majority consensus"
                 }
+            accepted_frames = consensus_cluster
+
+        u_vals = [float(f["center_uv"][0]) for f in accepted_frames]
+        v_vals = [float(f["center_uv"][1]) for f in accepted_frames]
+        r_vals = [float(f.get("radius_px", f.get("radius", 0.0))) for f in accepted_frames if f.get("radius_px") or f.get("radius")]
+
+        spread_px = 0.0
+        if len(u_vals) > 1:
+            spread_px = round(max(max(u_vals) - min(u_vals), max(v_vals) - min(v_vals)), 2)
 
         med_u = float(statistics.median(u_vals))
         med_v = float(statistics.median(v_vals))
         med_r = float(statistics.median(r_vals)) if r_vals else 0.0
 
-        best_meta = valid_frames[0]
+        best_meta = accepted_frames[0]
         return {
             "found": True,
             "center_uv": [round(med_u, 2), round(med_v, 2)],
@@ -363,10 +375,11 @@ class ToolCalibrator:
             "confidence": best_meta.get("confidence", 0.0),
             "tier": best_meta.get("tier", 1),
             "combo": best_meta.get("combo", 0),
-            "burst_count": len(valid_frames),
+            "burst_count": len(accepted_frames),
             "burst_total": n_samples,
             "spread_px": spread_px
         }
+
 
     def _recover_with_wiggle(self, toolhead, gcmd=None) -> Optional[Dict[str, Any]]:
         """
@@ -486,6 +499,7 @@ class ToolCalibrator:
         known: Set[int] = {self.reference_tool}
 
         # 1. Query toolchanger object if present
+        has_toolchanger_tools = False
         tc = self.printer.lookup_object("toolchanger", None)
         if tc is not None:
             tool_nums = getattr(tc, "tool_numbers", None)
@@ -493,6 +507,7 @@ class ToolCalibrator:
                 for n in tool_nums:
                     try:
                         known.add(int(n))
+                        has_toolchanger_tools = True
                     except (ValueError, TypeError):
                         pass
             tools_dict = getattr(tc, "tools", None)
@@ -500,6 +515,7 @@ class ToolCalibrator:
                 for k in tools_dict.keys():
                     try:
                         known.add(int(str(k).lstrip("tT")))
+                        has_toolchanger_tools = True
                     except (ValueError, TypeError):
                         pass
 
@@ -524,21 +540,29 @@ class ToolCalibrator:
             if isinstance(objs, dict):
                 names = list(objs.keys())
 
+        has_explicit_tools = False
         for name in names:
             m_tool = re.match(r"^tool\s+(?:t)?(\d+)$", name, re.IGNORECASE)
             if m_tool:
                 known.add(int(m_tool.group(1)))
+                has_explicit_tools = True
                 continue
             m_macro = re.match(r"^gcode_macro\s+t(\d+)$", name, re.IGNORECASE)
             if m_macro:
                 known.add(int(m_macro.group(1)))
+                has_explicit_tools = True
                 continue
-            m_ext = re.match(r"^extruder(\d*)$", name)
-            if m_ext:
-                idx = int(m_ext.group(1)) if m_ext.group(1) else 0
-                known.add(idx)
+
+        # Only scan extruder(\d*) if NO toolchanger or explicit tool/macro definitions were found
+        if not has_toolchanger_tools and not has_explicit_tools:
+            for name in names:
+                m_ext = re.match(r"^extruder(\d*)$", name)
+                if m_ext:
+                    idx = int(m_ext.group(1)) if m_ext.group(1) else 0
+                    known.add(idx)
 
         return known
+
 
     def _discover_tools(self, tools_param: Optional[str] = None) -> List[int]:
         """
@@ -634,22 +658,81 @@ class ToolCalibrator:
         except Exception as ex:
             logger.debug(f"[tool_calibrator] Lighting control error: {ex}")
 
-    def _check_camera_thermal_safety(self, tool_no: int, gcmd) -> None:
+    def _get_active_tool_no(self) -> int:
+        """Determines the active tool number from toolchanger or toolhead extruder."""
+        tc = self.printer.lookup_object("toolchanger", None)
+        if tc is not None:
+            active_tool = getattr(tc, "active_tool", None)
+            if active_tool is not None:
+                if isinstance(active_tool, int):
+                    return active_tool
+                t_num = getattr(active_tool, "tool_number", None)
+                if t_num is not None:
+                    try:
+                        return int(t_num)
+                    except (ValueError, TypeError):
+                        pass
+                name = getattr(active_tool, "name", "")
+                m = re.search(r"(\d+)", str(name))
+                if m:
+                    return int(m.group(1))
+
+        try:
+            toolhead = self.printer.lookup_object("toolhead", None)
+            if toolhead is not None and hasattr(toolhead, "get_extruder"):
+                ext = toolhead.get_extruder()
+                if ext is not None:
+                    ext_name = getattr(ext, "name", "") or (ext.get_name() if hasattr(ext, "get_name") else "")
+                    m = re.match(r"^extruder(\d+)$", ext_name)
+                    if m:
+                        return int(m.group(1))
+                    if ext_name == "extruder":
+                        return 0
+        except Exception:
+            pass
+
+        return self.reference_tool
+
+    def _check_camera_thermal_safety(self, tool_no: Optional[int] = None, gcmd = None) -> None:
         """Ensures nozzle temperature does not exceed safe optical camera limit (100°C) to prevent lens fogging/damage."""
-        extruder_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
-        extruder = self.printer.lookup_object(extruder_name, None)
+        if tool_no is None:
+            tool_no = self._get_active_tool_no()
+
+        extruder = None
+        try:
+            toolhead = self.printer.lookup_object("toolhead", None)
+            if toolhead is not None and hasattr(toolhead, "get_extruder"):
+                active_ext = toolhead.get_extruder()
+                if active_ext is not None:
+                    active_name = getattr(active_ext, "name", "") or (active_ext.get_name() if hasattr(active_ext, "get_name") else "")
+                    expected_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
+                    if active_name == expected_name:
+                        extruder = active_ext
+        except Exception:
+            pass
+
+        if extruder is None:
+            extruder_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
+            extruder = self.printer.lookup_object(extruder_name, None)
+
         if extruder is not None and hasattr(extruder, "get_status"):
             try:
                 status = extruder.get_status(self.reactor.monotonic())
                 temp = status.get("temperature", 0.0)
                 if temp > self.max_camera_temp:
-                    raise gcmd.error(
-                        f"[ERR_PRE_002] Tool T{tool_no} nozzle temperature ({temp:.1f}°C) exceeds safe camera limit ({self.max_camera_temp:.1f}°C). Allow nozzle to cool before entering camera station."
+                    err_msg = (
+                        f"[ERR_PRE_002] Tool T{tool_no} nozzle temperature ({temp:.1f}°C) "
+                        f"exceeds safe camera limit ({self.max_camera_temp:.1f}°C). "
+                        f"Allow nozzle to cool before entering camera station."
                     )
+                    if gcmd is not None:
+                        raise gcmd.error(err_msg)
+                    raise SafeNavigatorException(err_msg)
             except Exception as ex:
                 if "ERR_PRE_002" in str(ex):
                     raise
-                logger.debug(f"Thermal check skipped for {extruder_name}: {ex}")
+                logger.debug(f"Thermal check skipped for {extruder_name if extruder else tool_no}: {ex}")
+
 
     def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> List[float]:
         """Executes optical camera alignment for a single tool."""
@@ -682,13 +765,37 @@ class ToolCalibrator:
             self._set_inspection_lighting(False, tool_no)
 
     def _execute_z_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_z_result: Dict[str, Any], tool_offsets: Dict[str, float]) -> Dict[str, Any]:
-        """Executes Z probing alignment for a single tool."""
+        """Executes Z probing alignment for a single tool with XY offset compensation."""
         gcmd.respond_info(f"[T{tool_no}] Entering Z Probe Station...")
+
+        # Derive XY compensation for secondary tool so nozzle hits exact center
+        offset_x = tool_offsets.get("x", 0.0)
+        offset_y = tool_offsets.get("y", 0.0)
+        if tool_no != self.reference_tool and offset_x == 0.0 and offset_y == 0.0:
+            if tool_no in self.cached_offsets:
+                offset_x = self.cached_offsets[tool_no].get("x", 0.0)
+                offset_y = self.cached_offsets[tool_no].get("y", 0.0)
+            else:
+                to_obj = self.printer.lookup_object("tool_offsets", None)
+                if to_obj is not None and hasattr(to_obj, "parse_tool_offsets"):
+                    saved_tools = to_obj.parse_tool_offsets()
+                    if tool_no in saved_tools:
+                        offset_x = saved_tools[tool_no].get("x", 0.0)
+                        offset_y = saved_tools[tool_no].get("y", 0.0)
+
+        offset_xy = (offset_x, offset_y) if (tool_no != self.reference_tool and (offset_x != 0.0 or offset_y != 0.0)) else None
+        if offset_xy is not None:
+            gcmd.respond_info(f"[T{tool_no}] Compensating Z-probe position with XY offsets: X{offset_x:+.3f}mm Y{offset_y:+.3f}mm")
+
         if self.z_backend_type == "switch":
-            self.navigator.approach_switch(toolhead, gcode_move)
+            self.navigator.approach_switch(toolhead, gcode_move, offset_xy=offset_xy)
         else:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
             probe_x, probe_y = self.z_backend.get_probe_xy()
+            if offset_xy is not None:
+                probe_x -= offset_x
+                probe_y -= offset_y
+            self.navigator.validate_coordinate_safety(x=probe_x, y=probe_y)
             toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
 
         if tool_no == self.reference_tool:
@@ -749,37 +856,29 @@ class ToolCalibrator:
             except Exception as ex:
                 raise gcmd.error(str(ex))
 
-        # Dynamic inheritance check for switch coordinates
-        if calibrate_z and self.z_backend_type == "switch":
-            self._sync_switch_location_from_tools_calibrate()
-
-        # Discover tool sequence across any toolchanger flavor
         try:
+            # Dynamic inheritance check for switch coordinates
+            if calibrate_z and self.z_backend_type == "switch":
+                self._sync_switch_location_from_tools_calibrate()
+
+            # Discover tool sequence across any toolchanger flavor
             ordered_tools = self._discover_tools(tools_param)
-        except SafeNavigatorException as ex:
-            if session_token:
-                try:
-                    self._query_vision("release_lock", {"session_id": session_token, "session_token": session_token}, timeout=2.0)
-                except Exception:
-                    pass
-                self.session_token = None
-            raise gcmd.error(str(ex))
 
-        gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
+            gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
 
-        # Execute start_gcode hook
-        if self.start_gcode is not None:
-            self._run_tool_hook(self.start_gcode, ordered_tools[0])
+            # Execute start_gcode hook
+            if self.start_gcode is not None:
+                self._run_tool_hook(self.start_gcode, ordered_tools[0])
 
-        # Safety First: Lift vertically to Safe_Z before any toolchange motion
-        self.navigator.move_to_safe_z(toolhead, gcode_move)
+            # Safety First: Lift vertically to Safe_Z before any toolchange motion
+            self.navigator.move_to_safe_z(toolhead, gcode_move)
 
-        reference_origin_xy: Optional[List[float]] = None
-        reference_z_result: Dict[str, Any] = {}
-        results: Dict[int, Dict[str, float]] = {}
+            reference_origin_xy: Optional[List[float]] = None
+            reference_z_result: Dict[str, Any] = {}
+            results: Dict[int, Dict[str, float]] = {}
 
-        try:
             for tool_no in ordered_tools:
+
                 gcmd.respond_info(f"\n--- Calibrating Toolhead T{tool_no} ---")
 
                 # Change tool
@@ -849,6 +948,14 @@ class ToolCalibrator:
             if save_config and not dry_run:
                 self.config_manager.save_all_tool_offsets(results)
                 gcmd.respond_info(f"[tool_calibrator] Successfully saved offsets to {self.config_manager.config_path}")
+                # Dynamically apply offsets to toolchanger runtime
+                tool_offsets_obj = self.printer.lookup_object("tool_offsets", None)
+                if tool_offsets_obj is not None:
+                    try:
+                        tool_offsets_obj.set_results_and_apply(results)
+                        gcmd.respond_info("[tool_calibrator] Applied new offsets to toolchanger runtime.")
+                    except Exception as e:
+                        logger.warning(f"Failed to apply offsets to toolchanger runtime: {e}")
 
             # Telemetry Summary
             gcmd.respond_info("\n================ CALIBRATION SUMMARY ================")
@@ -902,18 +1009,21 @@ class ToolCalibrator:
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before teaching station.")
 
         if station == "CAMERA":
+            self._check_camera_thermal_safety(tool_no=None, gcmd=gcmd)
             auto_center = gcmd.get_int("AUTO_CENTER", 1) == 1
             approach_dist = gcmd.get_float("APPROACH_DIST", 25.0)
 
+            active_t = self._get_active_tool_no()
             if auto_center:
                 gcmd.respond_info("[tool_calibrator] Auto-centering nozzle over camera via visual servoing...")
-                self._set_inspection_lighting(True, self.reference_tool)
+                self._set_inspection_lighting(True, active_t)
                 try:
                     self._center_nozzle(toolhead, gcmd)
                 except Exception as ex:
                     raise gcmd.error(f"[ERR_TEACH_CAM] Auto-centering failed during teach station: {ex}. Station not saved.")
                 finally:
-                    self._set_inspection_lighting(False, self.reference_tool)
+                    self._set_inspection_lighting(False, active_t)
+
 
             pos = toolhead.get_position()
             target_x, target_y, target_z = round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)
@@ -1006,9 +1116,10 @@ class ToolCalibrator:
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
 
-        self._check_camera_thermal_safety(self.reference_tool, gcmd)
+        self._check_camera_thermal_safety(tool_no=None, gcmd=gcmd)
 
         session_token = None
+
         try:
             self._ensure_vision_sync()
             lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": "klipper_calib", "timeout_seconds": 600}, timeout=2.0)
@@ -1224,14 +1335,16 @@ class ToolCalibrator:
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before navigation.")
 
         if station in ("CAMERA", "CAM"):
+            self._check_camera_thermal_safety(tool_no=None, gcmd=gcmd)
+            active_t = self._get_active_tool_no()
             gcmd.respond_info("[tool_calibrator] Approaching Camera Station via safe 3-tier waypoints...")
-            self._set_inspection_lighting(True, self.reference_tool)
+            self._set_inspection_lighting(True, active_t)
             try:
                 self.navigator.approach_camera(toolhead, gcode_move)
                 pos = toolhead.get_position()
                 gcmd.respond_info(f"✔ Reached Camera Station: X{pos[0]:.3f} Y{pos[1]:.3f} Z{pos[2]:.3f}")
             except Exception as ex:
-                self._set_inspection_lighting(False, self.reference_tool)
+                self._set_inspection_lighting(False, active_t)
                 raise gcmd.error(f"Navigation error: {ex}")
         elif station in ("SWITCH", "Z_SWITCH"):
             gcmd.respond_info("[tool_calibrator] Approaching Z Switch Station via safe 3-tier waypoints...")
@@ -1243,7 +1356,8 @@ class ToolCalibrator:
                 raise gcmd.error(f"Navigation error: {ex}")
         elif station in ("DEPART", "LEAVE", "SAFE_Z"):
             gcmd.respond_info("[tool_calibrator] Departing station to safe Z altitude...")
-            self._set_inspection_lighting(False, self.reference_tool)
+            active_t = self._get_active_tool_no()
+            self._set_inspection_lighting(False, active_t)
             self.navigator.depart_station(toolhead, gcode_move)
             pos = toolhead.get_position()
             gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
@@ -1264,10 +1378,11 @@ class ToolCalibrator:
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28).")
 
-        self._check_camera_thermal_safety(self.reference_tool, gcmd)
+        self._check_camera_thermal_safety(tool_no=None, gcmd=gcmd)
 
-        gcmd.respond_info("[tool_calibrator] Centering active nozzle over camera...")
-        self._set_inspection_lighting(True, self.reference_tool)
+        active_t = self._get_active_tool_no()
+        gcmd.respond_info(f"[tool_calibrator] Centering active nozzle (T{active_t}) over camera...")
+        self._set_inspection_lighting(True, active_t)
         try:
             self._center_nozzle(toolhead, gcmd, samples=samples, enable_wiggle=wiggle)
             pos = toolhead.get_position()
@@ -1275,7 +1390,8 @@ class ToolCalibrator:
         except Exception as ex:
             raise gcmd.error(f"Centering failed: {ex}")
         finally:
-            self._set_inspection_lighting(False, self.reference_tool)
+            self._set_inspection_lighting(False, active_t)
+
 
     def cmd_CALIBRATION_TEST_VISION(self, gcmd) -> None:
         """
