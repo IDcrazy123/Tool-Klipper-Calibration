@@ -66,6 +66,26 @@ class TestConfigManager(unittest.TestCase):
             content = f.read()
         self.assertIn("gcode_x_offset: 0.100", content)
 
+    def test_rollback_specific_backup(self):
+        self.manager.max_backups = 10
+        # Version 1
+        self.manager.save_tool_offsets(1, {"x": 0.111, "y": 0.111, "z": 0.111})
+        b1 = self.manager.create_backup()
+        # Version 2
+        self.manager.save_tool_offsets(1, {"x": 0.222, "y": 0.222, "z": 0.222})
+
+        # Rollback to b1 specifically (by filename only)
+        restored = self.manager.rollback(os.path.basename(b1))
+        self.assertEqual(os.path.abspath(restored), os.path.abspath(b1))
+        with open(self.cfg_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("gcode_x_offset: 0.111", content)
+
+        # Rollback to non-existent backup should raise ConfigManagerException
+        from klippy.extras.config_manager import ConfigManagerException
+        with self.assertRaises(ConfigManagerException):
+            self.manager.rollback("non_existent_backup.calib_backup_9999")
+
     def test_save_and_load_station_section(self):
         """Verify saving and loading custom sections like [tool_calibrator_station camera]."""
         station_data = {

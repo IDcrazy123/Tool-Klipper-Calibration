@@ -34,6 +34,31 @@ class TestStreamGrabber(unittest.TestCase):
         grabber.set_camera_url("/webcam2/?action=stream")
         self.assertEqual(grabber.camera_url, "http://localhost/webcam2/?action=snapshot")
 
+    def test_frame_cache(self):
+        grabber = StreamGrabber("http://127.0.0.1:8090/snapshot", cache_ttl=0.1)
+        # Mock session.get to return a dummy jpeg
+        dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+        _, buf = cv2.imencode(".jpg", dummy_img)
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = buf.tobytes()
+
+        with unittest.mock.patch.object(grabber.session, "get", return_value=mock_resp) as mock_get:
+            f1, err1 = grabber.grab_frame()
+            self.assertIsNotNone(f1)
+            self.assertIsNone(err1)
+            self.assertEqual(mock_get.call_count, 1)
+
+            # Second call within cache TTL should return cached frame without calling session.get
+            f2, err2 = grabber.grab_frame()
+            self.assertIsNotNone(f2)
+            self.assertEqual(mock_get.call_count, 1)
+
+            # Forced refresh should trigger a new session.get call
+            f3, err3 = grabber.grab_frame(force_refresh=True)
+            self.assertIsNotNone(f3)
+            self.assertEqual(mock_get.call_count, 2)
+
 
 class TestAffineTransform(unittest.TestCase):
     def setUp(self):
@@ -160,6 +185,25 @@ class TestAffineTransform(unittest.TestCase):
         dx, dy = new_solver.calculate_tool_delta((320.0, 240.0), (370.0, 220.0))
         self.assertAlmostEqual(dx, -0.50, delta=0.01)
         self.assertAlmostEqual(dy, 0.20, delta=0.01)
+
+    def test_frame_boundary_clamping_err_cv_204(self):
+        """Coordinates outside camera boundaries must raise ValueError with ERR_CV_204."""
+        self.solver.set_mpp(0.0125)
+        # Frame size is 640 x 480 (center at 320, 240)
+        # Negative coordinate
+        with self.assertRaises(ValueError) as ctx:
+            self.solver.calculate_offset((-10.0, 240.0))
+        self.assertIn("ERR_CV_204", str(ctx.exception))
+
+        # Beyond width
+        with self.assertRaises(ValueError) as ctx:
+            self.solver.calculate_offset((650.0, 240.0))
+        self.assertIn("ERR_CV_204", str(ctx.exception))
+
+        # Beyond height
+        with self.assertRaises(ValueError) as ctx:
+            self.solver.calculate_offset((320.0, 500.0))
+        self.assertIn("ERR_CV_204", str(ctx.exception))
 
 
 class TestNozzleDetector(unittest.TestCase):

@@ -53,6 +53,7 @@ class ToolCalibrator:
             self.wiggle_on_failure = config.getboolean("wiggle_on_failure", True)
         else:
             self.wiggle_on_failure = bool(config.get("wiggle_on_failure", True))
+        self.max_camera_temp = config.getfloat("max_camera_temp", 100.0, above=30.0, maxval=200.0)
 
         # Core Component Instances
         self.navigator = SafeNavigator(config)
@@ -623,8 +624,26 @@ class ToolCalibrator:
         except Exception as ex:
             logger.debug(f"[tool_calibrator] Lighting control error: {ex}")
 
+    def _check_camera_thermal_safety(self, tool_no: int, gcmd) -> None:
+        """Ensures nozzle temperature does not exceed safe optical camera limit (100°C) to prevent lens fogging/damage."""
+        extruder_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
+        extruder = self.printer.lookup_object(extruder_name, None)
+        if extruder is not None and hasattr(extruder, "get_status"):
+            try:
+                status = extruder.get_status(self.reactor.monotonic())
+                temp = status.get("temperature", 0.0)
+                if temp > self.max_camera_temp:
+                    raise gcmd.error(
+                        f"[ERR_PRE_002] Tool T{tool_no} nozzle temperature ({temp:.1f}°C) exceeds safe camera limit ({self.max_camera_temp:.1f}°C). Allow nozzle to cool before entering camera station."
+                    )
+            except Exception as ex:
+                if "ERR_PRE_002" in str(ex):
+                    raise
+                logger.debug(f"Thermal check skipped for {extruder_name}: {ex}")
+
     def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> List[float]:
         """Executes optical camera alignment for a single tool."""
+        self._check_camera_thermal_safety(tool_no, gcmd)
         gcmd.respond_info(f"[T{tool_no}] Entering Camera Station...")
         self._set_inspection_lighting(True, tool_no)
         try:
@@ -712,8 +731,8 @@ class ToolCalibrator:
         if calibrate_xy:
             try:
                 self._ensure_vision_sync()
-                lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "timeout_seconds": 600}, timeout=2.0)
-                session_token = lock_resp.get("session_token")
+                lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": "klipper_calib", "timeout_seconds": 600}, timeout=2.0)
+                session_token = lock_resp.get("session_token") or lock_resp.get("session_id")
                 self.session_token = session_token
                 health = self._query_vision("health")
                 gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}")
@@ -730,7 +749,7 @@ class ToolCalibrator:
         except SafeNavigatorException as ex:
             if session_token:
                 try:
-                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                    self._query_vision("release_lock", {"session_id": session_token, "session_token": session_token}, timeout=2.0)
                 except Exception:
                     pass
                 self.session_token = None
@@ -741,6 +760,9 @@ class ToolCalibrator:
         # Execute start_gcode hook
         if self.start_gcode is not None:
             self._run_tool_hook(self.start_gcode, ordered_tools[0])
+
+        # Safety First: Lift vertically to Safe_Z before any toolchange motion
+        self.navigator.move_to_safe_z(toolhead, gcode_move)
 
         reference_origin_xy: Optional[List[float]] = None
         reference_z_result: Dict[str, Any] = {}
@@ -836,7 +858,7 @@ class ToolCalibrator:
         finally:
             if session_token:
                 try:
-                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                    self._query_vision("release_lock", {"session_id": session_token, "session_token": session_token}, timeout=2.0)
                 except Exception:
                     pass
                 self.session_token = None
@@ -964,11 +986,13 @@ class ToolCalibrator:
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
 
+        self._check_camera_thermal_safety(self.reference_tool, gcmd)
+
         session_token = None
         try:
             self._ensure_vision_sync()
-            lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "timeout_seconds": 600}, timeout=2.0)
-            session_token = lock_resp.get("session_token")
+            lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": "klipper_calib", "timeout_seconds": 600}, timeout=2.0)
+            session_token = lock_resp.get("session_token") or lock_resp.get("session_id")
             self.session_token = session_token
         except Exception:
             pass
@@ -1077,7 +1101,7 @@ class ToolCalibrator:
         finally:
             if session_token:
                 try:
-                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                    self._query_vision("release_lock", {"session_id": session_token, "session_token": session_token}, timeout=2.0)
                 except Exception:
                     pass
                 self.session_token = None
@@ -1160,8 +1184,9 @@ class ToolCalibrator:
 
     def cmd_CALIBRATION_ROLLBACK_OFFSETS(self, gcmd) -> None:
         """Emergency rollback command restoring previous configuration backup."""
+        backup_name = gcmd.get("BACKUP", None)
         try:
-            restored_file = self.config_manager.rollback()
+            restored_file = self.config_manager.rollback(backup_name)
             gcmd.respond_info(f"[tool_calibrator] Restored configuration from {restored_file}. Please issue FIRMWARE_RESTART.")
         except Exception as ex:
             raise gcmd.error(f"[tool_calibrator] Rollback failed: {ex}")
@@ -1218,6 +1243,8 @@ class ToolCalibrator:
 
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28).")
+
+        self._check_camera_thermal_safety(self.reference_tool, gcmd)
 
         gcmd.respond_info("[tool_calibrator] Centering active nozzle over camera...")
         self._set_inspection_lighting(True, self.reference_tool)

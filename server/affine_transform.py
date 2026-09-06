@@ -149,7 +149,17 @@ class TransformationSolver:
         Returns:
             ((damped_x, damped_y), (raw_error_x, raw_error_y))
         """
-        nx, ny = self.normalize_coords(detected_uv)
+        u, v = float(detected_uv[0]), float(detected_uv[1])
+        cx, cy = self.frame_center
+        frame_w = cx * 2.0
+        frame_h = cy * 2.0
+        if frame_w > 0 and frame_h > 0:
+            if u < 0 or u > frame_w or v < 0 or v > frame_h:
+                raise ValueError(
+                    f"[ERR_CV_204] Detected nozzle center ({u:.1f}, {v:.1f}) exceeds camera frame boundaries [0..{frame_w:.0f}, 0..{frame_h:.0f}]"
+                )
+
+        nx, ny = self.normalize_coords((u, v))
 
         if self.transform_matrix is not None:
             if self.transform_matrix.shape[1] == 6:

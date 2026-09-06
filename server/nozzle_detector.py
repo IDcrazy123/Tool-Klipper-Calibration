@@ -221,9 +221,11 @@ class NozzleDetector:
                 x_cand = (bx + dx_grid).astype(np.float32)
                 y_cand = (by + dy_grid).astype(np.float32)
 
+                min_allowed_r = max(3.0, br - 6.0)
+                max_allowed_r = max(12.0, br + 6.0)
                 for dr in r_shifts:
                     r = br + dr
-                    if r < 7.0 or r > 26.0:
+                    if r < min_allowed_r or r > max_allowed_r:
                         continue
                     px = x_cand[:, :, None] + r * cos_a[None, None, :]
                     py = y_cand[:, :, None] + r * sin_a[None, None, :]

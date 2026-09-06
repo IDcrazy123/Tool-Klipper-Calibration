@@ -29,7 +29,16 @@ class SwitchBackend(BaseZBackend):
         self.probe = None
 
         # Anti-conflict: Check if tools_calibrate is already configured
-        if config.has_section("tools_calibrate"):
+        has_tc = False
+        if hasattr(config, "has_section"):
+            try:
+                has_tc = config.has_section("tools_calibrate")
+            except Exception:
+                has_tc = False
+        if not has_tc:
+            has_tc = self.printer.lookup_object("tools_calibrate", None) is not None
+
+        if has_tc:
             logger.info("Found pre-existing [tools_calibrate] in config; reusing existing probe wrapper.")
         elif self.switch_pin is not None:
             # Build switch probe wrapper if tools_calibrate is absent
@@ -78,7 +87,6 @@ class SwitchBackend(BaseZBackend):
 
         # Retract to start altitude using configured lift_speed
         toolhead.move(start_pos, self.lift_speed)
-        toolhead.set_position(start_pos)
         toolhead.wait_moves()
 
         return {
@@ -99,7 +107,6 @@ class SwitchBackend(BaseZBackend):
         z_result = probe.run_probe("z-", gcmd, speed_ratio=0.5, max_distance=10.0, samples=self.samples)[2]
 
         toolhead.move(start_pos, self.lift_speed)
-        toolhead.set_position(start_pos)
         toolhead.wait_moves()
 
         ref_z = reference_result.get("contact_z", 0.0)

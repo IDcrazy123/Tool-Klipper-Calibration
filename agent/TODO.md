@@ -29,6 +29,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 2.3:** Implement `affine_transform.py` for star-pattern mm-per-pixel (`mpp`) calibration and matrix inversion.
 - [x] **Task 2.4:** Build `visual_debugger.py` to stream live MJPEG previews with crosshairs and detected circles.
 - [x] **Task 2.5:** Develop `tool_calibrator_server.py` exposing REST JSON endpoints on port 8090 (`/health`, `/detect_nozzle`, `/calibrate_mpp`, `/preview`).
+- [x] **Task 2.6:** Implement in-memory frame cache buffer (`stream_grabber`), session lock dual-key compatibility, and `ERR_CV_204` frame bounds guard.
 
 ### Phase 3: Klipper Core Extension (`klippy/extras/`)
 - [x] **Task 3.1:** Implement `tool_calibrator.py` core orchestrator class and G-code dispatcher.
@@ -39,6 +40,8 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
 - [x] **Task 3.7:** Implement Multi-frame Burst Sampling (`_sample_burst`) and Adaptive Wiggle Recovery (`_recover_with_wiggle`).
 - [x] **Task 3.8:** Decouple XY optical calibration and Z probing calibration so unmeasured axes are never overwritten.
+- [x] **Task 3.9:** Hardening: Safe lookup for tools_calibrate in switch_backend, eliminate kin-desync set_position, targeted backup rollback, and camera thermal check (`max_camera_temp`).
+
 
 ### Phase 4: Macro Suite & Hook Integration (`macros/`)
 - [x] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.

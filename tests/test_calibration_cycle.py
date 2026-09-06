@@ -753,6 +753,32 @@ class TestCalibrationCycle(unittest.TestCase):
 
         self.assertEqual(calibrator.navigator.switch_target_z, 12.345)
 
+    def test_camera_thermal_check_err_pre_002(self):
+        """Nozzle temperature > 100°C must trigger ERR_PRE_002 before camera entry."""
+        calibrator = ToolCalibrator(self.config)
+        # Mock hot extruder
+        mock_extruder = MagicMock()
+        mock_extruder.get_status.return_value = {"temperature": 185.0}
+        self.printer.objects["extruder"] = mock_extruder
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 0})
+        calibrator._query_vision = MagicMock(return_value={"status": "ok", "service": "test", "version": "1.0"})
+
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertIn("ERR_PRE_002", str(ctx.exception))
+
+    def test_safe_z_lifted_before_first_toolchange(self):
+        """Toolhead must be lifted to Safe_Z before the first toolchange command is executed."""
+        calibrator = ToolCalibrator(self.config)
+        # Start at low Z
+        self.toolhead.pos = [100.0, 100.0, 3.0, 0.0]
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 0, "DRY_RUN": 1})
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        # Must have lifted to at least Safe_Z (35.0)
+        self.assertGreaterEqual(self.toolhead.pos[2], 35.0)
+
 
 if __name__ == "__main__":
     unittest.main()

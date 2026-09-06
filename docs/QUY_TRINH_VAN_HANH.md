@@ -216,18 +216,18 @@ CALIBRATE_TOOL_Z TOOL=1
 2. **Lỗi `[ERR_CAM_101] Cannot connect to Vision Service`**:
    - **Khắc phục**: Kiểm tra dịch vụ background đã chạy chưa bằng lệnh SSH:
      ```bash
-     sudo systemctl status tool-calibrator-vision.service
+     sudo systemctl status tool_calibrator.service
      ```
    - Nếu chưa chạy, khởi động bằng:
      ```bash
-     sudo systemctl start tool-calibrator-vision.service
+     sudo systemctl start tool_calibrator.service
      ```
 
 3. **Lỗi `[ERR_CV_201] Nozzle orifice not found`**:
    - **Nguyên nhân**: Đầu phun quá mờ, camera mất nét, hoặc ánh sáng bị chói/quá tối.
    - **Khắc phục**:
      - Chạy `TEST_NOZZLE_VISION` để xem báo cáo;
-     - Điều chỉnh độ cao tiêu cự Z (vặn chỉnh ốc ống kính hoặc chỉnh `camera_target_z`);
+     - Điều chỉnh độ cao tiêu cự Z (vặn chỉnh ốc ống kính hoặc chỉnh `target_z`);
      - Điều chỉnh độ sáng đèn ring trong macro `_CALIBRATION_CAMERA_LED_ON` (ví dụ `VALUE=0.3` đến `0.6`).
      - Bật chế độ `WIGGLE=1` để đầu phun tự động lắc phá lóa sáng.
 

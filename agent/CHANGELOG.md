@@ -8,6 +8,30 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.15] - 2026-09-06
+### Fixed
+- **Switch Backend Probe Safety & Kinematics**:
+  - Replaced unsupported `config.has_section()` call in [klippy/extras/z_backends/switch_backend.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/z_backends/switch_backend.py) with safe `printer.lookup_object("tools_calibrate", None)` lookup.
+  - Eliminated redundant `toolhead.set_position(start_pos)` after probing retract moves, preventing kinematic stepper coordinate desynchronization and bed mesh corruptions.
+- **Config Manager Targeted Rollback**:
+  - Upgraded `rollback()` in [klippy/extras/config_manager.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/config_manager.py) to support restoring specific timestamped backup files (`target_backup`) by full path or filename, complete with cross-validation.
+  - Wired `BACKUP` parameter in `CALIBRATION_ROLLBACK_OFFSETS` macro handler in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py).
+- **Vision Service Session Lock & Concurrency**:
+  - Standardized session lock response and request keys (`session_id` and `session_token`) across `/acquire_lock` and `/release_lock` in [server/tool_calibrator_server.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/tool_calibrator_server.py) and [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py), resolving HTTP 403 lock starvation.
+- **Sub-pixel Out-of-Bound Frame Safety (`ERR_CV_204`)**:
+  - Added coordinate boundary checks in `calculate_offset_detail()` in [server/affine_transform.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/affine_transform.py). Coordinates landing outside image bounds cleanly return `ERR_CV_204` instead of causing unhandled runtime errors.
+  - Handled `ERR_CV_204` in `/calculate_offset` endpoint in [server/tool_calibrator_server.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/tool_calibrator_server.py).
+- **Adaptive Circle Search Bounds for Nozzle Detection**:
+  - Replaced fixed radius constraints `[7.0, 26.0]` in `_refine_upper_arc_symmetry` in [server/nozzle_detector.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/nozzle_detector.py) with adaptive bounds `[max(3.0, base_radius - 6.0), base_radius + 6.0]`, supporting larger macro nozzles (0.8mm-1.2mm) and fine nozzles without clipping.
+- **Stream Grabber In-Memory Caching & Performance**:
+  - Implemented 80ms in-memory cache buffer with thread locks in [server/stream_grabber.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/stream_grabber.py) to eliminate duplicate network calls and JPEG decode thrashing during visual servoing burst captures.
+- **Thermal Safety & Safe Altitude Enforcement**:
+  - Enforced vertical lift to `Safe_Z` prior to any initial toolchange in `cmd_CALIBRATE_TOOL_OFFSETS` in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py), complying with Safety Rules 1 & 2 ("Lift-First, Descend-Last").
+  - Added configurable `max_camera_temp` (default 100°C) with pre-flight heater checks across all optical calibration routines (`CALIBRATE_TOOL_OFFSETS`, `CALIBRATE_TOOL_XY`, `CALIBRATE_ALL_TOOLS`), preventing thermal damage to camera sensors (`ERR_PRE_002`).
+- **Web UI Stream Auto-Recovery**:
+  - Upgraded [server/templates/index.html](file:///d:/Desktop/Tool-Klipper-Calibration/server/templates/index.html) with auto-reconnecting MJPEG stream handler upon timeout/disconnect.
+
+
 ## [0.8.14] - 2026-09-06
 ### Fixed
 - **Camera Sync Endpoint Compatibility**: Added `@app.route("/set_camera_url", methods=["POST"])` endpoint alias in [server/tool_calibrator_server.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/tool_calibrator_server.py) to resolve 404 error during pre-flight camera URL synchronization from Klipper.

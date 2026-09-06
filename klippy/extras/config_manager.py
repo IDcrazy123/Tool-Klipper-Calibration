@@ -273,19 +273,33 @@ class ConfigManager:
                 os.remove(tmp_path)
             raise ConfigManagerException(f"Failed to atomically write config: {ex}")
 
-    def rollback(self) -> str:
+    def rollback(self, target_backup: Optional[str] = None) -> str:
         """
-        Restores the newest timestamped backup copy.
+        Restores a specific timestamped backup copy or the newest available backup.
+
+        Args:
+            target_backup: Optional specific backup filename or path to restore.
 
         Returns:
             str: Name of the restored backup file.
         """
         pattern = f"{self.config_path}.calib_backup_*"
         backups = sorted(glob.glob(pattern))
-        if not backups:
-            raise ConfigManagerException("No historical backups found to restore.")
 
-        latest_backup = backups[-1]
-        shutil.copy2(latest_backup, self.config_path)
-        logger.info(f"Restored configuration from: {latest_backup}")
-        return latest_backup
+        if target_backup:
+            # Check direct path or relative to config dir
+            candidate = os.path.expanduser(target_backup)
+            if not os.path.exists(candidate):
+                candidate = os.path.join(os.path.dirname(self.config_path), os.path.basename(target_backup))
+
+            if not os.path.exists(candidate):
+                raise ConfigManagerException(f"Specified backup file not found: {target_backup}")
+            chosen_backup = candidate
+        else:
+            if not backups:
+                raise ConfigManagerException("No historical backups found to restore.")
+            chosen_backup = backups[-1]
+
+        shutil.copy2(chosen_backup, self.config_path)
+        logger.info(f"Restored configuration from: {chosen_backup}")
+        return chosen_backup

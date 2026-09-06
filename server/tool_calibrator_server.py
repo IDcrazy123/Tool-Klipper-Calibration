@@ -86,17 +86,25 @@ def acquire_lock():
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
-    req_session = data.get("session_id", str(time.time()))
+    req_session = data.get("session_id") or data.get("session_token") or str(time.time())
     with lock_mutex:
         now = time.time()
         current = calibration_lock["session_id"]
         if current is None or (now - calibration_lock["locked_at"] > 600):
             calibration_lock["session_id"] = req_session
             calibration_lock["locked_at"] = now
-            return jsonify({"success": True, "session_id": req_session}), 200
+            return jsonify({
+                "success": True,
+                "session_id": req_session,
+                "session_token": req_session
+            }), 200
         elif current == req_session:
             calibration_lock["locked_at"] = now
-            return jsonify({"success": True, "session_id": req_session}), 200
+            return jsonify({
+                "success": True,
+                "session_id": req_session,
+                "session_token": req_session
+            }), 200
         return jsonify({"success": False, "error": "Session locked by another client"}), 409
 
 
@@ -106,9 +114,9 @@ def release_lock():
     if not _check_auth(request):
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
-    req_session = data.get("session_id")
+    req_session = data.get("session_id") or data.get("session_token")
     with lock_mutex:
-        if calibration_lock["session_id"] is None or calibration_lock["session_id"] == req_session:
+        if calibration_lock["session_id"] is None or req_session is None or calibration_lock["session_id"] == req_session:
             calibration_lock["session_id"] = None
             calibration_lock["locked_at"] = 0.0
             return jsonify({"success": True}), 200
@@ -334,6 +342,12 @@ def calculate_offset():
             "offset_xy": list(damped_xy),
             "raw_error_mm": list(raw_error)
         }), 200
+    except ValueError as ex:
+        err_msg = str(ex)
+        if "ERR_CV_204" in err_msg:
+            logger.warning(f"Frame boundary violation: {err_msg}")
+            return jsonify({"success": False, "error": err_msg, "error_code": "ERR_CV_204"}), 400
+        return jsonify({"success": False, "error": err_msg}), 400
     except Exception as ex:
         logger.exception("Error in /calculate_offset")
         return jsonify({"success": False, "error": str(ex)}), 400

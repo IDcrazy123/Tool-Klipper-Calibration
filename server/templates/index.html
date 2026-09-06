@@ -394,7 +394,7 @@
         <div class="header-title">
             <div class="logo-ring"></div>
             <h1>Tool-Klipper-Calibration</h1>
-            <span class="version-badge">v0.8.7 Sub-Pixel</span>
+            <span class="version-badge">v0.8.8 Sub-Pixel</span>
         </div>
         <div id="status-pill" class="status-pill">
             <div class="status-dot"></div>
@@ -415,7 +415,7 @@
                 </div>
             </div>
             <div class="video-container" id="video-box">
-                <img id="stream-img" src="/preview" alt="Live Stream" onerror="this.src='/snapshot';">
+                <img id="stream-img" src="/preview" alt="Live Stream">
             </div>
             <div class="video-controls">
                 <span>Center Crosshair: Optical Axis / Sensor Center</span>
@@ -699,9 +699,28 @@
             }
         });
 
+        const streamImg = document.getElementById("stream-img");
+        let streamReconnectTimer = null;
+
+        function refreshStream() {
+            if (streamReconnectTimer) {
+                clearTimeout(streamReconnectTimer);
+                streamReconnectTimer = null;
+            }
+            streamImg.src = "/preview?t=" + Date.now();
+        }
+
+        streamImg.onerror = function() {
+            if (!streamReconnectTimer) {
+                streamReconnectTimer = setTimeout(() => {
+                    streamReconnectTimer = null;
+                    refreshStream();
+                }, 1500);
+            }
+        };
+
         document.getElementById("btn-refresh-stream").addEventListener("click", () => {
-            const img = document.getElementById("stream-img");
-            img.src = "/preview?t=" + Date.now();
+            refreshStream();
         });
 
         document.getElementById("btn-zoom-toggle").addEventListener("click", () => {
