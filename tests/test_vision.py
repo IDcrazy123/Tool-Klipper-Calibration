@@ -120,25 +120,17 @@ class TestAffineTransform(unittest.TestCase):
         self.assertAlmostEqual(off_y, 0.0, delta=0.01)
 
     def test_set_mpp(self):
-        """Verify set_mpp updates scale and enables linear offset fallback."""
-        self.solver.transform_matrix = None
+        """Verify set_mpp updates scale."""
         self.solver.set_mpp(0.0125)
         self.assertEqual(self.solver.mpp, 0.0125)
-        off_x, off_y = self.solver.calculate_offset((340.0, 240.0))
-        # du = +20, -1 * 0.55 * 20 * 0.0125 = -0.1375mm
-        self.assertAlmostEqual(off_x, -0.138, delta=0.01)
 
     def test_calculate_tool_delta(self):
         """Verify physical delta XY computation between two tools (T0 ref vs T1 target)."""
-        # Test with linear MPP fallback
+        # Without matrix -> raises ERR_CV_203
         self.solver.transform_matrix = None
-        self.solver.set_mpp(0.0125)
-        # T0 at (737.42, 328.79), T1 at (735.00, 324.50)
-        # du = -2.42, dv = -4.29
-        # dx = -1.0 * du * mpp = +0.03025, dy = -1.0 * dv * mpp = +0.053625
-        dx, dy = self.solver.calculate_tool_delta((737.42, 328.79), (735.00, 324.50))
-        self.assertAlmostEqual(dx, 0.0303, delta=0.001)
-        self.assertAlmostEqual(dy, 0.0536, delta=0.001)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.solver.calculate_tool_delta((320.0, 240.0), (370.0, 220.0))
+        self.assertIn("ERR_CV_203", str(ctx.exception))
 
         # Test with affine transformation matrix
         star_points = [
@@ -155,22 +147,17 @@ class TestAffineTransform(unittest.TestCase):
         self.assertAlmostEqual(dx_aff, -0.50, delta=0.01)
         self.assertAlmostEqual(dy_aff, 0.20, delta=0.01)
 
-    def test_uncalibrated_offset_uses_default_mpp(self):
-        """Verify calculate_offset_detail and calculate_tool_delta succeed with default_mpp when scale is uncalibrated."""
+    def test_uncalibrated_offset_raises_err_cv_203(self):
+        """Verify calculate_offset_detail and calculate_tool_delta raise ERR_CV_203 when uncalibrated, preventing blind motion."""
         self.solver.transform_matrix = None
         self.solver.mpp = None
-        # Center UV at (340.0, 240.0) -> du = +20px
-        # default_mpp = 0.040 -> raw_x = -1 * 20 * 0.040 = -0.8mm, damped_x = 0.55 * -0.8 = -0.44mm
-        damped_xy, raw_error = self.solver.calculate_offset_detail((340.0, 240.0))
-        self.assertAlmostEqual(damped_xy[0], -0.44, delta=0.01)
-        self.assertAlmostEqual(damped_xy[1], 0.0, delta=0.01)
-        self.assertAlmostEqual(raw_error[0], -0.80, delta=0.01)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.solver.calculate_offset_detail((340.0, 240.0))
+        self.assertIn("ERR_CV_203", str(ctx.exception))
 
-        # calculate_tool_delta also falls back cleanly without raising RuntimeError
-        dx, dy = self.solver.calculate_tool_delta((320.0, 240.0), (330.0, 250.0))
-        # du = +10, dv = +10 -> -1 * 10 * 0.04 = -0.4mm
-        self.assertAlmostEqual(dx, -0.40, delta=0.01)
-        self.assertAlmostEqual(dy, -0.40, delta=0.01)
+        with self.assertRaises(RuntimeError) as ctx:
+            self.solver.calculate_tool_delta((320.0, 240.0), (330.0, 250.0))
+        self.assertIn("ERR_CV_203", str(ctx.exception))
 
     def test_solve_matrix_rejects_degenerate_points(self):
         """Verify solve_matrix raises ValueError when points are collinear or identical."""
@@ -377,6 +364,14 @@ class TestServerEndpoints(unittest.TestCase):
     def test_calculate_tool_delta_endpoint(self):
         """Verify POST /calculate_tool_delta endpoint produces accurate delta and G-code."""
         from server.tool_calibrator_server import solver
+        star_points = [
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[1.0, 0.0], [400.0, 240.0]],
+            [[-1.0, 0.0], [240.0, 240.0]],
+            [[0.0, 1.0], [320.0, 320.0]],
+            [[0.0, -1.0], [320.0, 160.0]]
+        ]
+        solver.solve_matrix(star_points)
         solver.set_mpp(0.0125)
         res = self.client.post("/calculate_tool_delta", json={
             "reference_uv": [737.42, 328.79],

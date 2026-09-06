@@ -160,55 +160,31 @@ class TransformationSolver:
                     f"[ERR_CV_204] Detected nozzle center ({u:.1f}, {v:.1f}) exceeds camera frame boundaries [0..{frame_w:.0f}, 0..{frame_h:.0f}]"
                 )
 
-        nx, ny = self.normalize_coords((u, v))
-
-        if self.transform_matrix is not None:
-            if self.transform_matrix.shape[1] == 6:
-                v = np.array([nx**2, ny**2, nx * ny, nx, ny, 1.0])
-            else:
-                v = np.array([nx, ny, 1.0])
-            real_displacement = self.transform_matrix @ v
-            raw_x = -1.0 * float(real_displacement[0])
-            raw_y = -1.0 * float(real_displacement[1])
-            damped_x = self.damping_factor * raw_x
-            damped_y = self.damping_factor * raw_y
-            if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
-                raise RuntimeError("Calculated offset resulted in non-finite values")
-            return (
-                (round(damped_x, 4), round(damped_y, 4)),
-                (round(raw_x, 4), round(raw_y, 4))
+        if self.transform_matrix is None:
+            raise RuntimeError(
+                "[ERR_CV_203] Camera transformation matrix not calibrated. "
+                "Run CALIBRATE_CAMERA_SCALE first to measure physical axis orientation and scale."
             )
 
-        if self.mpp is not None:
-            cx, cy = self.frame_center
-            du = detected_uv[0] - cx
-            dv = detected_uv[1] - cy
-            raw_x = -1.0 * du * self.mpp
-            raw_y = -1.0 * dv * self.mpp
-            damped_x = self.damping_factor * raw_x
-            damped_y = self.damping_factor * raw_y
-            if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
-                raise RuntimeError("Calculated offset resulted in non-finite values")
-            return (
-                (round(damped_x, 4), round(damped_y, 4)),
-                (round(raw_x, 4), round(raw_y, 4))
-            )
+        nx, ny = self.normalize_coords(detected_uv)
+        if self.transform_matrix.shape[1] == 6:
+            v = np.array([nx**2, ny**2, nx * ny, nx, ny, 1.0])
+            v0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        else:
+            v = np.array([nx, ny, 1.0])
+            v0 = np.array([0.0, 0.0, 1.0])
 
-        # Fallback to default_mpp for coarse visual servoing if camera scale has not been calibrated yet
-        mpp = self.default_mpp
-        cx, cy = self.frame_center
-        du = detected_uv[0] - cx
-        dv = detected_uv[1] - cy
-        raw_x = -1.0 * du * mpp
-        raw_y = -1.0 * dv * mpp
+        # Physical machine displacement from current nozzle position to optical center (v0 - v)
+        # Eliminates baseline offset dependency and directly drives toward frame optical center
+        delta_to_center = self.transform_matrix @ v0 - self.transform_matrix @ v
+        raw_x = float(delta_to_center[0])
+        raw_y = float(delta_to_center[1])
         damped_x = self.damping_factor * raw_x
         damped_y = self.damping_factor * raw_y
+
         if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
             raise RuntimeError("Calculated offset resulted in non-finite values")
-        logger.warning(
-            f"Using uncalibrated fallback default MPP ({mpp:.4f} mm/px) for offset calculation. "
-            f"Run CALIBRATE_CAMERA_SCALE to calibrate high-precision scale and matrix."
-        )
+
         return (
             (round(damped_x, 4), round(damped_y, 4)),
             (round(raw_x, 4), round(raw_y, 4))
@@ -235,44 +211,26 @@ class TransformationSolver:
         Returns:
             Tuple[float, float]: (delta_x_mm, delta_y_mm) physical offset for Klipper gcode_offset.
         """
+        if self.transform_matrix is None:
+            raise RuntimeError(
+                "[ERR_CV_203] Camera transformation matrix not calibrated. "
+                "Run CALIBRATE_CAMERA_SCALE first to measure physical axis orientation and scale."
+            )
+
         nx_ref, ny_ref = self.normalize_coords(reference_uv)
         nx_tgt, ny_tgt = self.normalize_coords(target_uv)
 
-        if self.transform_matrix is not None:
-            if self.transform_matrix.shape[1] == 6:
-                v_ref = np.array([nx_ref**2, ny_ref**2, nx_ref * ny_ref, nx_ref, ny_ref, 1.0])
-                v_tgt = np.array([nx_tgt**2, ny_tgt**2, nx_tgt * ny_tgt, nx_tgt, ny_tgt, 1.0])
-            else:
-                v_ref = np.array([nx_ref, ny_ref, 1.0])
-                v_tgt = np.array([nx_tgt, ny_tgt, 1.0])
+        if self.transform_matrix.shape[1] == 6:
+            v_ref = np.array([nx_ref**2, ny_ref**2, nx_ref * ny_ref, nx_ref, ny_ref, 1.0])
+            v_tgt = np.array([nx_tgt**2, ny_tgt**2, nx_tgt * ny_tgt, nx_tgt, ny_tgt, 1.0])
+        else:
+            v_ref = np.array([nx_ref, ny_ref, 1.0])
+            v_tgt = np.array([nx_tgt, ny_tgt, 1.0])
 
-            real_ref = self.transform_matrix @ v_ref
-            real_tgt = self.transform_matrix @ v_tgt
-            delta_xy = -1.0 * (real_tgt - real_ref)
-            delta_x, delta_y = float(delta_xy[0]), float(delta_xy[1])
-            if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
-                raise RuntimeError("Calculated tool delta resulted in non-finite values")
-            return (round(delta_x, 4), round(delta_y, 4))
-
-        if self.mpp is not None:
-            du = target_uv[0] - reference_uv[0]
-            dv = target_uv[1] - reference_uv[1]
-            delta_x = -1.0 * du * self.mpp
-            delta_y = -1.0 * dv * self.mpp
-            if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
-                raise RuntimeError("Calculated tool delta resulted in non-finite values")
-            return (round(delta_x, 4), round(delta_y, 4))
-
-        # Fallback to default_mpp for tool delta if uncalibrated
-        mpp = self.default_mpp
-        du = target_uv[0] - reference_uv[0]
-        dv = target_uv[1] - reference_uv[1]
-        delta_x = -1.0 * du * mpp
-        delta_y = -1.0 * dv * mpp
+        real_ref = self.transform_matrix @ v_ref
+        real_tgt = self.transform_matrix @ v_tgt
+        delta_xy = -1.0 * (real_tgt - real_ref)
+        delta_x, delta_y = float(delta_xy[0]), float(delta_xy[1])
         if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
             raise RuntimeError("Calculated tool delta resulted in non-finite values")
-        logger.warning(
-            f"Using uncalibrated fallback default MPP ({mpp:.4f} mm/px) for tool delta calculation."
-        )
         return (round(delta_x, 4), round(delta_y, 4))
-

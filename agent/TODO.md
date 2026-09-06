@@ -59,7 +59,9 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 5.1:** Offline unit tests using synthetic nozzle sample images across diverse illumination profiles (14 unit/integration tests).
 - [x] **Task 5.2:** Contactless dry-run validation (`DRY_RUN=1`) supported in macro suite without disk writes.
 - [x] **Task 5.3:** Dynamic vision confidence based on contrast and gradient continuity; negative noise/blank rejection.
-- [ ] **Task 5.4:** Physical machine hardware validation by user on live toolchanger rig.
+- [x] **Task 5.4:** Physical machine hardware trial on Voron 2.4 StealthChanger (T0–T4, KTC-Easy, 2026-09-06).
+- [x] **Task 5.5:** Address 2026-09-06 hardware trial findings (optical center targeting, dynamic centering budget, physical spread threshold, run record state machine, commit telemetry).
+- [ ] **Task 5.6:** Unattended multi-tool offset application with physical multi-material print verification.
 
 ### Phase 6: Packaging & Automated Deployment
 - [x] **Task 6.1:** Write automated Linux installer script `scripts/install.sh` (virtualenv, dependencies, systemd unit).

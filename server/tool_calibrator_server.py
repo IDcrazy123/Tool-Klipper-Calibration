@@ -107,13 +107,32 @@ def dashboard():
     return render_template("index.html")
 
 
+def _get_git_commit() -> str:
+    """Retrieves current Git short commit hash for telemetry and diagnostics."""
+    try:
+        import subprocess
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_dir,
+            stderr=subprocess.DEVNULL,
+            universal_newlines=True
+        ).strip()
+        if commit:
+            return commit
+    except Exception:
+        pass
+    return "unknown"
+
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Service health and readiness check."""
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.8.8",
+        "version": "0.8.18",
+        "commit": _get_git_commit(),
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,
         "has_matrix": solver.transform_matrix is not None,
@@ -412,11 +431,14 @@ def calculate_offset():
             "raw_error_mm": list(raw_error),
             "is_fallback": is_fallback
         }), 200
-    except ValueError as ex:
+    except (ValueError, RuntimeError) as ex:
         err_msg = str(ex)
         if "ERR_CV_204" in err_msg:
             logger.warning(f"Frame boundary violation: {err_msg}")
             return jsonify({"success": False, "error": err_msg, "error_code": "ERR_CV_204"}), 400
+        if "ERR_CV_203" in err_msg:
+            logger.warning(f"Uncalibrated matrix: {err_msg}")
+            return jsonify({"success": False, "error": err_msg, "error_code": "ERR_CV_203"}), 400
         return jsonify({"success": False, "error": err_msg}), 400
     except Exception as ex:
         logger.exception("Error in /calculate_offset")
@@ -465,6 +487,12 @@ def calculate_tool_delta():
             "gcode_command": f"SET_TOOL_OFFSET TOOL={tool_idx} X={dx:.4f} Y={dy:.4f}",
             "config_snippet": f"[tool_offsets]\nt{tool_idx}_x: {dx:.4f}\nt{tool_idx}_y: {dy:.4f}"
         }), 200
+    except (ValueError, RuntimeError) as ex:
+        err_msg = str(ex)
+        if "ERR_CV_203" in err_msg:
+            logger.warning(f"Uncalibrated matrix: {err_msg}")
+            return jsonify({"success": False, "error": err_msg, "error_code": "ERR_CV_203"}), 400
+        return jsonify({"success": False, "error": err_msg}), 400
     except Exception as ex:
         logger.exception("Error in /calculate_tool_delta")
         return jsonify({"success": False, "error": str(ex)}), 400

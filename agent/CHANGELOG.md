@@ -6,7 +6,34 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 
 ## [Unreleased]
 ### Planned
-- Physical hardware validation and user benchmarking telemetry on multi-tool rig.
+- Complete live unattended multi-tool offset application with physical print validation.
+
+## [0.8.18] - 2026-09-06
+### Fixed
+- **[Critical Safety] Elimination of Uncalibrated Fallback Blind Motion**:
+  - Removed assumption-based fallback motion in `server/affine_transform.py`. Physical trial proved machine axes can run completely opposite to default assumptions ($du/dX = -44.0$ px/mm, $dv/dY = -42.95$ px/mm).
+  - Calling `/calculate_offset` or `/calculate_tool_delta` without a solved transformation matrix now returns `ERR_CV_203` (HTTP 400), enforcing calibration via `CALIBRATE_CAMERA_SCALE` before physical toolhead motion.
+  - Removed premature `_center_nozzle()` from `cmd_CALIBRATE_CAMERA_SCALE` prior to star-pattern displacements; added post-calibration centering with the newly solved matrix.
+- **[Accuracy & Geometry] Optical Center Targeting Invariance**:
+  - In `calculate_offset_detail`, visual servoing corrections now compute machine displacement directly to the camera optical center using $\vec{\Delta}_{\text{to\_center}} = \mathbf{M}\vec{v}(0, 0) - \mathbf{M}\vec{v}(nx, ny) = -\mathbf{J} \begin{bmatrix}nx \\ ny\end{bmatrix}$.
+  - Completely cancels out the affine translation intercept matrix column $\mathbf{M}_{[:, 2]}$ (the approach baseline coordinates), making visual centering purely dependent on deviation from the lens optical axis.
+- **[Convergence & Reliability] Dynamic Centering Iteration Budgeting**:
+  - Addressed T2 centering abort at Step 5 (`ERR_CV_202`) where 0.55 damping on $E_0 = 0.865$ mm left $0.865 \times (0.45)^5 = 0.01596\text{ mm} > 0.015\text{ mm}$.
+  - Implemented dynamic budget allocation on Step 1: $N_{\text{needed}} = \lceil \frac{\ln(\text{tol}/E_0)}{\ln(1 - 0.55)} \rceil + 2$ (bounded between default 8 and 15 steps), guaranteeing convergence without relaxing precision tolerances.
+  - Increased default `max_centering_iterations` from 5 to 8 steps (config upper bound raised to 20).
+  - Added final verification step after loop exhaustion before declaring failure.
+- **[Noise & Dispersion] Calibrated Physical Spread Threshold & Minimum Valid Frames**:
+  - Upgraded `_sample_burst()` in `klippy/extras/tool_calibrator.py` to enforce minimum valid frame count $N_{\text{min}} = \max(2, (N_{\text{total}} // 2) + 1)$ (or 1 for single-shot).
+  - Replaced arbitrary pixel spread with a calibrated physical spread limit $\max(6.0\text{ px}, 0.08\text{ mm} / \text{MPP})$, rejecting transient mechanical vibration or lighting flares.
+- **[Telemetry & Safety] Explicit Run Record State Machine & Tool State Guard**:
+  - Introduced `run_record` tracking `run_id`, `state` (`IDLE`, `RUNNING`, `SUCCESS`, `FAILED`), `active_tool`, `start_time`, `end_time`, `duration_sec`, and `valid`.
+  - Aborted/failed runs immediately set `valid = False` and preserve previous cached offsets marked as "Stale (Prior Completed Run)" rather than presenting incomplete cycle data as current results.
+  - On failure, outputs warning indicating the exact active tool (e.g. T2) so operators can inspect physical dock state before issuing tool commands.
+- **[Control & Usability] Calibration Abort & Dry Run Clarity**:
+  - Registered `CALIBRATION_ABORT` and `ABORT_CALIBRATION` commands to cleanly halt multi-tool calibration at the next safe tool transition waypoint without crashing Klipper.
+  - Added descriptive Dry-Run banner detailing that optical centering is performed while physical Z touch, disk writes, and runtime offset applications are skipped.
+- **[Diagnostics] Git Commit Hash in Health Telemetry**:
+  - Exposed current short git commit hash in `/health` API and `TOOL_CALIBRATOR_STATUS` console output to distinguish daemon releases across in-place restarts.
 
 ## [0.8.17] - 2026-09-06
 ### Fixed

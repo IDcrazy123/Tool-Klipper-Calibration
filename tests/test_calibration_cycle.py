@@ -898,6 +898,96 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("FAILED", calibrator.last_run_status)
         calibrator._query_vision.assert_called_with("release_lock", {"session_id": "tok_123", "session_token": "tok_123"}, timeout=2.0)
 
+    def test_dynamic_centering_iteration_budget_converges_large_offset(self):
+        """Simulate T2 initial error of 0.865mm: dynamic budget expands beyond 5 steps and converges at step 7."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator.tolerance_mm = 0.015
+        calibrator.max_centering_iterations = 5  # Initial configured limit is 5
+
+        # Simulate visual servoing decay: E_{k+1} = E_k * 0.45
+        # E1 = 0.865 -> E2 = 0.38925 -> E3 = 0.17516 -> E4 = 0.07882 -> E5 = 0.03547 -> E6 = 0.01596 -> E7 = 0.00718 (<0.015)
+        errors = [0.865, 0.38925, 0.17516, 0.07882, 0.03547, 0.01596, 0.00718]
+        burst_responses = [
+            {"found": True, "center_uv": [640.0 + e * 44.0, 360.0], "radius_px": 25.0, "spread_px": 0.5, "burst_count": 5, "burst_total": 5}
+            for e in errors
+        ]
+        calibrator._sample_burst = MagicMock(side_effect=burst_responses)
+
+        def mock_calc_offset(endpoint, payload, timeout=None):
+            uv = payload.get("center_uv", [640.0, 360.0])
+            err_px = uv[0] - 640.0
+            err_mm = err_px / 44.0
+            return {
+                "offset_xy": [-0.55 * err_mm, 0.0],
+                "raw_error_mm": [err_mm, 0.0]
+            }
+
+        calibrator._query_vision = MagicMock(side_effect=mock_calc_offset)
+        gcmd = DummyGCodeCommand()
+
+        # Under the old fixed 5-step limit, this would fail with ERR_CV_202.
+        # With dynamic budgeting, budget expands to at least 7 steps and succeeds.
+        calibrator._center_nozzle(self.toolhead, gcmd)
+
+        # Confirm convergence message was logged
+        self.assertTrue(any("Convergence achieved at Step 7" in msg for msg in gcmd.info_messages))
+        self.assertTrue(any("Centering budget adjusted" in msg for msg in gcmd.info_messages))
+
+    def test_cmd_calibration_abort_and_run_record(self):
+        """CALIBRATION_ABORT sets cancel_requested flag when RUNNING and aborts cleanly."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand()
+
+        # When IDLE, abort responds that no run is active
+        calibrator.cmd_CALIBRATION_ABORT(gcmd)
+        self.assertFalse(calibrator.cancel_requested)
+        self.assertTrue(any("No calibration cycle is currently running" in m for m in gcmd.info_messages))
+
+        # When RUNNING, abort sets cancel_requested
+        calibrator.run_record["state"] = "RUNNING"
+        calibrator.cmd_CALIBRATION_ABORT(gcmd)
+        self.assertTrue(calibrator.cancel_requested)
+        self.assertTrue(any("Abort requested" in m for m in gcmd.info_messages))
+
+    def test_run_record_invalidation_on_aborted_run(self):
+        """When a cycle aborts midway, run_record marks valid=False and cached_offsets are not overwritten with partial data."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator.cached_offsets = {0: {"x": 0.0, "y": 0.0}, 1: {"x": -0.15, "y": -0.28}}
+
+        # Setup mock for CALIBRATE_TOOL_OFFSETS that aborts on tool 2
+        calibrator._discover_tools = MagicMock(return_value=[0, 1, 2])
+        calibrator._query_vision = MagicMock(return_value={"success": True, "session_token": "tok_test"})
+        calibrator.navigator.move_to_safe_z = MagicMock()
+        calibrator.navigator.approach_camera = MagicMock()
+        calibrator.navigator.depart_station = MagicMock()
+
+        # Toolhead position returns
+        def mock_xy_calib(tool_no, *args, **kwargs):
+            if tool_no == 2:
+                raise SafeNavigatorException("Centering failed at T2: [ERR_CV_202]")
+            return [150.0, 150.0]
+        calibrator._execute_xy_calibration = MagicMock(side_effect=mock_xy_calib)
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 0})
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        self.assertIn("ERR_CV_202", str(ctx.exception))
+        # Verify run_record marked FAILED and invalid
+        self.assertEqual(calibrator.run_record["state"], "FAILED")
+        self.assertFalse(calibrator.run_record["valid"])
+        self.assertEqual(calibrator.run_record["active_tool"], 2)
+
+        # Verify old cached_offsets were NOT corrupted with incomplete cycle data
+        self.assertEqual(calibrator.cached_offsets, {0: {"x": 0.0, "y": 0.0}, 1: {"x": -0.15, "y": -0.28}})
+
+        # Verify get_status exposes run_valid: False
+        status = calibrator.get_status(0.0)
+        self.assertFalse(status["run_valid"])
+        self.assertEqual(status["status"], "FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()
