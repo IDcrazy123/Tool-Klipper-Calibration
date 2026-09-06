@@ -12,6 +12,7 @@ import logging
 import math
 import re
 import threading
+import time
 import urllib.request
 import urllib.error
 import statistics
@@ -53,9 +54,12 @@ class ToolCalibrator:
         self.wiggle_distance = config.getfloat("wiggle_distance", 0.1, above=0.01, maxval=1.0)
         if hasattr(config, "getboolean"):
             self.wiggle_on_failure = config.getboolean("wiggle_on_failure", True)
+            self.allow_shuttle_z = config.getboolean("allow_shuttle_z", False)
         else:
             self.wiggle_on_failure = bool(config.get("wiggle_on_failure", True))
+            self.allow_shuttle_z = bool(config.get("allow_shuttle_z", False))
         self.max_camera_temp = config.getfloat("max_camera_temp", 100.0, above=30.0, maxval=200.0)
+        self.cached_reference_z_result: Optional[Dict[str, Any]] = None
 
         # Core Component Instances
         self.navigator = SafeNavigator(config)
@@ -919,6 +923,16 @@ class ToolCalibrator:
 
     def _execute_z_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_z_result: Dict[str, Any], tool_offsets: Dict[str, float]) -> Dict[str, Any]:
         """Executes Z probing alignment for a single tool with XY offset compensation."""
+        meas_ref = getattr(self.z_backend, "measurement_reference", "nozzle")
+        allow_shuttle = self.allow_shuttle_z or (getattr(gcmd, "get_int", None) and gcmd.get_int("ALLOW_SHUTTLE_Z", 0) == 1)
+        if meas_ref != "nozzle" and not allow_shuttle:
+            raise gcmd.error(
+                f"[ERR_Z_003] The active Z backend '{self.z_backend_type}' has measurement_reference='{meas_ref}'. "
+                "A shuttle-mounted probe cannot observe individual nozzle tip lengths across tool changes. "
+                "Per-tool Z calibration is rejected to prevent applying invalid Z offsets. "
+                "Use a nozzle-contact switch backend (e.g. PF2 switch/Axiscope) or pass ALLOW_SHUTTLE_Z=1 if experimenting."
+            )
+
         gcmd.respond_info(f"[T{tool_no}] Entering Z Probe Station...")
 
         # Derive XY compensation for secondary tool so nozzle hits exact center
@@ -955,14 +969,29 @@ class ToolCalibrator:
             ref_z = self.z_backend.probe_reference_tool(tool_no, gcmd)
             gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established ({ref_z.get('source')})")
             tool_offsets["z"] = 0.0
+            self.cached_reference_z_result = ref_z
             self.navigator.depart_station(toolhead, gcode_move)
             return ref_z
         else:
-            z_res = self.z_backend.probe_secondary_tool(tool_no, reference_z_result, gcmd)
+            active_ref = reference_z_result or getattr(self, "cached_reference_z_result", None)
+            has_ref = (
+                isinstance(active_ref, dict)
+                and (
+                    active_ref.get("contact_z") is not None
+                    or active_ref.get("baseline_z") is not None
+                    or active_ref.get("source") is not None
+                )
+            )
+            if not has_ref:
+                raise gcmd.error(
+                    f"[ERR_CAL_002] Reference tool T{self.reference_tool} Z baseline must be measured first before secondary tools. "
+                    "Please calibrate the reference tool or include it in the TOOLS parameter."
+                )
+            z_res = self.z_backend.probe_secondary_tool(tool_no, active_ref, gcmd)
             tool_offsets["z"] = z_res.get("suggested_z_offset", 0.0)
             gcmd.respond_info(f"[T{tool_no}] Calculated Z Offset: Z{tool_offsets['z']:+.3f}mm")
             self.navigator.depart_station(toolhead, gcode_move)
-            return reference_z_result
+            return active_ref
 
     def cmd_CALIBRATE_TOOL_OFFSETS(self, gcmd) -> None:
         """
@@ -1046,6 +1075,18 @@ class ToolCalibrator:
             if calibrate_z and self.z_backend_type == "switch":
                 self._sync_switch_location_from_tools_calibrate()
 
+            # Pre-flight check for Z backend capability
+            if calibrate_z and not dry_run:
+                meas_ref = getattr(self.z_backend, "measurement_reference", "nozzle")
+                allow_shuttle = self.allow_shuttle_z or (gcmd.get_int("ALLOW_SHUTTLE_Z", 0) == 1)
+                if meas_ref != "nozzle" and not allow_shuttle:
+                    raise gcmd.error(
+                        f"[ERR_Z_003] The active Z backend '{self.z_backend_type}' has measurement_reference='{meas_ref}'. "
+                        "A shuttle-mounted probe cannot observe individual nozzle tip lengths across tool changes. "
+                        "Per-tool Z calibration is rejected to prevent applying invalid Z offsets. "
+                        "Use a nozzle-contact switch backend (e.g. PF2 switch/Axiscope) or pass ALLOW_SHUTTLE_Z=1 if experimenting."
+                    )
+
             # Discover tool sequence across any toolchanger flavor
             ordered_tools = self._discover_tools(tools_param)
 
@@ -1079,6 +1120,7 @@ class ToolCalibrator:
 
                 toolhead.wait_moves()
                 self.run_record["physical_tool"] = tool_no
+                self.run_record["last_confirmed_tool"] = tool_no
                 self.run_record["phase"] = "CALIBRATING_TOOL"
 
                 # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
@@ -1735,49 +1777,74 @@ class ToolCalibrator:
 
     def cmd_CALIBRATION_STATUS(self, gcmd) -> None:
         """Emits current calibration state, telemetry run record, and cached offsets."""
-        rec = self.run_record
-        gcmd.respond_info(f"Tool-Calibrator Status: {rec.get('state', 'IDLE')} (Last Status: {self.last_run_status})")
-        if rec.get("run_id"):
-            validity_str = "VALID" if rec.get("valid") else "INCOMPLETE/FAILED"
-            dur = rec.get("duration_sec", 0.0)
-            if rec.get("state") == "RUNNING" and rec.get("start_time"):
-                dur = round(time.time() - rec["start_time"], 1)
-            gcmd.respond_info(
-                f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
-            )
-            if rec.get("error"):
-                gcmd.respond_info(f"  Last Error: {rec.get('error')}")
-        gcmd.respond_info(f"  Safe_Z: {self.navigator.safe_z:.2f}mm | Backend: {self.z_backend_type}")
+        try:
+            rec = self.run_record
+            gcmd.respond_info(f"Tool-Calibrator Status: {rec.get('state', 'IDLE')} (Last Status: {self.last_run_status})")
+            if rec.get("run_id"):
+                validity_str = "VALID" if rec.get("valid") else "INCOMPLETE/FAILED"
+                dur = rec.get("duration_sec", 0.0)
+                if rec.get("state") == "RUNNING" and rec.get("start_time"):
+                    try:
+                        dur = round(time.time() - rec["start_time"], 1)
+                    except Exception:
+                        pass
+                gcmd.respond_info(
+                    f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
+                )
+                if rec.get("error"):
+                    gcmd.respond_info(f"  Last Error: {rec.get('error')}")
+            safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", 0.0)
+            gcmd.respond_info(f"  Safe_Z: {safe_z_val:.2f}mm | Backend: {getattr(self, 'z_backend_type', 'unknown')}")
 
-        if self.cached_offsets:
-            validity_note = "Valid" if rec.get("valid") else "Stale (Prior Completed Run)"
-            gcmd.respond_info(f"  Cached Offsets ({validity_note}):")
-            for t, offs in self.cached_offsets.items():
-                parts = [f"{k.upper()}={v:+.3f}" for k, v in offs.items()]
-                gcmd.respond_info(f"    T{t}: {' '.join(parts) if parts else 'None'}")
-        else:
-            gcmd.respond_info("  No offsets cached in memory.")
+            if self.cached_offsets:
+                validity_note = "Valid" if rec.get("valid") else "Stale (Prior Completed Run)"
+                gcmd.respond_info(f"  Cached Offsets ({validity_note}):")
+                for t, offs in self.cached_offsets.items():
+                    parts = [f"{k.upper()}={v:+.3f}" for k, v in offs.items()]
+                    gcmd.respond_info(f"    T{t}: {' '.join(parts) if parts else 'None'}")
+            else:
+                gcmd.respond_info("  No offsets cached in memory.")
+        except Exception as ex:
+            logger.error(f"[tool_calibrator] Error executing cmd_CALIBRATION_STATUS: {ex}")
+            gcmd.respond_info(f"[tool_calibrator] Status query exception: {ex}")
 
-    def get_status(self, eventtime) -> Dict[str, Any]:
+    def get_status(self, eventtime=None) -> Dict[str, Any]:
         """Provides state dictionaries to Mainsail and Fluidd frontend templates."""
-        rec = dict(self.run_record)
-        if rec.get("state") == "RUNNING" and rec.get("start_time"):
-            rec["elapsed_sec"] = round(time.time() - rec["start_time"], 1)
-        return {
-            "status": self.run_record.get("state", "IDLE"),
-            "phase": self.run_record.get("phase", "IDLE"),
-            "last_run_status": self.last_run_status,
-            "run_id": self.run_record.get("run_id"),
-            "calibrating_tool": self.run_record.get("calibrating_tool"),
-            "physical_tool": self.run_record.get("physical_tool"),
-            "active_tool": self.run_record.get("physical_tool") if self.run_record.get("physical_tool") is not None else self.run_record.get("calibrating_tool"),
-            "run_valid": self.run_record.get("valid", False),
-            "run_record": rec,
-            "reference_tool": self.reference_tool,
-            "z_backend": self.z_backend_type,
-            "safe_z": self.navigator.safe_z,
-            "cached_offsets": dict(self.cached_offsets)
-        }
+        try:
+            rec = dict(self.run_record) if isinstance(self.run_record, dict) else {}
+            if rec.get("state") == "RUNNING" and rec.get("start_time"):
+                now = eventtime if (eventtime is not None and isinstance(eventtime, (int, float))) else time.time()
+                try:
+                    rec["elapsed_sec"] = round(now - float(rec["start_time"]), 1)
+                except Exception:
+                    rec["elapsed_sec"] = 0.0
+
+            safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", 0.0)
+            return {
+                "status": rec.get("state", "IDLE"),
+                "phase": rec.get("phase", "IDLE"),
+                "last_run_status": getattr(self, "last_run_status", "IDLE"),
+                "run_id": rec.get("run_id"),
+                "calibrating_tool": rec.get("calibrating_tool"),
+                "physical_tool": rec.get("physical_tool"),
+                "active_tool": rec.get("physical_tool") if rec.get("physical_tool") is not None else rec.get("calibrating_tool"),
+                "run_valid": rec.get("valid", False),
+                "run_record": rec,
+                "reference_tool": getattr(self, "reference_tool", 0),
+                "z_backend": getattr(self, "z_backend_type", "cartographer"),
+                "safe_z": safe_z_val,
+                "cached_offsets": dict(getattr(self, "cached_offsets", {}))
+            }
+        except Exception as ex:
+            logger.error(f"[tool_calibrator] Unhandled exception in get_status: {ex}")
+            return {
+                "status": "ERROR",
+                "phase": "ERROR",
+                "last_run_status": "ERROR",
+                "error": str(ex),
+                "run_record": {},
+                "cached_offsets": {}
+            }
 
 
 def load_config(config):

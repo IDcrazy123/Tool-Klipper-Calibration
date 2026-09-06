@@ -39,6 +39,15 @@ class CartographerBackend(BaseZBackend):
         self.touch_model_z_offset = self._load_touch_model_offset()
         self.cartographer_touch_model = config.get("cartographer_touch_model", None)
         self.cartographer_touch_threshold = config.getfloat("cartographer_touch_threshold", None)
+        ref = config.get("measurement_reference", "shuttle").strip().lower()
+        if ref not in ("nozzle", "shuttle"):
+            raise config.error(f"Invalid measurement_reference '{ref}' in [tool_calibrator]. Must be 'nozzle' or 'shuttle'.")
+        self.measurement_reference = ref
+        if self.measurement_reference == "shuttle":
+            logger.info(
+                "[cartographer_backend] measurement_reference is set to 'shuttle'. "
+                "Fixed carriage/shuttle eddy probe does not track individual nozzle tip lengths across tool changes."
+            )
 
     def _resolve_touch_cmd(self, configured: Optional[str], primary: str, fallbacks: Tuple[str, ...]) -> str:
         """Finds the active command registered in Klipper gcode command registry."""

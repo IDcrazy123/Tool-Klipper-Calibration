@@ -209,6 +209,7 @@ class TestCalibrationCycle(unittest.TestCase):
             "camera_y": 10.0,
             "camera_focal_z": 22.0,
             "offset_config_path": self.config_path,
+            "allow_shuttle_z": True,
         }
         self.config = DummyConfig(self.printer, self.config_data)
 
@@ -818,6 +819,7 @@ class TestCalibrationCycle(unittest.TestCase):
         """Verify secondary tool Z probing compensates carriage position by XY offsets."""
         calibrator = ToolCalibrator(self.config)
         calibrator.z_backend_type = "switch"
+        calibrator.z_backend.measurement_reference = "nozzle"
         calibrator.navigator.switch_target_x = 200.0
         calibrator.navigator.switch_target_y = 200.0
         calibrator.navigator.approach_switch = MagicMock()
@@ -1025,13 +1027,14 @@ class TestCalibrationCycle(unittest.TestCase):
         # Also verify Cartographer path adds offset
         calibrator.z_backend_type = "cartographer"
         calibrator.z_backend = MagicMock()
+        calibrator.z_backend.measurement_reference = "nozzle"
         calibrator.z_backend.get_probe_xy.return_value = (150.0, 150.0)
         calibrator.z_backend.probe_secondary_tool.return_value = {"suggested_z_offset": 0.05}
         moves.clear()
 
         gcmd = DummyGCodeCommand()
         tool_offsets = {"x": 0.865, "y": 0.270}
-        calibrator._execute_z_calibration(2, self.toolhead, self.printer.gcode_move, gcmd, {}, tool_offsets)
+        calibrator._execute_z_calibration(2, self.toolhead, self.printer.gcode_move, gcmd, {"contact_z": 1.5}, tool_offsets)
         self.assertAlmostEqual(self.toolhead.pos[0], 150.865, places=3)
         self.assertAlmostEqual(self.toolhead.pos[1], 150.270, places=3)
 

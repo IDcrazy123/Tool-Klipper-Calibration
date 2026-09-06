@@ -41,6 +41,7 @@ class SwitchBackend(BaseZBackend):
 
     def __init__(self, config) -> None:
         super().__init__(config)
+        self.measurement_reference = "nozzle"
         self.samples = config.getint("switch_samples", None)
         if self.samples is None:
             self.samples = config.getint("samples", 3, minval=1, maxval=10)

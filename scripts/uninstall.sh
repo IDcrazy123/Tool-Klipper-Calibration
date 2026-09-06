@@ -18,11 +18,16 @@ echo -e "${YELLOW}====================================================${NC}"
 # Parse optional arguments
 KEEP_DATA=false
 CONFIG_SUBDIR=""
+PURGE_REPO=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-data)
             KEEP_DATA=true
+            shift
+            ;;
+        --purge-repo)
+            PURGE_REPO=true
             shift
             ;;
         --config-subdir)
@@ -34,8 +39,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: ./scripts/uninstall.sh [--keep-data] [--config-subdir <subdir>]"
+            echo "Usage: ./scripts/uninstall.sh [--keep-data] [--purge-repo] [--config-subdir <subdir>]"
             echo "  --keep-data              : Preserves tool_offsets.cfg without archiving or removing"
+            echo "  --purge-repo             : Removes cloned repository directory after uninstallation"
             echo "  --config-subdir <subdir> : Machine-specific configuration subdirectory (e.g. Printer-Setup)"
             exit 0
             ;;
@@ -77,6 +83,16 @@ PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
 # Try to discover installation paths from persistent manifest
 TARGET_CONFIG_DIR="${CONFIG_DIR}"
 if [ -n "${CONFIG_SUBDIR}" ]; then
+    CLEAN_SUBDIR="$(printf '%s' "${CONFIG_SUBDIR}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if printf '%s' "${CLEAN_SUBDIR}" | grep -q '[[:cntrl:]]'; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir chứa ký tự điều khiển không hợp lệ!${NC}"
+        exit 1
+    fi
+    if [[ "${CLEAN_SUBDIR}" == /* ]] || [[ "${CLEAN_SUBDIR}" =~ \.\. ]] || [[ "${CLEAN_SUBDIR}" =~ // ]]; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir không hợp lệ!${NC}"
+        exit 1
+    fi
+    CONFIG_SUBDIR="${CLEAN_SUBDIR}"
     TARGET_CONFIG_DIR="${CONFIG_DIR}/${CONFIG_SUBDIR}"
 fi
 
@@ -97,7 +113,7 @@ except Exception:
     pass
 " 2>/dev/null || true)
     if [ -n "${DISCOVERED_SUBDIR}" ] && [ -z "${CONFIG_SUBDIR}" ]; then
-        CONFIG_SUBDIR="${DISCOVERED_SUBDIR}"
+        CONFIG_SUBDIR="$(printf '%s' "${DISCOVERED_SUBDIR}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
         TARGET_CONFIG_DIR="${CONFIG_DIR}/${CONFIG_SUBDIR}"
     fi
 fi
@@ -191,8 +207,8 @@ import re
 try:
     with open('${PRINTER_CFG}', 'r') as f:
         content = f.read()
-    # Safely comment out any include lines pointing to tool_offsets.cfg or tool_calibrator macros
-    pattern = r'(?m)^([ \t]*\[include [^]]*(?:tool_offsets\.cfg|tool_calibrator[^\n]*\.cfg)\])'
+    # Safely comment out any include lines pointing to tool_offsets.cfg or tool_calibrator macros (supports hyphens and underscores)
+    pattern = r'(?m)^([ \t]*\[include [^]]*(?:tool[-_]offsets\.cfg|tool[-_]calibrator[^\n]*\.cfg)\])'
     updated, count = re.subn(pattern, r'# \1 # disabled by TKC uninstaller', content)
     if count > 0:
         with open('${PRINTER_CFG}', 'w') as f:
@@ -281,6 +297,23 @@ if curl -sS --fail --max-time 3 -X POST "http://127.0.0.1:7125/machine/services/
     echo -e "${GREEN}[✔] Moonraker restart triggered via Moonraker API.${NC}"
 elif sudo -n true 2>/dev/null; then
     sudo systemctl restart moonraker.service || true
+fi
+
+# Report remaining backups/archives if any
+REMAINING_ARCHIVES=$(find "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}" -maxdepth 1 -name "tool_offsets.cfg.archived_*" -o -name "printer.cfg.bak_tkc_*" 2>/dev/null | sort -u || true)
+if [ -n "${REMAINING_ARCHIVES}" ]; then
+    echo -e "${CYAN}[i] Các file sao lưu an toàn được bảo tồn:${NC}"
+    echo "${REMAINING_ARCHIVES}" | while read -r arc; do
+        [ -n "${arc}" ] && echo -e "    - ${arc}"
+    done
+fi
+
+if [ "${PURGE_REPO}" = true ]; then
+    echo -e "\n${YELLOW}[!] Yêu cầu gỡ bỏ toàn bộ thư mục repository (--purge-repo)...${NC}"
+    if [ -d "${REPO_DIR}" ]; then
+        rm -rf "${REPO_DIR}"
+        echo -e "${GREEN}[✔] Đã xóa repository: ${REPO_DIR}${NC}"
+    fi
 fi
 
 echo -e "\n${GREEN}====================================================${NC}"

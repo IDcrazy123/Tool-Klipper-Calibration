@@ -11,6 +11,8 @@ class BaseZBackend(ABC):
     Abstract interface for multi-backend Z probing (Switch vs Cartographer).
     """
 
+    measurement_reference: str = "nozzle"
+
     def __init__(self, config) -> None:
         self.config = config
         self.printer = config.get_printer()

@@ -87,8 +87,46 @@ fi
 
 TARGET_CONFIG_DIR="${CONFIG_DIR}"
 if [ -n "${CONFIG_SUBDIR}" ]; then
+    # Strip carriage return and leading/trailing whitespace
+    CLEAN_SUBDIR="$(printf '%s' "${CONFIG_SUBDIR}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    # Check for control characters
+    if printf '%s' "${CLEAN_SUBDIR}" | grep -q '[[:cntrl:]]'; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir chứa ký tự điều khiển không hợp lệ!${NC}"
+        exit 1
+    fi
+
+    # Reject absolute path
+    if [[ "${CLEAN_SUBDIR}" == /* ]]; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir không được là đường dẫn tuyệt đối (${CLEAN_SUBDIR})!${NC}"
+        exit 1
+    fi
+
+    # Reject directory traversal
+    if [[ "${CLEAN_SUBDIR}" =~ \.\. ]]; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir không được chứa đường dẫn duyệt ngược (..) (${CLEAN_SUBDIR})!${NC}"
+        exit 1
+    fi
+
+    # Reject double slashes
+    if [[ "${CLEAN_SUBDIR}" =~ // ]]; then
+        echo -e "${RED}[ERR] Giá trị --config-subdir không được chứa dấu gạch chéo kép (//) (${CLEAN_SUBDIR})!${NC}"
+        exit 1
+    fi
+
+    CONFIG_SUBDIR="${CLEAN_SUBDIR}"
     TARGET_CONFIG_DIR="${CONFIG_DIR}/${CONFIG_SUBDIR}"
 fi
+
+# Verify canonical resolved path stays strictly within CONFIG_DIR
+REAL_CONFIG_DIR="$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${CONFIG_DIR}" 2>/dev/null || realpath "${CONFIG_DIR}" 2>/dev/null || echo "${CONFIG_DIR}")"
+REAL_TARGET_DIR="$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${TARGET_CONFIG_DIR}" 2>/dev/null || realpath "${TARGET_CONFIG_DIR}" 2>/dev/null || echo "${TARGET_CONFIG_DIR}")"
+
+if [[ "${REAL_TARGET_DIR}" != "${REAL_CONFIG_DIR}" && "${REAL_TARGET_DIR}" != "${REAL_CONFIG_DIR}/"* ]]; then
+    echo -e "${RED}[ERR] Thư mục cấu hình mục tiêu (${REAL_TARGET_DIR}) nằm ngoài thư mục cấu hình Klipper (${REAL_CONFIG_DIR})!${NC}"
+    exit 1
+fi
+
 mkdir -p "${TARGET_CONFIG_DIR}"
 
 PERSISTENT_MANIFEST="${TARGET_CONFIG_DIR}/.tool_calibrator_manifest.json"
@@ -108,7 +146,7 @@ cleanup_on_error() {
     echo -e "\n${RED}[ERR] Quá trình cài đặt bị gián đoạn (Exit code: ${exit_code})! Đang hoàn tác theo thứ tự ngược lại...${NC}"
     if [ -f "${JOURNAL_FILE}" ]; then
         # Rollback in reverse order
-        tac "${JOURNAL_FILE}" 2>/dev/null || cat "${JOURNAL_FILE}" | while IFS= read -r line || [ -n "${line}" ]; do
+        (tac "${JOURNAL_FILE}" 2>/dev/null || cat "${JOURNAL_FILE}") | while IFS= read -r line || [ -n "${line}" ]; do
             key="$(echo "${line}" | cut -d'=' -f1)"
             val="$(echo "${line}" | cut -d'=' -f2-)"
             case "${key}" in
