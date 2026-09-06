@@ -8,6 +8,20 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.14] - 2026-09-06
+### Fixed
+- **Camera Sync Endpoint Compatibility**: Added `@app.route("/set_camera_url", methods=["POST"])` endpoint alias in [server/tool_calibrator_server.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/tool_calibrator_server.py) to resolve 404 error during pre-flight camera URL synchronization from Klipper.
+- **Stream URL Auto-Conversion**: Upgraded `_normalize_url` in [server/stream_grabber.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/stream_grabber.py) to automatically convert continuous video stream URLs (`action=stream` and `/stream`) into static snapshot endpoints (`action=snapshot` and `/snapshot`), preventing HTTP request hangs.
+- **Station Matrix Telemetry**: Added `matrix_tx` and `matrix_ty` config parsing and exported the full affine matrix in `get_status()` of [klippy/extras/tool_calibrator_station.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator_station.py).
+- **Deployment Scripts**: Added `__init__.py` linking in [scripts/install.sh](file:///d:/Desktop/Tool-Klipper-Calibration/scripts/install.sh) and included `tool_calibrator_station.py` in [scripts/uninstall.sh](file:///d:/Desktop/Tool-Klipper-Calibration/scripts/uninstall.sh).
+
+### Added
+- **Randomized 88-Image Camera Algorithm Benchmark**:
+  - Added [scripts/test_camera_shuffled_88.py](file:///d:/Desktop/Tool-Klipper-Calibration/scripts/test_camera_shuffled_88.py) evaluating 75 sweep frames from `Picture Screenshot` and 13 real camera frames from `tests/sample_images`.
+  - 100% detection rate (88/88) and 100% order invariance verification (0.000000px discrepancy).
+  - Generated full-frame annotations with 4X Inset PiP and 4X zoomed crops in `test_annotated_results/`.
+- Expanded test suite to **68/68 unit tests** (100% pass rate).
+
 ## [0.8.13] - 2026-09-06
 ### Added
 - **Decoupled XY and Z Calibration for Non-Homogeneous Hardware:**
