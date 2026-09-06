@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Optional, List
 import numpy as np
 
 from flask import Flask, jsonify, request, Response, render_template
@@ -49,6 +49,8 @@ debugger = VisualDebugger()
 calibration_lock = {
     "session_id": None,
     "locked_at": 0.0,
+    "timeout_seconds": 600,
+    "abort_requested": False,
     "token": os.environ.get("CALIBRATION_API_TOKEN", None)
 }
 lock_mutex = threading.Lock()
@@ -79,10 +81,12 @@ def _check_session_ownership(req) -> Tuple[bool, Optional[str]]:
         now = time.time()
         active_session = calibration_lock.get("session_id")
         locked_at = calibration_lock.get("locked_at", 0.0)
+        timeout = calibration_lock.get("timeout_seconds", 600)
 
-        if active_session is not None and (now - locked_at > 600):
+        if active_session is not None and (now - locked_at > timeout):
             calibration_lock["session_id"] = None
             calibration_lock["locked_at"] = 0.0
+            calibration_lock["abort_requested"] = False
             active_session = None
 
         if active_session is None:
@@ -119,6 +123,14 @@ def _get_git_commit() -> str:
             universal_newlines=True
         ).strip()
         if commit:
+            dirty = subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=repo_dir,
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True
+            ).strip()
+            if dirty:
+                commit += "-dirty"
             return commit
     except Exception:
         pass
@@ -137,7 +149,24 @@ def health_check():
         "matrix_solved": solver.transform_matrix is not None,
         "has_matrix": solver.transform_matrix is not None,
         "calibrated_mpp": solver.mpp,
-        "session_locked": calibration_lock["session_id"] is not None
+        "session_locked": calibration_lock["session_id"] is not None,
+        "abort_requested": calibration_lock.get("abort_requested", False)
+    }), 200
+
+
+@app.route("/abort_calibration", methods=["POST"])
+@app.route("/abort", methods=["POST"])
+def abort_calibration():
+    """Sets daemon-wide abort flag for out-of-band cancellation."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    with lock_mutex:
+        calibration_lock["abort_requested"] = True
+    logger.warning("[tool_calibrator.server] Out-of-band calibration abort requested via API!")
+    return jsonify({
+        "success": True,
+        "message": "Calibration abort requested.",
+        "abort_requested": True
     }), 200
 
 
@@ -148,23 +177,31 @@ def acquire_lock():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json(silent=True) or {}
     req_session = data.get("session_id") or data.get("session_token") or str(time.time())
+    req_timeout = int(data.get("timeout_seconds", 600))
+    req_timeout = max(30, min(1800, req_timeout))
     with lock_mutex:
         now = time.time()
+        timeout = calibration_lock.get("timeout_seconds", 600)
         current = calibration_lock["session_id"]
-        if current is None or (now - calibration_lock["locked_at"] > 600):
+        if current is None or (now - calibration_lock["locked_at"] > timeout):
             calibration_lock["session_id"] = req_session
             calibration_lock["locked_at"] = now
+            calibration_lock["timeout_seconds"] = req_timeout
+            calibration_lock["abort_requested"] = False
             return jsonify({
                 "success": True,
                 "session_id": req_session,
-                "session_token": req_session
+                "session_token": req_session,
+                "timeout_seconds": req_timeout
             }), 200
         elif current == req_session:
             calibration_lock["locked_at"] = now
+            calibration_lock["timeout_seconds"] = req_timeout
             return jsonify({
                 "success": True,
                 "session_id": req_session,
-                "session_token": req_session
+                "session_token": req_session,
+                "timeout_seconds": req_timeout
             }), 200
         return jsonify({"success": False, "error": "Session locked by another client"}), 409
 
@@ -183,11 +220,13 @@ def release_lock():
     )
     with lock_mutex:
         if calibration_lock["session_id"] is None:
+            calibration_lock["abort_requested"] = False
             return jsonify({"success": True, "message": "No active lock"}), 200
         if not req_session or calibration_lock["session_id"] != req_session:
             return jsonify({"success": False, "error": "Session ID mismatch or missing session token"}), 403
         calibration_lock["session_id"] = None
         calibration_lock["locked_at"] = 0.0
+        calibration_lock["abort_requested"] = False
         return jsonify({"success": True}), 200
 
 
@@ -429,7 +468,8 @@ def calculate_offset():
             "success": True,
             "offset_xy": list(damped_xy),
             "raw_error_mm": list(raw_error),
-            "is_fallback": is_fallback
+            "is_fallback": is_fallback,
+            "abort_requested": calibration_lock.get("abort_requested", False)
         }), 200
     except (ValueError, RuntimeError) as ex:
         err_msg = str(ex)

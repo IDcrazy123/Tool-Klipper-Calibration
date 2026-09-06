@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Tool-Klipper-Calibration Master Klipper Extension.
 
@@ -105,12 +106,15 @@ class ToolCalibrator:
         # Calibration State & Run Telemetry Record
         self.cached_offsets: Dict[int, Dict[str, float]] = {}
         self.calibrated_mpp: Optional[float] = None
+        self.physical_spread_limit_mm = config.getfloat("burst_spread_limit_mm", 0.08, minval=0.01, maxval=0.5)
         self.last_run_status = "UNINITIALIZED"
         self.cancel_requested = False
         self.run_record: Dict[str, Any] = {
             "run_id": None,
             "state": "IDLE",
-            "active_tool": None,
+            "phase": "IDLE",
+            "calibrating_tool": None,
+            "physical_tool": None,
             "start_time": None,
             "end_time": None,
             "duration_sec": 0.0,
@@ -135,8 +139,8 @@ class ToolCalibrator:
         self.gcode.register_command("CALIBRATION_TEST_VISION", self.cmd_CALIBRATION_TEST_VISION, desc="Test nozzle vision detection and report coordinates")
         self.gcode.register_command("CALIBRATION_SET_SAFE_POS", self.cmd_CALIBRATION_SET_SAFE_POS, desc="Interactive Safe Position Teaching")
         self.gcode.register_command("CALIBRATION_ROLLBACK_OFFSETS", self.cmd_CALIBRATION_ROLLBACK_OFFSETS, desc="Rollback to Previous Configuration Backup")
-        self.gcode.register_command("CALIBRATION_ABORT", self.cmd_CALIBRATION_ABORT, desc="Aborts active calibration run at next safe boundary")
-        self.gcode.register_command("ABORT_CALIBRATION", self.cmd_CALIBRATION_ABORT, desc="Aborts active calibration run at next safe boundary (Alias)")
+        self.gcode.register_command("CALIBRATION_ABORT", self.cmd_CALIBRATION_ABORT, desc="Aborts active calibration run cleanly")
+        self.gcode.register_command("ABORT_CALIBRATION", self.cmd_CALIBRATION_ABORT, desc="Aborts active calibration run cleanly (Alias)")
         self.gcode.register_command("TOOL_CALIBRATOR_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets")
         self.gcode.register_command("TKC_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets (Short Alias)")
         if "CALIBRATION_STATUS" not in getattr(self.gcode, "commands", {}):
@@ -145,6 +149,15 @@ class ToolCalibrator:
             except Exception:
                 pass
         self.gcode.register_command("CALIBRATION_NAVIGATE", self.cmd_CALIBRATION_NAVIGATE, desc="Safely navigate toolhead between stations")
+
+        # Register Webhooks for out-of-band non-blocking control
+        webhooks = self.printer.lookup_object('webhooks', None)
+        if webhooks is not None:
+            try:
+                webhooks.register_endpoint("tool_calibrator/abort", self._handle_webhook_abort)
+                webhooks.register_endpoint("tool_calibrator/status", self._handle_webhook_status)
+            except Exception as ex:
+                logger.warning(f"[tool_calibrator] Failed to register webhooks: {ex}")
 
     def _load_saved_stations(self) -> None:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
@@ -314,20 +327,35 @@ class ToolCalibrator:
             return result_holder[0]
         raise SafeNavigatorException(f"[ERR_CAM_102] Empty response received from {url}")
 
+    def _handle_webhook_abort(self, web_request) -> None:
+        """Out-of-band webhook handler to abort active calibration without waiting for G-code lock."""
+        self.cancel_requested = True
+        try:
+            self._query_vision("abort_calibration", {}, timeout=1.0)
+        except Exception:
+            pass
+        web_request.send({"status": "ok", "message": "Calibration abort requested."})
+
+    def _handle_webhook_status(self, web_request) -> None:
+        """Out-of-band webhook handler to query calibration status."""
+        status = self.get_status(self.reactor.monotonic())
+        web_request.send(status)
+
+    def _check_cancellation(self, gcmd=None) -> None:
+        """Checks if cancellation has been requested via webhook, G-code, or vision daemon."""
+        if self.cancel_requested:
+            raise SafeNavigatorException("Calibration aborted by user request (CALIBRATION_ABORT).")
+
     def _sample_burst(self, toolhead, gcmd=None, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
-        Multi-frame Burst Sampling with Consensus Filtering:
-        Pulls consecutive frames separated by `sample_delay` to filter mechanical vibrations,
-        streamer buffer lag, and transient sensor noise. Rejects inconsistent bursts where dispersion
-        exceeds 15px and no majority consensus cluster exists.
+        Samples multiple detection frames to establish a noise-filtered consensus median.
+        Enforces minimum valid frame count and calibrated physical dispersion limits.
         """
-        n_samples = samples if samples is not None else self.centering_samples
-        toolhead.wait_moves()
-        settle_time = max(0.12, self.sample_delay)
-        self.reactor.pause(self.reactor.monotonic() + settle_time)
+        n_samples = samples or self.centering_samples
+        valid_frames: List[Dict[str, Any]] = []
 
-        valid_frames = []
         for i in range(n_samples):
+            self._check_cancellation(gcmd)
             if i > 0:
                 self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
             try:
@@ -354,7 +382,9 @@ class ToolCalibrator:
         accepted_frames = valid_frames
         # Quality Gate 2: Physical dispersion threshold scaled by MPP (~0.08mm)
         mpp_val = self.calibrated_mpp or 0.040
-        spread_px_limit = max(6.0, round(0.08 / mpp_val, 1))
+        raw_spread_mm = round(raw_spread_px * mpp_val, 4)
+        # Pixel limit derived strictly from physical limit, with a minimal quantization floor of 2.5px
+        spread_px_limit = max(2.5, round(self.physical_spread_limit_mm / mpp_val, 2))
 
         if len(valid_frames) > 1 and raw_spread_px > spread_px_limit:
             consensus_cluster = []
@@ -370,11 +400,11 @@ class ToolCalibrator:
             # Strict majority required: strictly > total // 2 and >= 2
             if len(consensus_cluster) <= (len(valid_frames) // 2) or len(consensus_cluster) < 2:
                 logger.warning(
-                    f"[tool_calibrator] Inconsistent burst rejected: spread={raw_spread_px}px (limit={spread_px_limit:.1f}px) across {len(valid_frames)} frames with no strict majority consensus ({len(consensus_cluster)}/{len(valid_frames)})."
+                    f"[tool_calibrator] Inconsistent burst rejected: spread={raw_spread_px}px ({raw_spread_mm:.3f}mm, limit={self.physical_spread_limit_mm:.3f}mm / {spread_px_limit:.1f}px) across {len(valid_frames)} frames with no strict majority consensus ({len(consensus_cluster)}/{len(valid_frames)})."
                 )
                 return {
                     "found": False,
-                    "reason": f"Inconsistent burst dispersion ({raw_spread_px}px > {spread_px_limit:.1f}px) without strict majority consensus"
+                    "reason": f"Inconsistent burst dispersion ({raw_spread_px}px / {raw_spread_mm:.3f}mm > {spread_px_limit:.1f}px / {self.physical_spread_limit_mm:.3f}mm) without strict majority consensus"
                 }
             accepted_frames = consensus_cluster
 
@@ -385,6 +415,7 @@ class ToolCalibrator:
         spread_px = 0.0
         if len(u_vals) > 1:
             spread_px = round(max(max(u_vals) - min(u_vals), max(v_vals) - min(v_vals)), 2)
+        spread_mm = round(spread_px * mpp_val, 4)
 
         med_u = float(statistics.median(u_vals))
         med_v = float(statistics.median(v_vals))
@@ -400,7 +431,8 @@ class ToolCalibrator:
             "combo": best_meta.get("combo", 0),
             "burst_count": len(accepted_frames),
             "burst_total": n_samples,
-            "spread_px": spread_px
+            "spread_px": spread_px,
+            "spread_mm": spread_mm
         }
 
 
@@ -464,6 +496,7 @@ class ToolCalibrator:
 
         iteration = 0
         while iteration < max_steps:
+            self._check_cancellation(gcmd)
             iteration += 1
             burst_resp = self._sample_burst(toolhead, gcmd, samples=samples)
 
@@ -478,6 +511,10 @@ class ToolCalibrator:
 
             center_uv = burst_resp.get("center_uv")
             offset_resp = self._query_vision("calculate_offset", {"center_uv": center_uv})
+            if offset_resp.get("abort_requested"):
+                self.cancel_requested = True
+                self._check_cancellation(gcmd)
+
             dx, dy = offset_resp.get("offset_xy", [0.0, 0.0])
             raw_err = offset_resp.get("raw_error_mm", [dx / 0.55 if abs(dx) > 1e-6 else 0.0, dy / 0.55 if abs(dy) > 1e-6 else 0.0])
             raw_dx, raw_dy = float(raw_err[0]), float(raw_err[1])
@@ -497,11 +534,13 @@ class ToolCalibrator:
                         pass
 
             tier_desc = "Tier 0 Curvature" if burst_resp.get("combo") == 10 else f"Tier {burst_resp.get('tier', 1)}"
-            burst_desc = f"Burst {burst_resp.get('burst_count')}/{burst_resp.get('burst_total')} (spread: {burst_resp.get('spread_px')}px)"
+            burst_desc = f"Burst {burst_resp.get('burst_count')}/{burst_resp.get('burst_total')} ({burst_resp.get('spread_px')}px / {burst_resp.get('spread_mm', 0.0):.3f}mm)"
+            logger.debug(
+                f"[tool_calibrator] Step {iteration}/{max_steps}: raw=({raw_dx:+.4f}, {raw_dy:+.4f}) damped=({dx:+.4f}, {dy:+.4f}) UV={center_uv} {burst_desc} {tier_desc}"
+            )
             if gcmd:
                 gcmd.respond_info(
-                    f"  -> Centering Step {iteration}/{max_steps}: True Error X{raw_dx:+.3f}mm Y{raw_dy:+.3f}mm "
-                    f"(Damped Delta: X{dx:+.3f}mm Y{dy:+.3f}mm, UV: {center_uv}, {burst_desc}, {tier_desc})"
+                    f"  -> Step {iteration}/{max_steps}: Err X{raw_dx:+.3f} Y{raw_dy:+.3f}mm | Move X{dx:+.3f} Y{dy:+.3f}mm (UV: {center_uv[0]:.1f},{center_uv[1]:.1f})"
                 )
 
             # Check convergence against true physical error before damping
@@ -740,7 +779,7 @@ class ToolCalibrator:
         return self.reference_tool
 
     def _check_camera_thermal_safety(self, tool_no: Optional[int] = None, gcmd = None) -> None:
-        """Ensures nozzle temperature does not exceed safe optical camera limit (100°C) to prevent lens fogging/damage."""
+        """Ensures nozzle temperature does not exceed safe optical camera limit (100C) to prevent lens fogging/damage."""
         if tool_no is None:
             tool_no = self._get_active_tool_no()
 
@@ -767,8 +806,8 @@ class ToolCalibrator:
                 temp = status.get("temperature", 0.0)
                 if temp > self.max_camera_temp:
                     err_msg = (
-                        f"[ERR_PRE_002] Tool T{tool_no} nozzle temperature ({temp:.1f}°C) "
-                        f"exceeds safe camera limit ({self.max_camera_temp:.1f}°C). "
+                        f"[ERR_PRE_002] Tool T{tool_no} nozzle temperature ({temp:.1f}C) "
+                        f"exceeds safe camera limit ({self.max_camera_temp:.1f}C). "
                         f"Allow nozzle to cool before entering camera station."
                     )
                     if gcmd is not None:
@@ -839,8 +878,8 @@ class ToolCalibrator:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
             probe_x, probe_y = self.z_backend.get_probe_xy()
             if offset_xy is not None:
-                probe_x -= offset_x
-                probe_y -= offset_y
+                probe_x += offset_x
+                probe_y += offset_y
             self.navigator.validate_coordinate_safety(x=probe_x, y=probe_y)
             toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
 
@@ -891,11 +930,16 @@ class ToolCalibrator:
 
         self.cancel_requested = False
         import time as _sys_time
+        import os
         run_id = f"run_{int(_sys_time.time())}"
+        active_t = self._get_active_tool_no()
         self.run_record = {
             "run_id": run_id,
             "state": "RUNNING",
-            "active_tool": None,
+            "phase": "INITIALIZING",
+            "calibrating_tool": None,
+            "physical_tool": active_t,
+            "active_tool": active_t,
             "start_time": _sys_time.time(),
             "end_time": None,
             "duration_sec": 0.0,
@@ -915,23 +959,18 @@ class ToolCalibrator:
             )
 
         session_token = None
-        # Pre-flight ping to vision service & session lock
-        if calibrate_xy:
-            try:
+        try:
+            # Pre-flight ping to vision service & session lock
+            if calibrate_xy:
                 self._ensure_vision_sync()
-                lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": "klipper_calib", "timeout_seconds": 600}, timeout=2.0)
+                unique_session = f"klipper_{int(_sys_time.time()*1000)}_{os.getpid()}"
+                lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": unique_session, "timeout_seconds": 600}, timeout=2.0)
                 session_token = lock_resp.get("session_token") or lock_resp.get("session_id")
                 self.session_token = session_token
                 health = self._query_vision("health")
                 commit_info = f" (commit: {health.get('commit')})" if health.get('commit') and health.get('commit') != 'unknown' else ""
                 gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}{commit_info}")
-            except Exception as ex:
-                self.run_record["state"] = "FAILED"
-                self.run_record["error"] = str(ex)
-                self.last_run_status = f"FAILED: {ex}"
-                raise gcmd.error(str(ex))
 
-        try:
             # Dynamic inheritance check for switch coordinates
             if calibrate_z and self.z_backend_type == "switch":
                 self._sync_switch_location_from_tools_calibrate()
@@ -953,10 +992,11 @@ class ToolCalibrator:
             results: Dict[int, Dict[str, float]] = {}
 
             for tool_no in ordered_tools:
-                if self.cancel_requested:
-                    raise SafeNavigatorException("Calibration aborted by user request (CALIBRATION_ABORT).")
+                self._check_cancellation(gcmd)
 
+                self.run_record["calibrating_tool"] = tool_no
                 self.run_record["active_tool"] = tool_no
+                self.run_record["phase"] = "CHANGING_TOOL"
                 gcmd.respond_info(f"\n--- Calibrating Toolhead T{tool_no} ---")
 
                 # Change tool
@@ -967,6 +1007,8 @@ class ToolCalibrator:
                     self._run_tool_hook(self.after_pickup_gcode, tool_no)
 
                 toolhead.wait_moves()
+                self.run_record["physical_tool"] = tool_no
+                self.run_record["phase"] = "CALIBRATING_TOOL"
 
                 # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
                 if clean_nozzle:
@@ -990,6 +1032,7 @@ class ToolCalibrator:
                 # Calibration sequence execution by order
                 if order == "Z_FIRST":
                     if calibrate_z and not dry_run:
+                        self.run_record["phase"] = "PROBING_Z"
                         reference_z_result = self._execute_z_calibration(
                             tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
                         )
@@ -997,17 +1040,20 @@ class ToolCalibrator:
                         focal_z = None
                         if compensate_focal_z and tool_no != self.reference_tool and "z" in tool_offsets:
                             focal_z = self.navigator.cam_target_z + tool_offsets["z"]
+                        self.run_record["phase"] = "CENTERING_NOZZLE"
                         reference_origin_xy = self._execute_xy_calibration(
                             tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z,
                             samples=samples_param, enable_wiggle=wiggle_param
                         )
                 else:
                     if calibrate_xy:
+                        self.run_record["phase"] = "CENTERING_NOZZLE"
                         reference_origin_xy = self._execute_xy_calibration(
                             tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets,
                             samples=samples_param, enable_wiggle=wiggle_param
                         )
                     if calibrate_z and not dry_run:
+                        self.run_record["phase"] = "PROBING_Z"
                         reference_z_result = self._execute_z_calibration(
                             tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
                         )
@@ -1017,12 +1063,19 @@ class ToolCalibrator:
                 self.run_record["offsets"][tool_no] = dict(tool_offsets)
 
             # Restore Reference Tool
+            self.run_record["phase"] = "RESTORING_REFERENCE"
             self.gcode.run_script_from_command(f"T{self.reference_tool}")
-            self.navigator.move_to_safe_z(toolhead, gcode_move)
+            toolhead.wait_moves()
+            self.run_record["physical_tool"] = self.reference_tool
+            self.run_record["active_tool"] = self.reference_tool
+            self.run_record["calibrating_tool"] = None
 
             # Execute finish_gcode hook
             if self.finish_gcode is not None:
                 self._run_tool_hook(self.finish_gcode, self.reference_tool)
+
+            # Park at Safe_Z
+            self.navigator.move_to_safe_z(toolhead, gcode_move)
 
             # Persist Offsets
             if save_config and not dry_run:
@@ -1036,35 +1089,44 @@ class ToolCalibrator:
                         gcmd.respond_info("[tool_calibrator] Applied new offsets to toolchanger runtime.")
                     except Exception as e:
                         logger.warning(f"Failed to apply offsets to toolchanger runtime: {e}")
+            else:
+                gcmd.respond_info("[tool_calibrator] Note: SAVE_CONFIG=0 or DRY_RUN=1 requested. Offsets retained in memory only.")
 
             # Telemetry Summary
             gcmd.respond_info("\n================ CALIBRATION SUMMARY ================")
             for t_num, offs in results.items():
                 parts = [f"{k.upper()}={v:+.3f}mm" for k, v in offs.items()]
                 gcmd.respond_info(f"Tool T{t_num}: {'  '.join(parts) if parts else 'No new offsets measured'}")
+
+            gcmd.respond_info("\n✔ ================= CALIBRATION COMPLETE =================\n")
+            gcmd.respond_info("  All configured tools calibrated safely and successfully.")
             gcmd.respond_info("=====================================================")
 
             self.cached_offsets = results
             self.run_record["state"] = "SUCCESS"
+            self.run_record["phase"] = "COMPLETED"
             self.run_record["valid"] = True
-            self.run_record["end_time"] = _sys_time.time()
-            self.run_record["duration_sec"] = round(self.run_record["end_time"] - self.run_record["start_time"], 2)
             self.last_run_status = "SUCCESS"
 
         except Exception as ex:
-            self.run_record["state"] = "FAILED"
+            is_cancel = self.cancel_requested or "aborted" in str(ex).lower() or "cancel" in str(ex).lower()
+            term_state = "CANCELLED" if is_cancel else "FAILED"
+            self.run_record["state"] = term_state
+            self.run_record["phase"] = term_state
             self.run_record["valid"] = False
             self.run_record["error"] = str(ex)
-            self.run_record["end_time"] = _sys_time.time()
-            self.run_record["duration_sec"] = round(self.run_record["end_time"] - self.run_record["start_time"], 2)
-            self.last_run_status = f"FAILED: {ex}"
+            self.last_run_status = f"{term_state}: {ex}"
             self.navigator.depart_station(toolhead, gcode_move)
-            gcmd.respond_info(f"!! [tool_calibrator] Calibration Aborted: {ex}")
-            active_t = self.run_record.get("active_tool")
+            gcmd.respond_info(f"!! [tool_calibrator] Calibration {term_state.capitalize()}: {ex}")
+            active_t = self.run_record.get("physical_tool") or self.run_record.get("calibrating_tool")
             if active_t is not None:
                 gcmd.respond_info(f"!! [tool_calibrator] Failure occurred while T{active_t} was active. If using toolchanger, verify physical dock state before issuing further tool changes.")
-            raise gcmd.error(f"[tool_calibrator] Calibration Aborted: {ex}")
+            raise gcmd.error(f"[tool_calibrator] Calibration {term_state.capitalize()}: {ex}")
         finally:
+            self.run_record["end_time"] = _sys_time.time()
+            if self.run_record.get("start_time"):
+                self.run_record["duration_sec"] = round(self.run_record["end_time"] - self.run_record["start_time"], 2)
+
             if session_token:
                 try:
                     self._query_vision("release_lock", {"session_id": session_token, "session_token": session_token}, timeout=2.0)
@@ -1211,14 +1273,17 @@ class ToolCalibrator:
         self._check_camera_thermal_safety(tool_no=None, gcmd=gcmd)
 
         session_token = None
+        self.cancel_requested = False
 
+        self._ensure_vision_sync()
         try:
-            self._ensure_vision_sync()
-            lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": "klipper_calib", "timeout_seconds": 600}, timeout=2.0)
+            import time as _sys_time
+            unique_session = f"klipper_scale_{int(_sys_time.time()*1000)}"
+            lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "session_id": unique_session, "timeout_seconds": 600}, timeout=2.0)
             session_token = lock_resp.get("session_token") or lock_resp.get("session_id")
             self.session_token = session_token
-        except Exception:
-            pass
+        except Exception as ex:
+            raise gcmd.error(f"[tool_calibrator] Failed to acquire vision server session lock before motion: {ex}")
 
         gcmd.respond_info(f"[tool_calibrator] Starting Star-Pattern Camera Calibration (Displacement: ±{dist:.2f}mm)...")
         self._set_inspection_lighting(True, self.reference_tool)
@@ -1254,19 +1319,23 @@ class ToolCalibrator:
             ]
 
             for label, tx, ty, rdx, rdy in moves:
+                self._check_cancellation(gcmd)
+                self.navigator.validate_coordinate_safety(x=tx, y=ty)
                 toolhead.manual_move([tx, ty, None], self.navigator.approach_speed)
                 toolhead.wait_moves()
+                self.reactor.pause(self.reactor.monotonic() + 0.2)
 
-                det = self._sample_burst(toolhead, gcmd)
-                if not det or not det.get("found"):
-                    gcmd.respond_info(f"!! Failed to detect nozzle during displacement {label}.")
-                    continue
+                resp = self._sample_burst(toolhead, gcmd)
+                if not resp or not resp.get("found"):
+                    raise gcmd.error(f"[ERR_CV_201] Lost nozzle tracking during camera scale displacement {label}.")
 
-                curr_uv = det.get("center_uv")
-                pixel_dist = ((curr_uv[0] - base_uv[0])**2 + (curr_uv[1] - base_uv[1])**2)**0.5
-                physical_dist = abs(dist)
+                curr_uv = resp.get("center_uv")
+                pixel_dist = math.hypot(curr_uv[0] - base_uv[0], curr_uv[1] - base_uv[1])
+                if pixel_dist < 5.0:
+                    raise gcmd.error(f"Measured displacement too small ({pixel_dist:.2f}px) in direction {label}.")
 
-                mpp_samples.append([physical_dist, pixel_dist])
+                computed_mpp = dist / pixel_dist
+                mpp_samples.append(computed_mpp)
                 matrix_points.append([[rdx, rdy], list(curr_uv)])
                 gcmd.respond_info(f"  -> {label} displacement: Shift {pixel_dist:.2f}px (UV: {curr_uv[0]:.2f}, {curr_uv[1]:.2f})")
 
@@ -1274,27 +1343,25 @@ class ToolCalibrator:
             toolhead.manual_move([cx, cy, None], self.navigator.approach_speed)
             toolhead.wait_moves()
 
-            if len(mpp_samples) < 3:
-                self.navigator.depart_station(toolhead, gcode_move)
-                raise gcmd.error("Insufficient valid points acquired for camera scale calibration.")
-
-            # Query server to calculate average MPP and solve affine matrix
-            mpp_resp = self._query_vision("calibrate_mpp", {"samples": mpp_samples})
-            solved_mpp = float(mpp_resp.get("mpp", 0.0))
-
-            matrix_resp = self._query_vision("solve_matrix", {"calibration_points": matrix_points})
-            matrix_ok = matrix_resp.get("success", False)
-            matrix_vals = matrix_resp.get("matrix", [])
+            solved_mpp = float(statistics.median(mpp_samples))
             self.calibrated_mpp = solved_mpp
 
-            cam_dict: Dict[str, Any] = {
+            # Fit 1st-order 2D affine transformation matrix
+            matrix_resp = self._query_vision("solve_matrix", {"points": matrix_points}, timeout=5.0)
+            matrix_ok = matrix_resp.get("success", False)
+
+            # Update live scale & matrix in Vision Service
+            self._query_vision("set_mpp", {"mpp": solved_mpp})
+            if matrix_ok and "matrix" in matrix_resp:
+                self._query_vision("set_matrix", {"matrix": matrix_resp["matrix"]})
+
+            cam_dict = {
                 "mpp": solved_mpp,
-                "target_x": round(cx, 3),
-                "target_y": round(cy, 3),
-                "target_z": round(cz, 3),
-                "safe_z": self.navigator.safe_z
+                "target_z": cz,
+                "matrix_solved": matrix_ok
             }
-            if matrix_vals and len(matrix_vals) >= 2 and len(matrix_vals[0]) >= 2:
+            if matrix_ok and "matrix" in matrix_resp:
+                matrix_vals = matrix_resp["matrix"]
                 cam_dict["matrix_a"] = matrix_vals[0][0]
                 cam_dict["matrix_b"] = matrix_vals[0][1]
                 cam_dict["matrix_tx"] = matrix_vals[0][2] if len(matrix_vals[0]) >= 3 else 0.0
@@ -1307,6 +1374,7 @@ class ToolCalibrator:
 
             # 4. Optical centering using newly calibrated transformation matrix
             gcmd.respond_info("  -> Performing post-calibration optical centering with solved matrix...")
+            centering_ok = False
             try:
                 self._center_nozzle(toolhead, gcmd)
                 new_pos = toolhead.get_position()
@@ -1316,16 +1384,30 @@ class ToolCalibrator:
                 self.navigator.cam_target_x = cam_dict["target_x"]
                 self.navigator.cam_target_y = cam_dict["target_y"]
                 gcmd.respond_info(f"  -> Station target position updated to centered coordinates: X{cam_dict['target_x']:.3f} Y{cam_dict['target_y']:.3f}")
+                centering_ok = True
             except Exception as ex:
-                gcmd.respond_info(f"  -> Centering note: {ex}")
+                gcmd.respond_info(f"  ⚠ [tool_calibrator] Post-calibration optical centering failed: {ex}")
+                gcmd.respond_info("  -> Camera station target position NOT updated; retaining previous validated coordinates.")
 
-            gcmd.respond_info(
-                f"\n✔ ================= CAMERA CALIBRATION SUCCESS ================\n"
-                f"  Calculated Scale (MPP): {solved_mpp:.6f} mm/pixel\n"
-                f"  Affine Matrix Solved:   {matrix_ok}\n"
-                f"  Saved to Configuration: {self.config_manager.config_path}\n"
-                f"================================================================"
-            )
+            if centering_ok:
+                self.last_run_status = "SUCCESS"
+                gcmd.respond_info(
+                    f"\n✔ ================= CAMERA CALIBRATION SUCCESS ================\n"
+                    f"  Calculated Scale (MPP): {solved_mpp:.6f} mm/pixel\n"
+                    f"  Affine Matrix Solved:   {matrix_ok}\n"
+                    f"  Station Centered:       X{cam_dict['target_x']:.3f} Y{cam_dict['target_y']:.3f}\n"
+                    f"  Saved to Configuration: {self.config_manager.config_path}\n"
+                    f"================================================================"
+                )
+            else:
+                self.last_run_status = "WARNING: Scale fitted, but centering failed"
+                gcmd.respond_info(
+                    f"\n⚠ ================= CAMERA SCALE FIT (PARTIAL) ================\n"
+                    f"  Calculated Scale (MPP): {solved_mpp:.6f} mm/pixel\n"
+                    f"  Affine Matrix Solved:   {matrix_ok} (Persisted to config)\n"
+                    f"  Station Centering:      FAILED (Previous station coordinates retained)\n"
+                    f"================================================================"
+                )
 
         finally:
             if session_token:
@@ -1529,10 +1611,14 @@ class ToolCalibrator:
             self._set_inspection_lighting(False, self.reference_tool)
 
     def cmd_CALIBRATION_ABORT(self, gcmd) -> None:
-        """Aborts active calibration run cleanly at the next safe waypoint transition."""
+        """Aborts active calibration run cleanly at the next step."""
         if self.run_record.get("state") == "RUNNING":
             self.cancel_requested = True
-            gcmd.respond_info("[tool_calibrator] Abort requested! Calibration sequence will halt safely at the next tool transition.")
+            try:
+                self._query_vision("abort_calibration", {}, timeout=1.0)
+            except Exception:
+                pass
+            gcmd.respond_info("[tool_calibrator] Abort requested! Calibration sequence will halt safely at current step.")
         else:
             gcmd.respond_info("[tool_calibrator] No calibration cycle is currently running.")
 
@@ -1542,8 +1628,11 @@ class ToolCalibrator:
         gcmd.respond_info(f"Tool-Calibrator Status: {rec.get('state', 'IDLE')} (Last Status: {self.last_run_status})")
         if rec.get("run_id"):
             validity_str = "VALID" if rec.get("valid") else "INCOMPLETE/FAILED"
+            dur = rec.get("duration_sec", 0.0)
+            if rec.get("state") == "RUNNING" and rec.get("start_time"):
+                dur = round(time.time() - rec["start_time"], 1)
             gcmd.respond_info(
-                f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Active Tool: {rec.get('active_tool')} | Duration: {rec.get('duration_sec', 0.0):.1f}s"
+                f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
             )
             if rec.get("error"):
                 gcmd.respond_info(f"  Last Error: {rec.get('error')}")
@@ -1560,17 +1649,23 @@ class ToolCalibrator:
 
     def get_status(self, eventtime) -> Dict[str, Any]:
         """Provides state dictionaries to Mainsail and Fluidd frontend templates."""
+        rec = dict(self.run_record)
+        if rec.get("state") == "RUNNING" and rec.get("start_time"):
+            rec["elapsed_sec"] = round(time.time() - rec["start_time"], 1)
         return {
             "status": self.run_record.get("state", "IDLE"),
+            "phase": self.run_record.get("phase", "IDLE"),
             "last_run_status": self.last_run_status,
             "run_id": self.run_record.get("run_id"),
-            "active_tool": self.run_record.get("active_tool"),
+            "calibrating_tool": self.run_record.get("calibrating_tool"),
+            "physical_tool": self.run_record.get("physical_tool"),
+            "active_tool": self.run_record.get("physical_tool") if self.run_record.get("physical_tool") is not None else self.run_record.get("calibrating_tool"),
             "run_valid": self.run_record.get("valid", False),
-            "run_record": dict(self.run_record),
+            "run_record": rec,
             "reference_tool": self.reference_tool,
             "z_backend": self.z_backend_type,
             "safe_z": self.navigator.safe_z,
-            "cached_offsets": self.cached_offsets
+            "cached_offsets": dict(self.cached_offsets)
         }
 
 

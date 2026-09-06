@@ -4,6 +4,8 @@ Unit Tests for Tool-Klipper-Calibration Vision Daemon.
 
 import os
 import unittest
+import unittest.mock
+from unittest.mock import MagicMock, patch
 import numpy as np
 import cv2
 
@@ -526,6 +528,48 @@ class TestServerEndpoints(unittest.TestCase):
         # 6. Client A releases lock with token -> 200
         resp_rel_ok = client.post("/release_lock", json={"session_id": "client_A"})
         self.assertEqual(resp_rel_ok.status_code, 200)
+
+    def test_server_daemon_imports_and_typing_hints(self):
+        """Verify server module imports cleanly with all typing hints (Tuple, Optional, Dict, Any)."""
+        import server.tool_calibrator_server as srv
+        self.assertTrue(hasattr(srv, "_check_session_ownership"))
+        # Execute check to verify annotations and runtime execution
+        req = MagicMock()
+        req.headers = {}
+        allowed, err = srv._check_session_ownership(req)
+        self.assertTrue(allowed)
+        self.assertIsNone(err)
+
+    def test_out_of_band_abort_endpoint(self):
+        """Verify POST /abort_calibration flags cancellation across /health and /calculate_offset."""
+        from server.tool_calibrator_server import app, calibration_lock
+        client = app.test_client()
+
+        # Initial state
+        h1 = client.get("/health").get_json()
+        self.assertFalse(h1.get("abort_requested", False))
+
+        # Trigger out-of-band abort
+        abort_res = client.post("/abort_calibration")
+        self.assertEqual(abort_res.status_code, 200)
+        self.assertTrue(abort_res.get_json()["abort_requested"])
+
+        # Check /health reflects abort
+        h2 = client.get("/health").get_json()
+        self.assertTrue(h2["abort_requested"])
+
+        # Release lock resets abort flag
+        client.post("/acquire_lock", json={"session_id": "test_abort"})
+        client.post("/release_lock", json={"session_id": "test_abort"})
+        h3 = client.get("/health").get_json()
+        self.assertFalse(h3["abort_requested"])
+
+    def test_git_commit_telemetry(self):
+        """Verify _get_git_commit returns a valid commit hash or unknown."""
+        from server.tool_calibrator_server import _get_git_commit
+        commit = _get_git_commit()
+        self.assertIsInstance(commit, str)
+        self.assertTrue(len(commit) > 0)
 
 
 if __name__ == "__main__":

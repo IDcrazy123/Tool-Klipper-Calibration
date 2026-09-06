@@ -301,14 +301,16 @@ class TestCalibrationCycle(unittest.TestCase):
 
         def mock_query_vision(endpoint, payload=None, timeout=2.0):
             if endpoint == "detect_nozzle":
-                # Returns dummy center
-                return {"found": True, "center_uv": [320.0, 240.0], "radius": 45}
+                # Returns center shifted by toolhead position (scale ~ 0.01542 mm/px)
+                dx = self.toolhead.pos[0] - 150.0
+                dy = self.toolhead.pos[1] - 10.0
+                return {"found": True, "center_uv": [320.0 + dx / 0.01542, 240.0 + dy / 0.01542], "radius": 45}
             elif endpoint == "calculate_offset":
                 return {"offset_xy": [0.0, 0.0]}
             elif endpoint == "calibrate_mpp":
                 return {"success": True, "mpp": 0.01542}
             elif endpoint == "solve_matrix":
-                return {"success": True}
+                return {"success": True, "matrix": [[0.01542, 0.0, 0.0], [0.0, 0.01542, 0.0]]}
             return {}
 
         calibrator._query_vision = mock_query_vision
@@ -323,7 +325,7 @@ class TestCalibrationCycle(unittest.TestCase):
 
         self.assertIn("[tool_calibrator_station camera]", content)
         self.assertIn("mpp: 0.015", content)
-        self.assertEqual(calibrator.calibrated_mpp, 0.01542)
+        self.assertAlmostEqual(calibrator.calibrated_mpp, 0.01542, places=4)
 
     def test_generic_tool_discovery(self):
         """Verifies toolhead discovery across diverse Klipper toolchanger architectures."""
@@ -987,6 +989,121 @@ class TestCalibrationCycle(unittest.TestCase):
         status = calibrator.get_status(0.0)
         self.assertFalse(status["run_valid"])
         self.assertEqual(status["status"], "FAILED")
+
+    def test_xy_compensation_sign_convention_physical_station(self):
+        """Verify physical station XY compensation adds offsets (P1 sign fix: carriage = station + offset)."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.navigator.switch_target_x = 68.0
+        calibrator.navigator.switch_target_y = 10.0
+        calibrator.navigator.safe_z = 40.0
+        calibrator.navigator.switch_target_z = 15.0
+
+        # Tool 2 with positive offset: X=+0.865mm, Y=+0.270mm
+        # Carriage MUST move to 68.0 + 0.865 = 68.865mm, NOT 67.135mm!
+        moves = []
+        def mock_move(pos, spd):
+            moves.append(list(pos))
+            for i, val in enumerate(pos):
+                if val is not None:
+                    self.toolhead.pos[i] = val
+        self.toolhead.manual_move = MagicMock(side_effect=mock_move)
+
+        calibrator.navigator.approach_switch(self.toolhead, self.printer.gcode_move, offset_xy=(0.865, 0.270))
+        # Apex move is the final move onto switch pin
+        apex_move = moves[-1]
+        self.assertAlmostEqual(apex_move[0], 68.865, places=3)
+        self.assertAlmostEqual(apex_move[1], 10.270, places=3)
+
+        # Also verify Cartographer path adds offset
+        calibrator.z_backend_type = "cartographer"
+        calibrator.z_backend = MagicMock()
+        calibrator.z_backend.get_probe_xy.return_value = (150.0, 150.0)
+        calibrator.z_backend.probe_secondary_tool.return_value = {"suggested_z_offset": 0.05}
+        moves.clear()
+
+        gcmd = DummyGCodeCommand()
+        tool_offsets = {"x": 0.865, "y": 0.270}
+        calibrator._execute_z_calibration(2, self.toolhead, self.printer.gcode_move, gcmd, {}, tool_offsets)
+        self.assertAlmostEqual(self.toolhead.pos[0], 150.865, places=3)
+        self.assertAlmostEqual(self.toolhead.pos[1], 150.270, places=3)
+
+    def test_out_of_band_webhook_abort_during_centering(self):
+        """Verify out-of-band webhook abort immediately halts centering loop at the next check."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator._query_vision = MagicMock(return_value={"found": True, "center_uv": [640.0, 360.0], "offset_xy": [0.1, 0.1]})
+
+        # Invoke webhook handler to trigger cancellation
+        req = MagicMock()
+        calibrator._handle_webhook_abort(req)
+        self.assertTrue(calibrator.cancel_requested)
+        req.send.assert_called_once_with({"status": "ok", "message": "Calibration abort requested."})
+
+        # Calling _center_nozzle must immediately raise SafeNavigatorException
+        gcmd = DummyGCodeCommand()
+        with self.assertRaises(SafeNavigatorException) as ctx:
+            calibrator._center_nozzle(self.toolhead, gcmd)
+        self.assertIn("CALIBRATION_ABORT", str(ctx.exception))
+
+    def test_camera_scale_lock_failure_aborts_before_motion(self):
+        """If acquiring lock fails in CALIBRATE_CAMERA_SCALE, abort immediately before motion."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator._query_vision = MagicMock(side_effect=Exception("Connection refused to vision daemon"))
+        calibrator.navigator.approach_camera = MagicMock()
+
+        gcmd = DummyGCodeCommand({"DISTANCE": 0.5})
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATE_CAMERA_SCALE(gcmd)
+        self.assertIn("Failed to acquire vision server session lock", str(ctx.exception))
+        calibrator.navigator.approach_camera.assert_not_called()
+
+    def test_camera_scale_centering_failure_warning(self):
+        """If post-fit centering fails, report WARNING and preserve original station target coordinates."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.navigator.cam_target_x = 170.910
+        calibrator.navigator.cam_target_y = 18.917
+
+        # Mock scale moves succeeding, but _center_nozzle failing
+        def mock_query(endpoint, payload=None, timeout=None):
+            if endpoint == "detect_nozzle":
+                dx = self.toolhead.pos[0] - 150.0
+                dy = self.toolhead.pos[1] - 10.0
+                return {"found": True, "center_uv": [320.0 + dx / 0.023, 240.0 + dy / 0.023], "radius": 22.0}
+            if endpoint == "acquire_lock":
+                return {"success": True, "session_token": "tok_scale"}
+            if endpoint == "solve_matrix":
+                return {"success": True, "matrix": [[0.023, 0.0, 0.0], [0.0, 0.023, 0.0]]}
+            return {"success": True}
+
+        calibrator._query_vision = MagicMock(side_effect=mock_query)
+        calibrator._center_nozzle = MagicMock(side_effect=SafeNavigatorException("ERR_CV_202 Centering failed"))
+
+        gcmd = DummyGCodeCommand({"DISTANCE": 0.5})
+        calibrator.cmd_CALIBRATE_CAMERA_SCALE(gcmd)
+
+        self.assertIn("WARNING: Scale fitted, but centering failed", calibrator.last_run_status)
+        self.assertEqual(calibrator.navigator.cam_target_x, 170.910)
+        self.assertEqual(calibrator.navigator.cam_target_y, 18.917)
+
+    def test_physical_burst_spread_rejects_5px_spread_at_0023_mpp(self):
+        """At MPP=0.023, a 5.0px spread (0.115mm > 0.08mm) must be rejected without consensus."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.calibrated_mpp = 0.023
+        calibrator.physical_spread_limit_mm = 0.08
+
+        # 4 frames with a 5.0px spread (e.g. 640.0 vs 645.0) in 2-2 tie
+        frames = [
+            {"found": True, "center_uv": [640.0, 360.0], "radius": 22.0, "confidence": 0.99},
+            {"found": True, "center_uv": [640.0, 360.0], "radius": 22.0, "confidence": 0.99},
+            {"found": True, "center_uv": [645.0, 360.0], "radius": 22.0, "confidence": 0.99},
+            {"found": True, "center_uv": [645.0, 360.0], "radius": 22.0, "confidence": 0.99},
+        ]
+        calibrator._query_vision = MagicMock(side_effect=frames)
+
+        result = calibrator._sample_burst(self.toolhead, samples=4)
+        self.assertFalse(result["found"])
+        self.assertIn("without strict majority consensus", result["reason"])
 
 
 if __name__ == "__main__":

@@ -61,7 +61,8 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 5.3:** Dynamic vision confidence based on contrast and gradient continuity; negative noise/blank rejection.
 - [x] **Task 5.4:** Physical machine hardware trial on Voron 2.4 StealthChanger (T0–T4, KTC-Easy, 2026-09-06).
 - [x] **Task 5.5:** Address 2026-09-06 hardware trial findings (optical center targeting, dynamic centering budget, physical spread threshold, run record state machine, commit telemetry).
-- [ ] **Task 5.6:** Unattended multi-tool offset application with physical multi-material print verification.
+- [x] **Task 5.6:** Address 2026-09-06 Trial 2 hardware trial findings (out-of-band Moonraker abort, physical station XY compensation sign fix, daemon typing imports, scale lock guard, burst mm spread limit, telemetry refinement).
+- [ ] **Task 5.7:** Unattended multi-tool offset application with physical multi-material print verification.
 
 ### Phase 6: Packaging & Automated Deployment
 - [x] **Task 6.1:** Write automated Linux installer script `scripts/install.sh` (virtualenv, dependencies, systemd unit).

@@ -8,6 +8,35 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.19] - 2026-09-06
+### Fixed
+- **[P1] Daemon Typing Imports & Dirty Status Telemetry**:
+  - Added `Tuple, Optional, List` to typing imports in `server/tool_calibrator_server.py`, resolving `NameError: name 'Tuple' is not defined` when starting the daemon on Python 3.9 host platforms.
+  - Enhanced `_get_git_commit()` to detect dirty working trees via `git status --porcelain` and append `-dirty`.
+- **[P1] Out-of-Band Abort Control (Moonraker Mutex Bypass)**:
+  - Registered Klipper webhook endpoints `tool_calibrator/abort` and `tool_calibrator/status` via `webhooks.register_endpoint`.
+  - Added POST `/abort_calibration` endpoint on the vision server (port 8090).
+  - Enables instant cancellation without waiting for Moonraker/Klipper's synchronous G-code mutex.
+  - Integrated `_check_cancellation()` directly inside the `_center_nozzle` servoing loop and multi-frame burst sampling.
+- **[P1] Physical Station Carriage XY Compensation Sign Correction**:
+  - Fixed coordinate sign inversion in `safe_navigator.py::approach_switch` and `tool_calibrator.py::_execute_z_calibration` (Cartographer probe path).
+  - Secondary tool nozzles now properly displace the machine carriage by $\vec{P}_{\text{carriage}} = \vec{P}_{\text{station}} + \vec{\Delta}_{\text{tool}}$, eliminating the 1.730 mm positioning discrepancy.
+- **[P2] Deterministic Session Lock Lifecycle & Motion Preflight Guard**:
+  - In `cmd_CALIBRATE_CAMERA_SCALE`, lock acquisition failures immediately abort before any physical motion is commanded.
+  - In `cmd_CALIBRATE_TOOL_OFFSETS`, unified session acquisition, health verification, and tool changes under a single `try...finally` block with unique run tokens (`klipper_<timestamp>_<pid>`).
+  - Added client-requested `timeout_seconds` lease support in the daemon.
+- **[P2] Separation of Camera Scale Fit and Station Validation Outcomes**:
+  - If post-fit optical centering fails in `cmd_CALIBRATE_CAMERA_SCALE`, the system reports partial completion (`WARNING: Scale fitted, but centering failed`), does not overwrite camera station target coordinates, and preserves previously validated waypoints.
+- **[P2] Calibrated Physical Burst Spread Limit**:
+  - Removed arbitrary `max(6.0, ...)` pixel floor that permitted 5.0px (0.115mm) noise to pass undetected at 0.023 mm/px.
+  - Configured `self.physical_spread_limit_mm = 0.08` with minimal quantization floor (2.5px), rejecting 5.0px dispersion bursts lacking majority consensus.
+- **[P2] Telemetry Disambiguation & Live Elapsed Duration**:
+  - Expanded `run_record` with `phase` (`IDLE`, `INITIALIZING`, `CHANGING_TOOL`, `CALIBRATING_TOOL`, `CENTERING_NOZZLE`, `PROBING_Z`, `RESTORING_REFERENCE`, `COMPLETED`, `CANCELLED`, `FAILED`).
+  - Separated `calibrating_tool` from `physical_tool`, properly reflecting physical tool restoration to T0 upon cycle completion.
+  - Added real-time `elapsed_sec` calculation in `get_status()`.
+- **G-Code Output Backpressure Mitigation**:
+  - Streamlined routine centering step console responses to single-line format (`Err X... Y... | Move X... Y...`), preventing G-code file descriptor buffer overflow (`BlockingIOError: [Errno 11] Resource temporarily unavailable`).
+
 ## [0.8.18] - 2026-09-06
 ### Fixed
 - **[Critical Safety] Elimination of Uncalibrated Fallback Blind Motion**:

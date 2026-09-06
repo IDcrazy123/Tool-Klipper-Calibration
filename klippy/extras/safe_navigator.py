@@ -259,9 +259,12 @@ class SafeNavigator:
         """
         Executes 3-tier safe transition into the Physical Z Switch Station.
         If offset_xy=(dx, dy) is provided, compensates target carriage coordinates so the
-        tool nozzle touches the exact physical switch pin:
-            target_x = switch_target_x - dx
-            target_y = switch_target_y - dy
+        secondary tool nozzle touches the exact physical switch pin center:
+            target_x = switch_target_x + dx
+            target_y = switch_target_y + dy
+        Coordinate convention:
+            offset_xy is (raw_tool_carriage - raw_ref_carriage). To bring the tool nozzle
+            to the reference switch pin, the machine carriage must displace by (+dx, +dy).
         """
         if not self.is_homed():
             raise SafeNavigatorException("Printer axes must be homed before entering switch station.")
@@ -270,12 +273,12 @@ class SafeNavigator:
             raise SafeNavigatorException("Z Switch coordinates (zswitch_x_pos, zswitch_y_pos) not configured.")
 
         dx, dy = (0.0, 0.0) if offset_xy is None else offset_xy
-        eff_target_x = round(self.switch_target_x - dx, 4)
-        eff_target_y = round(self.switch_target_y - dy, 4)
+        eff_target_x = round(self.switch_target_x + dx, 4)
+        eff_target_y = round(self.switch_target_y + dy, 4)
 
         # Automatic approach vector towards bed center if not explicitly taught
         if self.switch_approach_x is not None and self.switch_approach_y is not None:
-            app_x, app_y = round(self.switch_approach_x - dx, 4), round(self.switch_approach_y - dy, 4)
+            app_x, app_y = round(self.switch_approach_x + dx, 4), round(self.switch_approach_y + dy, 4)
         else:
             app_x, app_y = self.calculate_auto_approach(eff_target_x, eff_target_y, 20.0)
 
