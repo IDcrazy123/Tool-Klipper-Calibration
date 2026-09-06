@@ -143,7 +143,7 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.8.18",
+        "version": "0.8.19",
         "commit": _get_git_commit(),
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,

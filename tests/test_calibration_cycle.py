@@ -1106,6 +1106,43 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("without strict majority consensus", result["reason"])
 
 
+    def test_auto_teach_camera_gracefully_handles_uncalibrated_matrix(self):
+        """When AUTO_TEACH_CAMERA is called on an uncalibrated machine (no matrix), skip centering and save waypoint."""
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [170.910, 18.917, 22.0, 0.0]
+
+        # Health endpoint reports no matrix
+        def mock_query(endpoint, payload=None, timeout=None):
+            if endpoint == "health":
+                return {
+                    "status": "ok",
+                    "matrix_solved": False,
+                    "has_matrix": False,
+                    "calibrated_mpp": None
+                }
+            return {"success": True}
+
+        calibrator._query_vision = MagicMock(side_effect=mock_query)
+        calibrator._center_nozzle = MagicMock()
+
+        gcmd = DummyGCodeCommand({})
+        calibrator.cmd_AUTO_TEACH_CAMERA(gcmd)
+
+        # _center_nozzle should NOT be called
+        calibrator._center_nozzle.assert_not_called()
+
+        # Waypoints should be saved directly based on current toolhead position
+        self.assertEqual(calibrator.navigator.cam_target_x, 170.910)
+        self.assertEqual(calibrator.navigator.cam_target_y, 18.917)
+        self.assertEqual(calibrator.navigator.cam_target_z, 22.0)
+
+        # Check that tool_offsets.cfg was written with the target coordinates
+        with open(self.config_path, "r") as f:
+            cfg_content = f.read()
+        self.assertIn("target_x: 170.91", cfg_content)
+        self.assertIn("target_y: 18.917", cfg_content)
+
+
 if __name__ == "__main__":
     unittest.main()
 

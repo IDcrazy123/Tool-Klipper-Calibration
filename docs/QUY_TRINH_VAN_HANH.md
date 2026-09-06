@@ -66,24 +66,36 @@ wiggle_on_failure: True      # Bật tự động lắc khi mất dấu đầu p
 
 ---
 
-### Bước 3: Dạy Vị trí Trạm 1-Click (Auto-Teaching)
+### Bước 3: Dạy Vị trí Trạm Ban Đầu (Auto-Teaching)
 
-Bạn **không cần** phải đo đạc tọa độ thủ công bằng thước hay bấm máy tính:
+Trên máy in mới cài đặt (chưa có ma trận camera), quy trình thiết lập ban đầu diễn ra tuần tự và an toàn:
 
-1. **Dạy Trạm Camera**:
+1. **Kiểm tra Nhận diện Vòi phun tại chỗ**:
    - Chọn đầu phun tham chiếu **T0** (`T0`).
-   - Dùng giao diện điều khiển (Mainsail/Fluidd) jog đầu phun T0 đến vị trí đại khái phía trên camera (cách ống kính khoảng $15 - 25\text{mm}$ theo trục Z sao cho ảnh rõ nét).
+   - Dùng giao diện điều khiển (Mainsail/Fluidd) jog đầu phun T0 đến vị trí phía trên camera (cách ống kính khoảng $15 - 25\text{mm}$ theo trục Z sao cho ảnh rõ nét, vòi phun nằm trong tầm nhìn camera).
+   - Kiểm tra nhận diện hình ảnh (không di chuyển máy):
+     ```gcode
+     TEST_NOZZLE_VISION
+     ```
+   - Bảng thông số sẽ hiện ra trên Console xác nhận lỗ phun được tìm thấy:
+     ```text
+     ✔ [Vision Inspection Report]
+       Found:       YES (3/3 frames)
+       Center UV:   U640.25 px, V359.65 px
+       Radius:      22.60 px
+       Confidence:  99.0%
+       Dispersion:  0.30 px
+     ```
+
+2. **Lưu Tọa độ Trạm Camera Ban Đầu**:
    - Bấm lệnh:
      ```gcode
-     AUTO_TEACH_CAMERA
+     AUTO_TEACH_CAMERA AUTO_CENTER=0
      ```
-   - **Hệ thống tự động thực hiện**:
-     - Bật đèn camera, tắt đèn đầu phun;
-     - Dùng thuật toán thị giác căn chính xác tâm lỗ phun vào giữa camera;
-     - Tự tính toán vector tiếp cận an toàn từ tâm bàn in hướng vào camera (`approach_x`, `approach_y`);
-     - Tự động ghi và lưu vĩnh viễn vào file `tool_offsets.cfg`.
+     *(Nếu gõ `AUTO_TEACH_CAMERA`, hệ thống sẽ tự động kiểm tra: nếu chưa có ma trận affine, hệ thống sẽ thông báo ghi nhận tọa độ jog hiện tại làm waypoint trạm ban đầu mà không thực hiện căn tâm mù).*
+   - Hệ thống tự động tính toán vector tiếp cận an toàn từ tâm bàn in hướng vào camera (`approach_x`, `approach_y`) và lưu vào cấu hình `tool_offsets.cfg`.
 
-2. **Dạy Trạm Công tắc Z (Nếu dùng `z_backend: switch`)**:
+3. **Dạy Trạm Công tắc Z (Nếu dùng `z_backend: switch`)**:
    - Jog đầu phun đến ngay phía trên ty công tắc Z.
    - Bấm lệnh:
      ```gcode
@@ -93,57 +105,44 @@ Bạn **không cần** phải đo đạc tọa độ thủ công bằng thước
 
 ---
 
-### Bước 4: Kiểm tra Nhanh & Thử nghiệm Tương tác (Quick Inspection)
+### Bước 4: Đo Tỷ lệ mm/pixel và Ma trận Xoay Camera (`CALIBRATE_CAMERA_SCALE`)
 
-Trước khi chạy đo tự động toàn diện, bạn có thể tương tác nhanh với các macro hỗ trợ:
-
-- **Đưa đầu phun vào vị trí kiểm tra**:
-  ```gcode
-  GOTO_CAMERA_TARGET
-  ```
-  *(Đầu phun nâng lên Safe_Z, di chuyển ngang ngoài trạm, hạ Z rồi lướt nhẹ vào vị trí camera).*
-
-- **Kiểm tra độ nét và nhận diện lỗ phun tại chỗ (Không di chuyển)**:
-  ```gcode
-  TEST_NOZZLE_VISION
-  ```
-  *Bảng thông số sẽ hiện ra trên Console:*
-  ```text
-  ✔ [Vision Inspection Report]
-    Found:       YES (3/3 frames)
-    Center UV:   U320.15 px, V240.08 px
-    Radius:      21.80 px
-    Confidence:  98.5%
-    Dispersion:  0.08 px
-    Algorithm:   Tier 0 Curvature (Symmetric)
-  ```
-
-- **Thử nghiệm Căn tâm Servoing đơn lẻ**:
-  ```gcode
-  CENTER_NOZZLE
-  ```
-
-- **Đưa đầu phun rời trạm an toàn**:
-  ```gcode
-  LEAVE_CALIBRATION_STATION
-  ```
+Sau khi đã có tọa độ trạm ban đầu, giải ma trận chuyển đổi affine thực tế giữa camera và trục chuyển động máy:
+1. Đảm bảo máy đã Home (`G28`) và T0 đang được gá.
+2. Chạy lệnh:
+   ```gcode
+   CALIBRATE_CAMERA_SCALE DISTANCE=0.5
+   ```
+   *(Hoặc macro tiện ích: `CALIBRATE_CAMERA DISTANCE=0.5`)*
+3. **Quá trình diễn ra**:
+   - Đầu phun tiếp cận vị trí trạm camera theo hành lang an toàn 3 tầng;
+   - Lấy mẫu đa khung hình (burst) tại tâm;
+   - Lần lượt dịch chuyển hình sao $\pm 0.5\text{mm}$ theo 4 hướng $+X, -X, +Y, -Y$;
+   - Giải phương trình hồi quy xác định chính xác hệ số $\text{mpp}$ (ví dụ $0.023000\text{ mm/px}$) cùng ma trận affine 2D;
+   - Sau khi khớp ma trận thành công, hệ thống tự động căn tâm quang học vòi phun;
+   - Tự động lưu giá trị ma trận vào `tool_offsets.cfg`.
 
 ---
 
-### Bước 5: Đo Tỷ lệ mm/pixel và Ma trận Xoay Camera (`CALIBRATE_CAMERA`)
+### Bước 5: Căn tâm Tinh chỉnh & Điều hướng Thử nghiệm (Interactive Verification)
 
-Để hệ thống chuyển đổi chính xác độ lệch điểm ảnh (pixel) sang dịch chuyển thực của máy in (mm):
-1. Đảm bảo máy đã Home (`G28`) và T0 đang được chọn.
-2. Chạy lệnh:
-   ```gcode
-   CALIBRATE_CAMERA DISTANCE=1.0
-   ```
-3. **Quá trình diễn ra**:
-   - Đầu phun vào vị trí camera và tự căn tâm;
-   - Lấy mẫu chùm (Burst) tại tâm;
-   - Lần lượt dịch chuyển hình sao $\pm 1.0\text{mm}$ theo 4 hướng $+X, -X, +Y, -Y$;
-   - Giải phương trình hồi quy tìm hệ số $\text{mpp}$ (ví dụ $0.01250\text{mm/px}$) và góc xoay của camera;
-   - Tự động lưu giá trị vào `tool_offsets.cfg`.
+Sau khi camera đã được hiệu chuẩn đầy đủ thang đo và ma trận:
+- **Căn tâm chính xác vòi phun vào tâm quang học ống kính**:
+  ```gcode
+  CENTER_NOZZLE
+  ```
+  *(Hoặc chạy lại `AUTO_TEACH_CAMERA` để cập nhật tọa độ tâm hoàn hảo vào `tool_offsets.cfg`).*
+
+- **Di chuyển an toàn vào trạm camera**:
+  ```gcode
+  GOTO_CAMERA_TARGET
+  ```
+  *(Lệnh thuộc bộ macro `safe_staging_macros.cfg`).*
+
+- **Rời khỏi trạm an toàn về độ cao Safe_Z**:
+  ```gcode
+  LEAVE_CALIBRATION_STATION
+  ```
 
 ---
 

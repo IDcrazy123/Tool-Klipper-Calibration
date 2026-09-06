@@ -1169,14 +1169,30 @@ class ToolCalibrator:
 
             active_t = self._get_active_tool_no()
             if auto_center:
-                gcmd.respond_info("[tool_calibrator] Auto-centering nozzle over camera via visual servoing...")
-                self._set_inspection_lighting(True, active_t)
+                # Synchronize and check if camera matrix is solved
+                self._ensure_vision_sync()
+                has_matrix = False
                 try:
-                    self._center_nozzle(toolhead, gcmd)
-                except Exception as ex:
-                    raise gcmd.error(f"[ERR_TEACH_CAM] Auto-centering failed during teach station: {ex}. Station not saved.")
-                finally:
-                    self._set_inspection_lighting(False, active_t)
+                    health = self._query_vision("health", timeout=2.0)
+                    has_matrix = bool(health.get("has_matrix") or health.get("matrix_solved"))
+                except Exception:
+                    pass
+
+                if not has_matrix:
+                    gcmd.respond_info(
+                        "[tool_calibrator] Note: No camera matrix calibrated yet (ERR_CV_203). "
+                        "Recording current jog position as initial camera waypoint without auto-centering. "
+                        "Please run CALIBRATE_CAMERA_SCALE to solve matrix, then re-run AUTO_TEACH_CAMERA."
+                    )
+                else:
+                    gcmd.respond_info("[tool_calibrator] Auto-centering nozzle over camera via visual servoing...")
+                    self._set_inspection_lighting(True, active_t)
+                    try:
+                        self._center_nozzle(toolhead, gcmd)
+                    except Exception as ex:
+                        raise gcmd.error(f"[ERR_TEACH_CAM] Auto-centering failed during teach station: {ex}. Station not saved.")
+                    finally:
+                        self._set_inspection_lighting(False, active_t)
 
 
             pos = toolhead.get_position()

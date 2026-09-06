@@ -36,6 +36,13 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
   - Added real-time `elapsed_sec` calculation in `get_status()`.
 - **G-Code Output Backpressure Mitigation**:
   - Streamlined routine centering step console responses to single-line format (`Err X... Y... | Move X... Y...`), preventing G-code file descriptor buffer overflow (`BlockingIOError: [Errno 11] Resource temporarily unavailable`).
+- **Installation Guide & Installer Hardening (Audit Remediation)**:
+  - **Klipper Config Include Compatibility**: Fixed Klipper parser error where tilde `~` failed in `[include ...]`. `install.sh` now creates symlinks in `${CONFIG_DIR}/tool_calibrator/`, allowing clean relative includes `[include tool_calibrator/tool_calibrator_macros.cfg]`.
+  - **Bootstrap Empty Machine Auto-Teach**: `AUTO_TEACH_CAMERA` automatically checks `/health` for solved matrix; if `has_matrix` is False, gracefully logs instructions and saves the jogged nozzle position as initial waypoint without error `ERR_CV_203`.
+  - **Robust Health Check**: Enhanced `install.sh` to validate `/health` response using Python JSON verification (`status == 'ok'`, `service == 'tool_calibrator_server'`), displaying journalctl logs on failure.
+  - **Timestamped Non-Overwriting Backups**: Backups of `moonraker.conf` in `install.sh` and `uninstall.sh` now use non-overwriting timestamps (`.bak_YYYYMMDD_HHMMSS`).
+  - **Config Schema Modernization**: Replaced obsolete options (`default_station`, `lift_z_safe`, `[tool_calibrator_station]`) across `HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md` and `sample_tool_calibrator.cfg` with canonical `[tool_calibrator]` schema.
+  - **Daemon Concurrency & Service Binding**: Updated `tool_calibrator.service` to specify `--host 127.0.0.1 --port 8090 --threads 2` matching real hardware deployments.
 
 ## [0.8.18] - 2026-09-06
 ### Fixed

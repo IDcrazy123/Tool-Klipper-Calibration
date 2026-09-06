@@ -100,6 +100,18 @@ for zb_file in "__init__.py" "base_z.py" "switch_backend.py" "cartographer_backe
     echo -e "${GREEN}    Linked z_backends/${zb_file} -> ${KLIPPY_EXTRAS}/z_backends/${NC}"
 done
 
+# 4b. Setup Macro Bundle under printer config directory
+echo -e "\n${BLUE}[+] Tạo thư mục Macro trong Klipper config (${CONFIG_DIR}/tool_calibrator)...${NC}"
+MACRO_DIR="${CONFIG_DIR}/tool_calibrator"
+mkdir -p "${MACRO_DIR}"
+
+for macro_file in "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+    TARGET="${MACRO_DIR}/${macro_file}"
+    SOURCE="${REPO_DIR}/macros/${macro_file}"
+    ln -sf "${SOURCE}" "${TARGET}"
+    echo -e "${GREEN}    Linked ${macro_file} -> ${MACRO_DIR}/${NC}"
+done
+
 # 5. Moonraker Allowed Services (ASVC)
 echo -e "\n${BLUE}[4/6] Cấu hình quyền dịch vụ cho Moonraker (moonraker.asvc)...${NC}"
 ASVC_FILE="${HOME}/printer_data/moonraker.asvc"
@@ -121,7 +133,9 @@ MOONRAKER_CONF="${CONFIG_DIR}/moonraker.conf"
 if [ -f "${MOONRAKER_CONF}" ]; then
     if ! grep -q "\[update_manager tool_calibrator\]" "${MOONRAKER_CONF}"; then
         echo -e "${CYAN}[+] Tự động thêm [update_manager tool_calibrator] vào ${MOONRAKER_CONF}...${NC}"
-        cp "${MOONRAKER_CONF}" "${MOONRAKER_CONF}.bak"
+        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+        BACKUP_CONF="${MOONRAKER_CONF}.bak_${TIMESTAMP}"
+        cp "${MOONRAKER_CONF}" "${BACKUP_CONF}"
         cat >> "${MOONRAKER_CONF}" << EOF
 
 [update_manager tool_calibrator]
@@ -139,7 +153,7 @@ info_tags:
     desc=Tool-Klipper-Calibration Automated Vision & Z Alignment
 EOF
 
-        echo -e "${GREEN}[✔] Đã cấu hình Update Manager trong moonraker.conf! (Đã sao lưu file .bak)${NC}"
+        echo -e "${GREEN}[✔] Đã cấu hình Update Manager trong moonraker.conf! (Đã sao lưu: ${BACKUP_CONF})${NC}"
     else
         echo -e "${GREEN}[✔] Khối [update_manager tool_calibrator] đã tồn tại trong moonraker.conf.${NC}"
     fi
@@ -169,23 +183,56 @@ if systemctl is-active --quiet moonraker.service 2>/dev/null; then
     echo -e "${GREEN}[+] Khởi động lại Moonraker...${NC}"
     sudo systemctl restart moonraker.service || true
 fi
+if systemctl is-active --quiet klipper.service 2>/dev/null; then
+    echo -e "${GREEN}[+] Khởi động lại Klipper để nạp các module extras...${NC}"
+    sudo systemctl restart klipper.service || true
+fi
 
 # 7. Verify Service Health
 echo -e "\n${BLUE}[6/6] Kiểm tra trạng thái Vision Server daemon...${NC}"
-sleep 2
-if curl -s http://127.0.0.1:8090/health >/dev/null; then
-    echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090${NC}"
+HEALTH_SUCCESS=false
+VERSION_INFO=""
+for i in {1..10}; do
+    HEALTH_RESP=$(curl -sS --fail --max-time 3 http://127.0.0.1:8090/health 2>/dev/null || true)
+    if [ -n "${HEALTH_RESP}" ]; then
+        HEALTH_CHECK=$(python3 -c "
+import sys, json
+try:
+    data = json.loads('''${HEALTH_RESP}''')
+    if data.get('status') == 'ok' and data.get('service') == 'tool_calibrator_server':
+        v = data.get('version', '')
+        c = data.get('commit', '')
+        print(f'OK {v} {c}'.strip())
+        sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+" 2>/dev/null || true)
+        if [[ "${HEALTH_CHECK}" =~ ^OK ]]; then
+            HEALTH_SUCCESS=true
+            VERSION_INFO=$(echo "${HEALTH_CHECK}" | cut -d' ' -f2-)
+            break
+        fi
+    fi
+    sleep 1
+done
+
+if [ "${HEALTH_SUCCESS}" = true ]; then
+    echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090 (${VERSION_INFO})${NC}"
 else
-    echo -e "${YELLOW}[!] Cảnh báo: Service đã kích hoạt nhưng endpoint /health chưa phản hồi kịp.${NC}"
-    echo -e "    Kiểm tra log bằng lệnh: journalctl -u tool_calibrator.service -n 50"
+    echo -e "${RED}[ERR] Service không khởi động được hoặc phản hồi /health không hợp lệ!${NC}"
+    echo -e "${YELLOW}Log chi tiết từ journalctl:${NC}"
+    sudo journalctl -u tool_calibrator.service -n 30 --no-pager || true
+    echo -e "${RED}[!] Quá trình cài đặt bị gián đoạn. Vui lòng kiểm tra lỗi trước khi tiếp tục.${NC}"
+    exit 1
 fi
 
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}    CÀI ĐẶT HOÀN TẤT THÀNH CÔNG!                     ${NC}"
 echo -e "${GREEN}====================================================${NC}"
 echo -e "${CYAN}Các bước tiếp theo:${NC}"
-echo -e "1. Khởi động lại Klipper nếu cần: sudo systemctl restart klipper"
-echo -e "2. Thêm file macros vào cấu hình printer.cfg của bạn:"
-echo -e "   ${YELLOW}[include macros/tool_calibrator_macros.cfg]${NC}"
+echo -e "1. Thêm include macro vào file printer.cfg của bạn:"
+echo -e "   ${YELLOW}[include tool_calibrator/tool_calibrator_macros.cfg]${NC}"
+echo -e "2. Cấu hình khối [tool_calibrator] trong printer.cfg (tham khảo macros/sample_tool_calibrator.cfg)."
 echo -e "3. Vào Mainsail/Fluidd -> Settings -> Update Manager để kiểm tra trạng thái cập nhật!"
 echo ""

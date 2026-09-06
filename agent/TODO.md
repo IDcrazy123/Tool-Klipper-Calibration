@@ -68,4 +68,5 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 6.1:** Write automated Linux installer script `scripts/install.sh` (virtualenv, dependencies, systemd unit).
 - [x] **Task 6.2:** Create uninstaller script `scripts/uninstall.sh` with custom $KLIPPER_DIR support.
 - [x] **Task 6.3:** Verify Moonraker Update Manager integration snippet with accurate repo/venv paths.
+- [x] **Task 6.4:** Address 2026-09-06 Installation & Report Audit findings (Klipper macro include compatibility, bootstrap auto-teach handling, timestamped backups, robust /health validation, and schema modernization).
 

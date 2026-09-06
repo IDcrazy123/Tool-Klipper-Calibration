@@ -62,17 +62,28 @@ chmod +x scripts/install.sh scripts/uninstall.sh
 2. Tự động cài đặt các gói hệ thống cần thiết (`libgl1`, `python3-venv`,...).
 3. Khởi tạo Python virtual environment độc lập tại `~/Tool-Klipper-Calibration/env`.
 4. Cài đặt các thư viện xử lý ảnh: `opencv-python-headless`, `numpy`, `flask`, `waitress`.
-5. Tạo symlink các module Klipper extras vào `~/klipper/klippy/extras/`.
+5. Tạo symlink các module Klipper extras vào `~/klipper/klippy/extras/` và symlink bộ macro vào `~/printer_data/config/tool_calibrator/`.
 6. Tự động thêm quyền dịch vụ vào `~/printer_data/moonraker.asvc`.
-7. Tự động chèn khối cấu hình `[update_manager tool_calibrator]` vào `moonraker.conf` (có sao lưu file `.bak`).
-8. Đăng ký và kích hoạt dịch vụ `tool_calibrator.service` tự khởi động cùng hệ thống.
-9. Kiểm tra endpoint `/health` trên cổng `8090`.
+7. Tự động chèn khối cấu hình `[update_manager tool_calibrator]` vào `moonraker.conf` (có sao lưu file timestamp `.bak_YYYYMMDD_HHMMSS`).
+8. Đăng ký và kích hoạt dịch vụ `tool_calibrator.service` (2 workers, host 127.0.0.1) tự khởi động cùng hệ thống.
+9. Khởi động lại Klipper và Moonraker để nạp ngay các module mới.
+10. Kiểm tra nghiêm ngặt phản hồi JSON từ endpoint `/health` trên cổng `8090`.
 
 ### Bước 2.4: Kiểm tra trạng thái dịch vụ sau khi cài
 Kiểm tra xem Vision Server đã sẵn sàng nhận lệnh hay chưa:
 ```bash
 curl -s http://127.0.0.1:8090/health
-# Kết quả mong đợi: {"status":"healthy"}
+```
+Kết quả mong đợi:
+```json
+{
+  "status": "ok",
+  "service": "tool_calibrator_server",
+  "version": "0.8.19",
+  "commit": "...",
+  "matrix_solved": false,
+  "session_locked": false
+}
 ```
 
 Kiểm tra trạng thái systemd:
@@ -85,35 +96,44 @@ systemctl status tool_calibrator.service
 ## 3. Cấu Hình Klipper (`printer.cfg`)
 
 ### Bước 3.1: Nạp bộ Macros
-Mở file `printer.cfg` (thông qua Mainsail/Fluidd hoặc editor) và thêm dòng:
+> **Lưu ý quan trọng về đường dẫn Include trong Klipper:**
+> Klipper phân giải đường dẫn `[include ...]` tương đối so với thư mục chứa file cấu hình (`~/printer_data/config/`) và **không hỗ trợ dấu ngã `~`**.
+> Vì script cài đặt đã tự động tạo symlink vào `printer_data/config/tool_calibrator/`, bạn chỉ cần khai báo đường dẫn tương đối sau trong `printer.cfg`:
+
 ```ini
-[include ~/Tool-Klipper-Calibration/macros/tool_calibrator_macros.cfg]
+[include tool_calibrator/tool_calibrator_macros.cfg]
+[include tool_calibrator/safe_staging_macros.cfg]
+[include tool_offsets.cfg]
 ```
+*(Hoặc dùng đường dẫn tuyệt đối đầy đủ: `[include /home/pi/Tool-Klipper-Calibration/macros/tool_calibrator_macros.cfg]`)*
 
 ### Bước 3.2: Khai báo cấu hình Trạm Căn Chỉnh
-Thêm khối cấu hình mẫu cho trạm camera và trạm Z vào `printer.cfg`:
+Thêm khối cấu hình `[tool_calibrator]` chuẩn vào `printer.cfg`:
 
 ```ini
 [tool_calibrator]
-server_url: http://127.0.0.1:8090
-default_station: station_1
-lift_z_safe: 15.0
+service_url: http://127.0.0.1:8090
+camera_stream_url: http://127.0.0.1:8080/?action=snapshot
+offsets_config_path: ~/printer_data/config/tool_offsets.cfg
+safe_z: 35.0
+travel_speed: 12000
+approach_speed: 3000
+z_backend: switch    # Chọn 'switch' (công tắc cơ) hoặc 'cartographer' (chạm dò điện từ/quang)
 
-[tool_calibrator_station station_1]
-camera_url: http://127.0.0.1/webcam/?action=snapshot
-center_x: 150.0
-center_y: 150.0
-safe_z: 25.0
-matrix_xx: 0.0125
-matrix_yy: 0.0125
-matrix_xy: 0.0
-matrix_yx: 0.0
-z_backend: switch
-z_switch_pin: ^PA0
+# ----------------------------------------------------------------------------
+# Tùy chọn nâng cao khi z_backend là switch (tự động kế thừa nếu dùng tools_calibrate):
+# ----------------------------------------------------------------------------
+# probing_speed: 3.0
+# lift_speed: 5.0
+# samples: 3
+# samples_tolerance: 0.010
+# samples_retract_dist: 2.0
+# switch_pin: ^PG12  # Để trống nếu tools_calibrate đã khai báo pin này
 ```
 
-> **Ghi chú về camera_url:**
-> Hệ thống hỗ trợ cả dạng Snapshot (`?action=snapshot`, `/snapshot`) và Stream (`?action=stream`, `/stream`). Bộ giải mã sẽ tự động chuẩn hóa URL để lấy ảnh tức thời mà không gây trễ hình.
+> **Ghi chú về camera_stream_url:**
+> Hệ thống hỗ trợ cả dạng Snapshot (`?action=snapshot`, `/snapshot`, `/snapshot.jpg`) và Stream. Bộ giải mã sẽ tự động chuẩn hóa URL để lấy ảnh tức thời mà không gây trễ hình.
+> Tọa độ trạm camera và trạm switch sẽ được tự động học và lưu vĩnh viễn vào `tool_offsets.cfg` thông qua các lệnh 1-Click `AUTO_TEACH_CAMERA` và `AUTO_TEACH_SWITCH`.
 
 Sau khi sửa xong, nhấn **Save & Restart** Klipper.
 
@@ -174,15 +194,18 @@ cd ~/Tool-Klipper-Calibration
 1. Dừng và vô hiệu hóa `tool_calibrator.service`.
 2. Xóa file unit `/etc/systemd/system/tool_calibrator.service` và reload systemd daemon.
 3. Gỡ bỏ toàn bộ symlinks trong `~/klipper/klippy/extras/` (`tool_calibrator.py`, `tool_calibrator_station.py`, `safe_navigator.py`, `config_manager.py`, thư mục `z_backends/`).
-4. Xóa `tool_calibrator` khỏi `~/printer_data/moonraker.asvc`.
-5. Gỡ bỏ khối `[update_manager tool_calibrator]` khỏi `moonraker.conf`.
-6. Xóa môi trường ảo `~/Tool-Klipper-Calibration/env`.
-7. Khởi động lại Moonraker và Klipper.
+4. Gỡ bỏ thư mục symlink macro `~/printer_data/config/tool_calibrator/`.
+5. Xóa `tool_calibrator` khỏi `~/printer_data/moonraker.asvc`.
+6. Gỡ bỏ khối `[update_manager tool_calibrator]` khỏi `moonraker.conf` (có lưu bản backup timestamp).
+7. Xóa môi trường ảo `~/Tool-Klipper-Calibration/env`.
+8. Khởi động lại Moonraker và Klipper.
 
 ### Bước 5.2: Dọn dẹp `printer.cfg`
 Mở `printer.cfg` trên giao diện web và xóa (hoặc comment dấu `#`) dòng:
 ```ini
-# [include ~/Tool-Klipper-Calibration/macros/tool_calibrator_macros.cfg]
+# [include tool_calibrator/tool_calibrator_macros.cfg]
+# [include tool_calibrator/safe_staging_macros.cfg]
+# [include tool_offsets.cfg]
 # [tool_calibrator]
 # ...
 ```

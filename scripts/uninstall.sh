@@ -69,6 +69,12 @@ if [ -d "${KLIPPY_EXTRAS}" ]; then
     fi
 fi
 
+# 2b. Remove Macro Bundle directory
+if [ -d "${CONFIG_DIR}/tool_calibrator" ]; then
+    rm -rf "${CONFIG_DIR}/tool_calibrator"
+    echo -e "${GREEN}[✔] Đã gỡ thư mục macro ${CONFIG_DIR}/tool_calibrator/${NC}"
+fi
+
 # 3. Remove from moonraker.asvc
 echo -e "${BLUE}[3/5] Dọn dẹp danh sách dịch vụ Moonraker (moonraker.asvc)...${NC}"
 if [ -f "${ASVC_FILE}" ]; then
@@ -80,8 +86,10 @@ fi
 if [ -f "${MOONRAKER_CONF}" ]; then
     if grep -q "\[update_manager tool_calibrator\]" "${MOONRAKER_CONF}"; then
         echo -e "${BLUE}[4/5] Gỡ cấu hình update_manager khỏi moonraker.conf...${NC}"
-        cp "${MOONRAKER_CONF}" "${MOONRAKER_CONF}.uninstall.bak"
-        # Xóa khối update_manager tool_calibrator bằng sed/awk an toàn
+        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+        BACKUP_FILE="${MOONRAKER_CONF}.uninstall.bak_${TIMESTAMP}"
+        cp "${MOONRAKER_CONF}" "${BACKUP_FILE}"
+        # Xóa khối update_manager tool_calibrator bằng python an toàn
         python3 -c "
 with open('${MOONRAKER_CONF}', 'r') as f:
     lines = f.readlines()
@@ -98,7 +106,7 @@ for line in lines:
 with open('${MOONRAKER_CONF}', 'w') as f:
     f.writelines(out)
 "
-        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] trong moonraker.conf.${NC}"
+        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] trong moonraker.conf (Sao lưu: ${BACKUP_FILE}).${NC}"
     fi
 fi
 
@@ -122,6 +130,6 @@ fi
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}    GỠ CÀI ĐẶT THÀNH CÔNG VÀ SẠCH SẼ!              ${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "Lưu ý: Nếu có khai báo macro trong printer.cfg ([include macros/tool_calibrator_macros.cfg]),"
+echo -e "Lưu ý: Nếu có khai báo macro trong printer.cfg ([include tool_calibrator/tool_calibrator_macros.cfg]),"
 echo -e "vui lòng xóa hoặc comment dòng đó và lưu lại file printer.cfg."
 echo ""
