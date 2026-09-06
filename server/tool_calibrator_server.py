@@ -116,6 +116,7 @@ def release_lock():
 
 
 @app.route("/set_camera", methods=["POST"])
+@app.route("/set_camera_url", methods=["POST"])
 def set_camera():
     """Updates the snapshot camera URL."""
     if not _check_auth(request):

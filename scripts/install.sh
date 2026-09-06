@@ -77,7 +77,7 @@ for file in "tool_calibrator.py" "tool_calibrator_station.py" "safe_navigator.py
     echo -e "${GREEN}    Linked ${file} -> ${KLIPPY_EXTRAS}/${NC}"
 done
 
-for zb_file in "base_z.py" "switch_backend.py" "cartographer_backend.py"; do
+for zb_file in "__init__.py" "base_z.py" "switch_backend.py" "cartographer_backend.py"; do
     TARGET="${KLIPPY_EXTRAS}/z_backends/${zb_file}"
     SOURCE="${REPO_DIR}/klippy/extras/z_backends/${zb_file}"
     if [ -L "${TARGET}" ] || [ -f "${TARGET}" ]; then

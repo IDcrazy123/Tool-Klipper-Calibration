@@ -8,6 +8,8 @@ import tempfile
 import unittest
 
 from klippy.extras.config_manager import ConfigManager
+from klippy.extras.tool_calibrator_station import ToolCalibratorStation
+from unittest.mock import MagicMock
 
 
 class TestConfigManager(unittest.TestCase):
@@ -115,6 +117,41 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertAlmostEqual(float(loaded["matrix_tx"]), 0.123456, places=6)
         self.assertAlmostEqual(float(loaded["matrix_ty"]), -0.654321, places=6)
+
+
+class TestToolCalibratorStation(unittest.TestCase):
+    def test_station_loads_all_matrix_parameters(self):
+        """Verify ToolCalibratorStation loads matrix_tx, matrix_ty and exposes in get_status."""
+        config_data = {
+            "target_x": 150.0,
+            "target_y": 10.0,
+            "target_z": 22.0,
+            "approach_x": 150.0,
+            "approach_y": 35.0,
+            "safe_z": 40.0,
+            "mpp": 0.012543,
+            "matrix_a": 0.012456,
+            "matrix_b": -0.000123,
+            "matrix_tx": 0.123456,
+            "matrix_c": 0.000145,
+            "matrix_d": 0.012501,
+            "matrix_ty": -0.654321,
+        }
+        mock_config = MagicMock()
+        mock_config.get_printer.return_value = MagicMock()
+        mock_config.get_name.return_value = "tool_calibrator_station camera"
+        mock_config.getfloat.side_effect = lambda key, default=None: config_data.get(key, default)
+
+        station = ToolCalibratorStation(mock_config)
+        self.assertEqual(station.target_x, 150.0)
+        self.assertEqual(station.matrix_tx, 0.123456)
+        self.assertEqual(station.matrix_ty, -0.654321)
+
+        status = station.get_status()
+        self.assertEqual(status["matrix_a"], 0.012456)
+        self.assertEqual(status["matrix_tx"], 0.123456)
+        self.assertEqual(status["matrix_ty"], -0.654321)
+        self.assertEqual(status["mpp"], 0.012543)
 
 
 if __name__ == "__main__":

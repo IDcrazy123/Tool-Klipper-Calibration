@@ -35,7 +35,7 @@ fi
 echo -e "${BLUE}[3/4] Removing Klipper extras links...${NC}"
 KLIPPY_EXTRAS="${KLIPPER_DIR}/klippy/extras"
 if [ -d "${KLIPPY_EXTRAS}" ]; then
-    for file in "tool_calibrator.py" "safe_navigator.py" "config_manager.py"; do
+    for file in "tool_calibrator.py" "tool_calibrator_station.py" "safe_navigator.py" "config_manager.py"; do
         rm -f "${KLIPPY_EXTRAS}/${file}"
     done
     rm -rf "${KLIPPY_EXTRAS}/z_backends"

@@ -42,13 +42,24 @@ class StreamGrabber:
     def _normalize_url(self, url: str) -> str:
         """
         Normalizes relative Nginx paths (e.g., /webcam2/?action=snapshot)
-        to absolute localhost URLs for local service requests.
+        to absolute localhost URLs, and automatically converts stream URLs
+        (e.g., ?action=stream or /stream) to static snapshot endpoints.
         """
         clean_url = url.strip()
         if clean_url.startswith("/"):
-            return f"http://localhost{clean_url}"
-        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-            return f"http://{clean_url}"
+            clean_url = f"http://localhost{clean_url}"
+        elif not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+            clean_url = f"http://{clean_url}"
+
+        # Convert Crowsnest / ustreamer / mjpg-streamer action=stream to snapshot
+        if "action=stream" in clean_url:
+            clean_url = clean_url.replace("action=stream", "action=snapshot")
+        # Convert camera-streamer /stream endpoint to /snapshot
+        elif clean_url.endswith("/stream"):
+            clean_url = clean_url[:-7] + "/snapshot"
+        elif clean_url.endswith("/stream/"):
+            clean_url = clean_url[:-8] + "/snapshot"
+
         return clean_url
 
     def set_camera_url(self, new_url: str) -> None:

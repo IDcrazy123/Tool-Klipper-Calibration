@@ -24,6 +24,16 @@ class TestStreamGrabber(unittest.TestCase):
         grabber.set_camera_url("192.168.1.50:8080/?action=snapshot")
         self.assertEqual(grabber.camera_url, "http://192.168.1.50:8080/?action=snapshot")
 
+        # Test automatic conversion from stream URLs to snapshot endpoints
+        grabber.set_camera_url("http://192.168.1.50:8080/?action=stream")
+        self.assertEqual(grabber.camera_url, "http://192.168.1.50:8080/?action=snapshot")
+
+        grabber.set_camera_url("http://localhost:8080/stream")
+        self.assertEqual(grabber.camera_url, "http://localhost:8080/snapshot")
+
+        grabber.set_camera_url("/webcam2/?action=stream")
+        self.assertEqual(grabber.camera_url, "http://localhost/webcam2/?action=snapshot")
+
 
 class TestAffineTransform(unittest.TestCase):
     def setUp(self):
@@ -291,6 +301,19 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertAlmostEqual(data["delta_xy"][1], 0.0536, delta=0.001)
         self.assertIn("SET_TOOL_OFFSET TOOL=1", data["gcode_command"])
         self.assertIn("[tool 1]", data["config_snippet"])
+
+    def test_set_camera_url_endpoint(self):
+        """Verify POST /set_camera_url accepts {"url": ...} payload forwarded from Klipper."""
+        res = self.client.post("/set_camera_url", json={"url": "http://192.168.1.100:8080/?action=stream"})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["camera_url"], "http://192.168.1.100:8080/?action=snapshot")
+
+        # Also test /set_camera with {"camera_url": ...}
+        res2 = self.client.post("/set_camera", json={"camera_url": "http://192.168.1.100:8080/?action=snapshot"})
+        self.assertEqual(res2.status_code, 200)
+        self.assertTrue(res2.get_json()["success"])
 
     def test_picture_screenshot_sweep_dataset(self):
         """Verify robust detection and sub-pixel repeatability across all 5 tools and 5 brightness levels."""

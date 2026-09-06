@@ -36,8 +36,10 @@ class ToolCalibratorStation:
         self.mpp = config.getfloat("mpp", None)
         self.matrix_a = config.getfloat("matrix_a", None)
         self.matrix_b = config.getfloat("matrix_b", None)
+        self.matrix_tx = config.getfloat("matrix_tx", None)
         self.matrix_c = config.getfloat("matrix_c", None)
         self.matrix_d = config.getfloat("matrix_d", None)
+        self.matrix_ty = config.getfloat("matrix_ty", None)
 
         logger.info(f"Loaded station '{self.name}' (Target: X={self.target_x}, Y={self.target_y}, Z={self.target_z})")
 
@@ -50,6 +52,12 @@ class ToolCalibratorStation:
             "approach_y": self.approach_y,
             "safe_z": self.safe_z,
             "mpp": self.mpp,
+            "matrix_a": self.matrix_a,
+            "matrix_b": self.matrix_b,
+            "matrix_tx": self.matrix_tx,
+            "matrix_c": self.matrix_c,
+            "matrix_d": self.matrix_d,
+            "matrix_ty": self.matrix_ty,
         }
 
 
