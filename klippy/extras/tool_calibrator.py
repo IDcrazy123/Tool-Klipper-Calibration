@@ -10,6 +10,7 @@ import json
 import logging
 import urllib.request
 import urllib.error
+import statistics
 
 from .safe_navigator import SafeNavigator, SafeNavigatorException
 from .config_manager import ConfigManager, ConfigManagerException
@@ -41,6 +42,12 @@ class ToolCalibrator:
         self.z_backend_type = config.get("z_backend", "cartographer").strip().lower()
         self.max_centering_iterations = config.getint("max_centering_iterations", 5, minval=1, maxval=10)
         self.tolerance_mm = config.getfloat("tolerance_mm", 0.015, above=0.001)
+        self.centering_samples = config.getint("centering_samples", 3, minval=1, maxval=7)
+        self.sample_delay = config.getfloat("sample_delay", 0.08, minval=0.01, maxval=0.5)
+        if hasattr(config, "getboolean"):
+            self.wiggle_on_failure = config.getboolean("wiggle_on_failure", True)
+        else:
+            self.wiggle_on_failure = bool(config.get("wiggle_on_failure", True))
 
         # Core Component Instances
         self.navigator = SafeNavigator(config)
@@ -154,40 +161,154 @@ class ToolCalibrator:
         except Exception as ex:
             raise SafeNavigatorException(f"[ERR_CAM_102] Vision communication error: {ex}")
 
-    def _center_nozzle(self, toolhead, gcmd) -> None:
+    def _sample_burst(self, toolhead, gcmd=None, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
-        Visual servoing loop: pulls nozzle center from vision service and applies damped moves.
+        Multi-frame Burst Sampling:
+        Pulls consecutive frames separated by `sample_delay` to filter mechanical vibrations,
+        streamer buffer lag, and transient sensor noise. Aggregates results using median filtering.
         """
+        n_samples = samples if samples is not None else self.centering_samples
+        toolhead.wait_moves()
+        self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
+
+        valid_frames = []
+        for i in range(n_samples):
+            if i > 0:
+                self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
+            resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
+            if resp.get("found") and resp.get("center_uv") and len(resp.get("center_uv")) >= 2:
+                valid_frames.append(resp)
+
+        if not valid_frames:
+            return None
+
+        u_vals = [float(f["center_uv"][0]) for f in valid_frames]
+        v_vals = [float(f["center_uv"][1]) for f in valid_frames]
+        r_vals = [float(f.get("radius_px", f.get("radius", 0.0))) for f in valid_frames if f.get("radius_px") or f.get("radius")]
+
+        med_u = float(statistics.median(u_vals))
+        med_v = float(statistics.median(v_vals))
+        med_r = float(statistics.median(r_vals)) if r_vals else 0.0
+
+        spread_u = max(u_vals) - min(u_vals) if len(u_vals) > 1 else 0.0
+        spread_v = max(v_vals) - min(v_vals) if len(v_vals) > 1 else 0.0
+        max_spread = max(spread_u, spread_v)
+
+        best_frame = max(valid_frames, key=lambda x: x.get("confidence", 0.5))
+
+        return {
+            "found": True,
+            "center_uv": [round(med_u, 2), round(med_v, 2)],
+            "radius_px": round(med_r, 2),
+            "tier": best_frame.get("tier", 1),
+            "combo": best_frame.get("combo", 0),
+            "confidence": best_frame.get("confidence", 1.0),
+            "burst_count": len(valid_frames),
+            "burst_total": n_samples,
+            "spread_px": round(max_spread, 2),
+            "raw_frames": valid_frames
+        }
+
+    def _recover_with_wiggle(self, toolhead, gcmd, iteration: int, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """
+        Adaptive Wiggle Recovery:
+        Executes progressive micro-moves (±0.1mm) around the anchor position to break specular
+        glare / reflection blindspots when nozzle detection temporarily fails.
+        Returns aggregated burst detection if recovered, or None if all attempts fail.
+        """
+        anchor_pos = list(toolhead.get_position())
+        # Micro-move patterns relative to anchor: +0.1 X, -0.1 X, +0.1 Y, -0.1 Y
+        wiggle_steps = [
+            ("+X", 0.1, 0.0),
+            ("-X", -0.1, 0.0),
+            ("+Y", 0.0, 0.1),
+            ("-Y", 0.0, -0.1),
+        ]
+
+        if gcmd:
+            gcmd.respond_info(f"  -> [Wiggle Recovery] Nozzle undetected at centering step {iteration}. Attempting adaptive wiggle micro-moves...")
+
+        recovered_burst = None
+        for step_idx, (axis_label, dx, dy) in enumerate(wiggle_steps, 1):
+            target_x = anchor_pos[0] + dx
+            target_y = anchor_pos[1] + dy
+            try:
+                self.navigator.validate_coordinate_safety(x=target_x, y=target_y)
+            except SafeNavigatorException as ex:
+                if gcmd:
+                    gcmd.respond_info(f"  -> [Wiggle Recovery] Skipping step {step_idx} ({axis_label}): {ex}")
+                continue
+
+            if gcmd:
+                gcmd.respond_info(f"  -> [Wiggle Recovery] Step {step_idx}/4: wiggling {axis_label} (X{target_x:.3f}, Y{target_y:.3f})...")
+
+            toolhead.manual_move([target_x, target_y, None], self.navigator.approach_speed)
+            toolhead.wait_moves()
+            self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
+
+            # Quick probe
+            probe_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
+            if probe_resp.get("found"):
+                if gcmd:
+                    gcmd.respond_info(f"  -> [Wiggle Recovery] Regained optical lock at step {step_idx}! Gathering burst consensus...")
+                # Sample burst at this recovered vantage
+                recovered_burst = self._sample_burst(toolhead, gcmd, samples=samples)
+                if recovered_burst and recovered_burst.get("found"):
+                    break
+
+        if recovered_burst is None:
+            # Revert to anchor position if recovery failed completely
+            if gcmd:
+                gcmd.respond_info("  -> [Wiggle Recovery] Wiggle recovery sequence exhausted. Returning to anchor position.")
+            toolhead.manual_move([anchor_pos[0], anchor_pos[1], None], self.navigator.approach_speed)
+            toolhead.wait_moves()
+            return None
+
+        return recovered_burst
+
+    def _center_nozzle(self, toolhead, gcmd, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> None:
+        """
+        Visual servoing loop: pulls nozzle center from vision service using multi-frame burst sampling
+        and adaptive wiggle recovery, and applies damped moves.
+        """
+        wiggle_enabled = self.wiggle_on_failure if enable_wiggle is None else enable_wiggle
+
         for iteration in range(1, self.max_centering_iterations + 1):
             toolhead.wait_moves()
-            # Brief pause for frame stability
-            self.reactor.pause(self.reactor.monotonic() + 0.15)
 
-            vision_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-            if not vision_resp.get("found"):
-                # Retry once after brief settling pause to handle transient motion blur
-                self.reactor.pause(self.reactor.monotonic() + 0.25)
-                vision_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-                if not vision_resp.get("found"):
-                    raise SafeNavigatorException(f"[ERR_CV_201] Nozzle orifice not found during centering attempt {iteration}.")
+            burst_resp = self._sample_burst(toolhead, gcmd, samples=samples)
+            if not burst_resp or not burst_resp.get("found"):
+                if wiggle_enabled:
+                    burst_resp = self._recover_with_wiggle(toolhead, gcmd, iteration, samples=samples)
 
-            center_uv = vision_resp.get("center_uv")
+                if not burst_resp or not burst_resp.get("found"):
+                    raise SafeNavigatorException(f"[ERR_CV_201] Nozzle orifice not found during centering attempt {iteration} (Multi-frame burst and wiggle recovery exhausted).")
+
+            center_uv = burst_resp.get("center_uv")
             offset_resp = self._query_vision("calculate_offset", {"center_uv": center_uv})
             dx, dy = offset_resp.get("offset_xy", [0.0, 0.0])
 
-            tier_desc = "Tier 0 Curvature" if vision_resp.get("combo") == 10 else f"Tier {vision_resp.get('tier', 1)}"
-            gcmd.respond_info(f"  -> Centering Step {iteration}: Delta X{dx:+.3f}mm Y{dy:+.3f}mm (UV: {center_uv}, {tier_desc})")
+            tier_desc = "Tier 0 Curvature" if burst_resp.get("combo") == 10 else f"Tier {burst_resp.get('tier', 1)}"
+            burst_desc = f"Burst {burst_resp.get('burst_count')}/{burst_resp.get('burst_total')} (spread: {burst_resp.get('spread_px')}px)"
+            if gcmd:
+                gcmd.respond_info(f"  -> Centering Step {iteration}: Delta X{dx:+.3f}mm Y{dy:+.3f}mm (UV: {center_uv}, {burst_desc}, {tier_desc})")
 
             # Check if converged within tolerance
             if abs(dx) <= self.tolerance_mm and abs(dy) <= self.tolerance_mm:
-                gcmd.respond_info(f"  -> Convergence achieved within {self.tolerance_mm}mm tolerance.")
+                if gcmd:
+                    gcmd.respond_info(f"  -> Convergence achieved within {self.tolerance_mm}mm tolerance.")
                 return
 
             # Apply relative correction move at approach speed
-            toolhead.manual_move([toolhead.get_position()[0] + dx, toolhead.get_position()[1] + dy, None], self.navigator.approach_speed)
+            cur_pos = toolhead.get_position()
+            target_x = cur_pos[0] + dx
+            target_y = cur_pos[1] + dy
+            self.navigator.validate_coordinate_safety(x=target_x, y=target_y)
+            toolhead.manual_move([target_x, target_y, None], self.navigator.approach_speed)
             toolhead.wait_moves()
 
-        gcmd.respond_info(f"  -> Warning: Centering reached max iterations ({self.max_centering_iterations}).")
+        if gcmd:
+            gcmd.respond_info(f"  -> Warning: Centering reached max iterations ({self.max_centering_iterations}).")
 
     def _discover_tools(self, tools_param: Optional[str] = None) -> List[int]:
         """
@@ -285,13 +406,13 @@ class ToolCalibrator:
         except Exception as ex:
             logger.debug(f"[tool_calibrator] Lighting control error: {ex}")
 
-    def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None) -> List[float]:
+    def _execute_xy_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_origin_xy: Optional[List[float]], tool_offsets: Dict[str, float], target_focal_z: Optional[float] = None, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> List[float]:
         """Executes optical camera alignment for a single tool."""
         gcmd.respond_info(f"[T{tool_no}] Entering Camera Station...")
         self._set_inspection_lighting(True, tool_no)
         try:
             self.navigator.approach_camera(toolhead, gcode_move, target_z=target_focal_z)
-            self._center_nozzle(toolhead, gcmd)
+            self._center_nozzle(toolhead, gcmd, samples=samples, enable_wiggle=enable_wiggle)
             raw_pos = toolhead.get_position()
 
             if tool_no == self.reference_tool:
@@ -346,6 +467,8 @@ class ToolCalibrator:
             ORDER (str): 'XY_FIRST' (default) or 'Z_FIRST'
             COMPENSATE_FOCAL_Z (int): 1 to adjust camera height by measured Z offset (default: 0)
             TOOLS (str): Comma-separated list of tool indices (e.g. TOOLS=1 or TOOLS=1,2)
+            SAMPLES (int): Number of burst sampling frames per centering step (default: 3)
+            WIGGLE (int): 1 to enable adaptive wiggle recovery, 0 to disable (default: 1)
         """
         calibrate_xy = gcmd.get_int("CALIBRATE_XY", 1) == 1
         calibrate_z = gcmd.get_int("CALIBRATE_Z", 1) == 1
@@ -355,6 +478,8 @@ class ToolCalibrator:
         order = gcmd.get("ORDER", "XY_FIRST").upper()
         compensate_focal_z = gcmd.get_int("COMPENSATE_FOCAL_Z", 0) == 1
         tools_param = gcmd.get("TOOLS", None)
+        samples_param = gcmd.get_int("SAMPLES", self.centering_samples)
+        wiggle_param = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
 
         toolhead = self.printer.lookup_object("toolhead")
         gcode_move = self.printer.lookup_object("gcode_move")
@@ -431,12 +556,14 @@ class ToolCalibrator:
                         if compensate_focal_z and tool_no != self.reference_tool and "z" in tool_offsets:
                             focal_z = self.navigator.cam_target_z + tool_offsets["z"]
                         reference_origin_xy = self._execute_xy_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z
+                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z,
+                            samples=samples_param, enable_wiggle=wiggle_param
                         )
                 else:
                     if calibrate_xy:
                         reference_origin_xy = self._execute_xy_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets
+                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets,
+                            samples=samples_param, enable_wiggle=wiggle_param
                         )
                     if calibrate_z and not dry_run:
                         reference_z_result = self._execute_z_calibration(

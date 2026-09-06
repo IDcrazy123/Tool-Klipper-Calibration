@@ -8,6 +8,23 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.11] - 2026-09-06
+### Added
+- **Multi-frame Burst Sampling in Visual Servoing Loop:**
+  - Implemented `_sample_burst()` in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py).
+  - Collects $N$ settled frames (default `centering_samples = 3`, configurable 1–7) separated by `sample_delay` (default $0.08\text{s}$).
+  - Uses median filtering across $(U, V, R)$ to eliminate frame outliers caused by mechanical vibrations, streamer buffering latency, or single-frame exposure spikes.
+  - Computes and logs burst consensus telemetry: `burst_count`, `burst_total`, and sub-pixel `spread_px`.
+- **Adaptive Wiggle Recovery Routine:**
+  - Implemented `_recover_with_wiggle()` in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py).
+  - When the nozzle is temporarily lost during servoing (e.g. blind spots or specular glare), automatically executes 4 micro-moves around the anchor position ($\pm 0.1\text{mm}$ in X and Y) to break the reflection angle before aborting.
+  - Validates all micro-moves against printer frame boundaries via `SafeNavigator.validate_coordinate_safety`.
+  - Automatically recovers optical lock or safely reverts toolhead to anchor coordinates if all attempts are exhausted.
+  - Adds G-Code command parameters `SAMPLES` and `WIGGLE` to `CALIBRATE_TOOL_OFFSETS` for runtime overrides.
+- **Unit & Integration Test Suite:**
+  - Added 5 new unit tests in [tests/test_calibration_cycle.py](file:///d:/Desktop/Tool-Klipper-Calibration/tests/test_calibration_cycle.py) verifying median calculation, outlier filtering, partial burst drops, successful adaptive wiggle recovery, anchor position reset on exhaustion, and wiggle disable flags.
+  - Test suite expanded to **50 passing tests** with 100% success rate.
+
 ## [0.8.10] - 2026-09-05
 ### Fixed
 - Joint 3D $(x, y, r)$ Continuous Radial Symmetry Optimization (Images 16, 21, 22, 26, 27, 29, 32, 37, 40, 44):

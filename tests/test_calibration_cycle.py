@@ -142,6 +142,10 @@ class DummyConfig:
         val = self.data.get(key, default)
         return float(val) if val is not None else default
 
+    def getboolean(self, key, default=None, **kwargs):
+        val = self.data.get(key, default)
+        return bool(val) if val is not None else default
+
     def getsection(self, section):
         return self
 
@@ -391,6 +395,95 @@ class TestCalibrationCycle(unittest.TestCase):
         calibrator._set_inspection_lighting(False, tool_no=1)
         self.assertIn("SET_PIN PIN=cam_light VALUE=0", self.gcode.executed_scripts)
         self.assertIn("_CALIBRATION_NOZZLE_LED_ON TOOL=1", self.gcode.executed_scripts)
+
+    def test_burst_sampling_median_filtering(self):
+        """Burst sampling must discard single-frame outliers and compute accurate median UV and spread."""
+        calibrator = ToolCalibrator(self.config)
+        mock_frames = [
+            {"found": True, "center_uv": [320.0, 240.0], "radius": 40.0, "confidence": 0.95, "tier": 0, "combo": 10},
+            {"found": True, "center_uv": [320.2, 240.1], "radius": 40.5, "confidence": 0.98, "tier": 0, "combo": 10},
+            {"found": True, "center_uv": [395.0, 310.0], "radius": 60.0, "confidence": 0.70, "tier": 2, "combo": 0},  # outlier
+        ]
+        calibrator._query_vision = MagicMock(side_effect=mock_frames)
+
+        res = calibrator._sample_burst(self.toolhead, samples=3)
+        self.assertIsNotNone(res)
+        self.assertTrue(res["found"])
+        self.assertEqual(res["center_uv"], [320.2, 240.1])
+        self.assertEqual(res["radius_px"], 40.5)
+        self.assertEqual(res["burst_count"], 3)
+        self.assertEqual(res["burst_total"], 3)
+        self.assertEqual(res["spread_px"], 75.0)
+
+    def test_burst_sampling_partial_drop(self):
+        """Burst sampling handles dropped/unfound frames gracefully if at least 1 valid frame is captured."""
+        calibrator = ToolCalibrator(self.config)
+        mock_frames = [
+            {"found": False},
+            {"found": True, "center_uv": [319.8, 239.9], "radius": 41.0, "confidence": 0.92, "tier": 1},
+            {"found": True, "center_uv": [320.0, 240.1], "radius": 41.2, "confidence": 0.94, "tier": 1},
+        ]
+        calibrator._query_vision = MagicMock(side_effect=mock_frames)
+
+        res = calibrator._sample_burst(self.toolhead, samples=3)
+        self.assertIsNotNone(res)
+        self.assertTrue(res["found"])
+        self.assertEqual(res["burst_count"], 2)
+        self.assertEqual(res["burst_total"], 3)
+        self.assertEqual(res["center_uv"], [319.9, 240.0])
+
+    def test_adaptive_wiggle_recovery_success(self):
+        """When initial detection fails, adaptive wiggle moves toolhead and recovers optical lock."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand()
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        def mock_vision(endpoint, payload=None, timeout=3.0):
+            if endpoint == "detect_nozzle":
+                cur_x = self.toolhead.get_position()[0]
+                if abs(cur_x - 150.1) < 0.01:
+                    return {"found": True, "center_uv": [320.0, 240.0], "radius": 42.0, "confidence": 0.95, "tier": 0, "combo": 10}
+                return {"found": False}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            return {}
+
+        calibrator._query_vision = mock_vision
+        calibrator._center_nozzle(self.toolhead, gcmd)
+
+        info_str = " ".join(gcmd.info_messages)
+        self.assertIn("Wiggle Recovery", info_str)
+        self.assertIn("Regained optical lock", info_str)
+        self.assertIn("Convergence achieved", info_str)
+
+    def test_adaptive_wiggle_recovery_failure_resets_position(self):
+        """If all wiggle recovery attempts fail, toolhead must return to anchor position and raise ERR_CV_201."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand()
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        calibrator._query_vision = MagicMock(return_value={"found": False})
+
+        with self.assertRaises(SafeNavigatorException) as ctx:
+            calibrator._center_nozzle(self.toolhead, gcmd)
+
+        self.assertIn("[ERR_CV_201]", str(ctx.exception))
+        self.assertEqual(self.toolhead.pos[:2], [150.0, 10.0])
+        info_str = " ".join(gcmd.info_messages)
+        self.assertIn("exhausted", info_str.lower())
+
+    def test_centering_with_wiggle_disabled(self):
+        """When enable_wiggle=False, centering aborts immediately on first unfound burst without wiggling."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand()
+        calibrator._query_vision = MagicMock(return_value={"found": False})
+
+        with self.assertRaises(SafeNavigatorException) as ctx:
+            calibrator._center_nozzle(self.toolhead, gcmd, enable_wiggle=False)
+
+        self.assertIn("[ERR_CV_201]", str(ctx.exception))
+        info_str = " ".join(gcmd.info_messages)
+        self.assertNotIn("Wiggle Recovery", info_str)
 
 
 if __name__ == "__main__":

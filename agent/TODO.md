@@ -37,6 +37,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 3.4:** Implement `z_backends/switch_backend.py` supporting physical endstop probing.
 - [x] **Task 3.5:** Implement `z_backends/cartographer_backend.py` supporting Cartographer V4 Touch Home & Touch Probe.
 - [x] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
+- [x] **Task 3.7:** Implement Multi-frame Burst Sampling (`_sample_burst`) and Adaptive Wiggle Recovery (`_recover_with_wiggle`).
 
 ### Phase 4: Macro Suite & Hook Integration (`macros/`)
 - [x] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.
