@@ -147,22 +147,42 @@ Trước khi chạy đo tự động toàn diện, bạn có thể tương tác 
 
 ---
 
-### Bước 6: Tự động Hiệu chuẩn Toàn bộ Đầu phun (`CALIBRATE_ALL_TOOLS`)
+### Bước 6: Tự động Hiệu chuẩn Đầu phun (Tách biệt Hoàn toàn XY và Z)
 
-1. **Chạy thử an toàn không va chạm (Dry-Run)**:
-   ```gcode
-   CALIBRATE_ALL_TOOLS DRY_RUN=1
-   ```
-   *Máy in sẽ nhấc từng đầu phun, kiểm tra camera, mô phỏng đo Z nhưng dừng cách mặt switch/bàn $5\text{mm}$ và không lưu vào đĩa cứng. Giúp quan sát đường chạy an toàn.*
+Hệ thống hỗ trợ **tách biệt độc lập 100% giữa đo quang học XY và dò tiếp xúc Z**. Điều này cực kỳ quan trọng đối với các máy in có phần cứng không đồng nhất:
+- Máy chỉ có Camera hướng lên (chưa gắn switch Z hoặc dùng probe riêng);
+- Bạn chỉ vừa thay nozzle hoặc chỉnh cơ khí trục X/Y mà không muốn làm mất offset Z đã căn chuẩn trước đó;
+- Các đầu phun khác loại (khác chiều dài block, khác cảm biến đo độ cao Z);
+- Bạn chỉ vừa thay đổi chiều dài nozzle và chỉ muốn chạy dò Z lại một đầu phun duy nhất mà giữ nguyên tọa độ XY.
 
-2. **Chạy Hiệu chuẩn Chính thức**:
-   ```gcode
-   CALIBRATE_ALL_TOOLS
-   ```
-   *Quá trình hoàn toàn tự động:*
-   - **T0 (Đầu phun chuẩn)**: Đo tọa độ gốc quang học $(X_0, Y_0)$ và chạm mốc chuẩn $Z_0$;
-   - **T1..Tn (Các đầu phun phụ)**: Tự động nhả/nhặt đầu phun, căn tâm camera đo $\Delta X = X_n - X_0$, $\Delta Y = Y_n - Y_0$, chạm đo $\Delta Z = Z_n - Z_0$;
-   - **Tự động sao lưu & Lưu cấu hình**: Tự động tạo bản backup có gắn timestamp và cập nhật các section `[tool 0]`, `[tool 1]`, `[tool 2]...` trong `tool_offsets.cfg`.
+#### A. Đo Cả XY và Z Đồng thời (Mặc định)
+```gcode
+# Đo toàn bộ đầu phun
+CALIBRATE_ALL_TOOLS
+
+# Đo riêng đầu phun T1
+CALIBRATE_TOOL TOOL=1
+```
+
+#### B. Chỉ Đo Quang học XY (Bảo toàn nguyên vẹn Z Offset hiện có)
+```gcode
+# Đo XY cho toàn bộ đầu phun (không chạm Z, không cần probe Z)
+CALIBRATE_TOOLS_XY
+
+# Đo XY cho riêng đầu phun T1
+CALIBRATE_TOOL_XY TOOL=1
+```
+*Lưu ý: Khi chỉ chạy đo XY, file `tool_offsets.cfg` chỉ cập nhật `gcode_x_offset` và `gcode_y_offset`. Giá trị `gcode_z_offset` của mọi đầu phun sẽ được giữ nguyên 100%, không bị ghi đè hay reset về 0.000.*
+
+#### C. Chỉ Đo Tiếp xúc Z (Bảo toàn nguyên vẹn XY Offset hiện có)
+```gcode
+# Đo Z cho toàn bộ đầu phun (không cần bật camera hay vision service)
+CALIBRATE_TOOLS_Z
+
+# Đo Z cho riêng đầu phun T1
+CALIBRATE_TOOL_Z TOOL=1
+```
+*Lưu ý: Khi chỉ chạy đo Z, file `tool_offsets.cfg` chỉ cập nhật `gcode_z_offset`. Toàn bộ tọa độ quang học `gcode_x_offset` và `gcode_y_offset` đã đo trước đó được bảo toàn tuyệt đối.*
 
 ---
 
@@ -170,8 +190,12 @@ Trước khi chạy đo tự động toàn diện, bạn có thể tương tác 
 
 | Tên Macro | Mục đích sử dụng | Tham số mở rộng |
 | :--- | :--- | :--- |
-| `CALIBRATE_ALL_TOOLS` | Hiệu chuẩn toàn bộ đầu phun 1-click | `DRY_RUN=1`, `SAMPLES=3`, `WIGGLE=1`, `CLEAN_NOZZLE=1`, `ORDER="XY_FIRST"` |
-| `CALIBRATE_TOOL` | Hiệu chuẩn riêng 1 đầu phun cụ thể | `TOOL=1`, `CALIBRATE_XY=1`, `CALIBRATE_Z=1` |
+| `CALIBRATE_ALL_TOOLS` | Hiệu chuẩn toàn bộ đầu phun cả XY và Z | `DRY_RUN=1`, `SAMPLES=3`, `WIGGLE=1`, `CLEAN_NOZZLE=1`, `ORDER="XY_FIRST"` |
+| `CALIBRATE_TOOLS_XY` | **Chỉ đo quang học XY** toàn bộ (giữ nguyên Z) | `TOOLS="1,2"`, `SAMPLES=3`, `WIGGLE=1`, `DRY_RUN=0` |
+| `CALIBRATE_TOOLS_Z` | **Chỉ đo tiếp xúc Z** toàn bộ (giữ nguyên XY) | `TOOLS="1,2"`, `DRY_RUN=0` |
+| `CALIBRATE_TOOL` | Hiệu chuẩn riêng 1 đầu phun cụ thể (cả XY & Z) | `TOOL=1`, `CALIBRATE_XY=1`, `CALIBRATE_Z=1` |
+| `CALIBRATE_TOOL_XY` | **Chỉ đo quang học XY** 1 đầu phun cụ thể | `TOOL=1`, `SAMPLES=3`, `WIGGLE=1` |
+| `CALIBRATE_TOOL_Z` | **Chỉ đo tiếp xúc Z** 1 đầu phun cụ thể | `TOOL=1` |
 | `CALIBRATE_CAMERA` | Đo tỷ lệ mm/px và ma trận xoay | `DISTANCE=1.0` (mặc định $\pm 1.0\text{mm}$) |
 | `AUTO_TEACH_CAMERA` | Dạy trạm camera tự động 1-click | `APPROACH_DIST=25.0`, `AUTO_CENTER=1` |
 | `AUTO_TEACH_SWITCH` | Dạy trạm công tắc Z tự động 1-click | `APPROACH_DIST=20.0`, `AUTO_TOUCH=1` |

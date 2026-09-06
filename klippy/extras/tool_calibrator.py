@@ -427,6 +427,8 @@ class ToolCalibrator:
             if tool_no == self.reference_tool:
                 ref_xy = [raw_pos[0], raw_pos[1]]
                 gcmd.respond_info(f"[T{tool_no}] Reference Optical Origin set to X{raw_pos[0]:.3f} Y{raw_pos[1]:.3f}")
+                tool_offsets["x"] = 0.0
+                tool_offsets["y"] = 0.0
                 self.navigator.depart_station(toolhead, gcode_move)
                 return ref_xy
             else:
@@ -455,6 +457,7 @@ class ToolCalibrator:
         if tool_no == self.reference_tool:
             ref_z = self.z_backend.probe_reference_tool(tool_no, gcmd)
             gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established ({ref_z.get('source')})")
+            tool_offsets["z"] = 0.0
             self.navigator.depart_station(toolhead, gcode_move)
             return ref_z
         else:
@@ -497,13 +500,14 @@ class ToolCalibrator:
             gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before calibration.")
             return
 
-        # Pre-flight ping to vision service
-        try:
-            health = self._query_vision("health")
-            gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}")
-        except Exception as ex:
-            gcmd.respond_error(str(ex))
-            return
+        # Pre-flight ping to vision service (only required if optical calibration is requested)
+        if calibrate_xy:
+            try:
+                health = self._query_vision("health")
+                gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}")
+            except Exception as ex:
+                gcmd.respond_error(str(ex))
+                return
 
         # Discover tool sequence across any toolchanger flavor
         try:
@@ -552,7 +556,7 @@ class ToolCalibrator:
                         else:
                             gcmd.respond_info(f"[tool_calibrator] Note: CLEAN_NOZZLE requested, but no cleaning macro is configured on this printer. Skipping.")
 
-                tool_offsets: Dict[str, float] = {"x": 0.0, "y": 0.0, "z": 0.0}
+                tool_offsets: Dict[str, float] = {}
 
                 # Calibration sequence execution by order
                 if order == "Z_FIRST":
@@ -598,7 +602,8 @@ class ToolCalibrator:
             # Telemetry Summary
             gcmd.respond_info("\n================ CALIBRATION SUMMARY ================")
             for t_num, offs in results.items():
-                gcmd.respond_info(f"Tool T{t_num}: X={offs['x']:+.3f}mm  Y={offs['y']:+.3f}mm  Z={offs['z']:+.3f}mm")
+                parts = [f"{k.upper()}={v:+.3f}mm" for k, v in offs.items()]
+                gcmd.respond_info(f"Tool T{t_num}: {'  '.join(parts) if parts else 'No new offsets measured'}")
             gcmd.respond_info("=====================================================")
 
             self.cached_offsets = results
@@ -993,7 +998,8 @@ class ToolCalibrator:
         gcmd.respond_info(f"Tool-Calibrator Status: {self.last_run_status}")
         gcmd.respond_info(f"Safe_Z: {self.navigator.safe_z:.2f}mm | Backend: {self.z_backend_type}")
         for t, offs in self.cached_offsets.items():
-            gcmd.respond_info(f"  T{t}: X={offs['x']:+.3f} Y={offs['y']:+.3f} Z={offs['z']:+.3f}")
+            parts = [f"{k.upper()}={v:+.3f}" for k, v in offs.items()]
+            gcmd.respond_info(f"  T{t}: {' '.join(parts) if parts else 'None'}")
 
     def get_status(self, eventtime) -> Dict[str, Any]:
         """Provides state dictionaries to Mainsail and Fluidd frontend templates."""

@@ -536,6 +536,102 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("U320.50 px, V240.20 px", info_str)
         self.assertIn("98.0%", info_str)
 
+    def test_calibrate_xy_only_preserves_existing_z(self):
+        """When CALIBRATE_Z=0, optical XY calibration updates X and Y offsets while strictly preserving existing Z offsets."""
+        # Pre-seed tool_offsets.cfg with non-zero Z offsets
+        initial_cfg = (
+            "[tool 0]\n"
+            "gcode_x_offset = 0.000\n"
+            "gcode_y_offset = 0.000\n"
+            "gcode_z_offset = 1.250\n"
+            "\n"
+            "[tool 1]\n"
+            "gcode_x_offset = 0.000\n"
+            "gcode_y_offset = 0.000\n"
+            "gcode_z_offset = -0.450\n"
+        )
+        with open(self.config_path, "w") as f:
+            f.write(initial_cfg)
+
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 0, "SAVE_CONFIG": 1})
+
+        def mock_vision(endpoint, payload=None, timeout=3.0):
+            if endpoint == "detect_nozzle":
+                return {"found": True, "center_uv": [320.0, 240.0], "radius": 40.0, "confidence": 0.95, "tier": 0, "combo": 10}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            return {}
+
+        calibrator._query_vision = mock_vision
+
+        current_tool = [0]
+        original_run_script = calibrator.gcode.run_script_from_command
+        def mock_run_script(script):
+            if script.startswith("T"):
+                try:
+                    current_tool[0] = int(script[1:])
+                except ValueError:
+                    pass
+            original_run_script(script)
+        calibrator.gcode.run_script_from_command = mock_run_script
+
+        def mock_center(th, cmd, samples=3, enable_wiggle=True):
+            if current_tool[0] == 0:
+                self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+            else:
+                self.toolhead.pos = [150.25, 10.75, 22.0, 0.0]
+            return {"u": 320.0, "v": 240.0}
+
+        calibrator._center_nozzle = mock_center
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # Read back tool_offsets.cfg
+        with open(self.config_path, "r") as f:
+            content = f.read()
+
+        # Tool 1 XY should be offset (dx = 150.25 - 150.0 = 0.25, dy = 10.75 - 10.0 = 0.75)
+        self.assertIn("gcode_x_offset: 0.250", content)
+        self.assertIn("gcode_y_offset: 0.750", content)
+        # Tool 0 and Tool 1 Z offsets MUST be preserved without being overwritten by 0.000!
+        self.assertIn("gcode_z_offset = 1.250", content)
+        self.assertIn("gcode_z_offset = -0.450", content)
+
+    def test_calibrate_z_only_preserves_existing_xy(self):
+        """When CALIBRATE_XY=0, Z probing updates Z offsets while strictly preserving existing X and Y offsets."""
+        # Pre-seed tool_offsets.cfg with non-zero XY offsets
+        initial_cfg = (
+            "[tool 0]\n"
+            "gcode_x_offset = 0.000\n"
+            "gcode_y_offset = 0.000\n"
+            "gcode_z_offset = 0.000\n"
+            "\n"
+            "[tool 1]\n"
+            "gcode_x_offset = 5.678000\n"
+            "gcode_y_offset = 12.345000\n"
+            "gcode_z_offset = 0.000\n"
+        )
+        with open(self.config_path, "w") as f:
+            f.write(initial_cfg)
+
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "SAVE_CONFIG": 1})
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"baseline_z": 1.5, "source": "cartographer"})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.250})
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        with open(self.config_path, "r") as f:
+            content = f.read()
+
+        # Tool 1 XY MUST be preserved
+        self.assertIn("gcode_x_offset = 5.678000", content)
+        self.assertIn("gcode_y_offset = 12.345000", content)
+        # Tool 1 Z should be updated
+        self.assertIn("gcode_z_offset: 0.250", content)
+
 
 if __name__ == "__main__":
     unittest.main()
+

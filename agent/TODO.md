@@ -38,6 +38,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 3.5:** Implement `z_backends/cartographer_backend.py` supporting Cartographer V4 Touch Home & Touch Probe.
 - [x] **Task 3.6:** Develop `config_manager.py` for atomic configuration persistence and timestamped backups.
 - [x] **Task 3.7:** Implement Multi-frame Burst Sampling (`_sample_burst`) and Adaptive Wiggle Recovery (`_recover_with_wiggle`).
+- [x] **Task 3.8:** Decouple XY optical calibration and Z probing calibration so unmeasured axes are never overwritten.
 
 ### Phase 4: Macro Suite & Hook Integration (`macros/`)
 - [x] **Task 4.1:** Develop `CALIBRATE_TOOL_OFFSETS` user macro with tool selection and dry-run parameters.
@@ -46,6 +47,7 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 4.4:** Implement rollback macro `CALIBRATION_ROLLBACK_OFFSETS`.
 - [x] **Task 4.5:** Implement Interactive Navigation (`CALIBRATION_NAVIGATE`), Vision Testing (`TEST_NOZZLE_VISION`), and Single-Tool Centering (`CENTER_NOZZLE`).
 - [x] **Task 4.6:** Author Complete 6-Step Operational Standard Operating Procedure (`docs/QUY_TRINH_VAN_HANH.md`).
+- [x] **Task 4.7:** Implement decoupled macros `CALIBRATE_TOOLS_XY`, `CALIBRATE_TOOLS_Z`, `CALIBRATE_TOOL_XY`, `CALIBRATE_TOOL_Z`.
 
 ### Phase 5: Verification & Benchmarking
 - [x] **Task 5.1:** Offline unit tests using synthetic nozzle sample images across diverse illumination profiles (14 unit/integration tests).

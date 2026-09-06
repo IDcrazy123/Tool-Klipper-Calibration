@@ -132,10 +132,14 @@ class ConfigManager:
             existing_keys = set()
             for idx in range(section_start + 1, section_end):
                 line = lines[idx].strip()
-                for key, val_str in formatted_values.items():
-                    if line.startswith(f"{key}:") or line.startswith(f"{key}="):
-                        lines[idx] = f"{key}: {val_str}\n"
-                        existing_keys.add(key)
+                if not line or line.startswith("#"):
+                    continue
+                delimiter = ":" if ":" in line else "=" if "=" in line else None
+                if delimiter:
+                    found_key = line.split(delimiter, 1)[0].strip()
+                    if found_key in formatted_values:
+                        lines[idx] = f"{found_key}: {formatted_values[found_key]}\n"
+                        existing_keys.add(found_key)
 
             missing_keys = [k for k in formatted_values if k not in existing_keys]
             if missing_keys:

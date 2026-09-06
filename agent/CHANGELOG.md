@@ -8,8 +8,21 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
-## [0.8.12] - 2026-09-06
+## [0.8.13] - 2026-09-06
 ### Added
+- **Decoupled XY and Z Calibration for Non-Homogeneous Hardware:**
+  - Decoupled `tool_offsets` dictionary in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py) so that unmeasured axes are never initialized or overwritten with zero (`0.000`).
+  - Added dedicated XY-only and Z-only macros in [macros/tool_calibrator_macros.cfg](file:///d:/Desktop/Tool-Klipper-Calibration/macros/tool_calibrator_macros.cfg):
+    - `CALIBRATE_TOOLS_XY`: Runs optical XY calibration on all tools (or filtered `TOOLS`), preserving existing Z offsets 100%.
+    - `CALIBRATE_TOOLS_Z`: Runs Z probing calibration on all tools (or filtered `TOOLS`), preserving existing XY offsets 100%.
+    - `CALIBRATE_TOOL_XY`: Runs optical XY calibration on a specific single tool (`TOOL=x`).
+    - `CALIBRATE_TOOL_Z`: Runs Z probing calibration on a specific single tool (`TOOL=x`).
+  - Conditioned pre-flight Vision Service ping check on `calibrate_xy`, allowing users without a camera or vision service running to perform Z-only probe calibration seamlessly.
+  - Enhanced [klippy/extras/config_manager.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/config_manager.py) to match existing configuration keys robustly across colon (`:`) and equals (`=`) delimiters with arbitrary whitespace.
+- **Unit Tests & Documentation:**
+  - Added unit tests `test_calibrate_xy_only_preserves_existing_z` and `test_calibrate_z_only_preserves_existing_xy` in [tests/test_calibration_cycle.py](file:///d:/Desktop/Tool-Klipper-Calibration/tests/test_calibration_cycle.py).
+  - Updated [docs/QUY_TRINH_VAN_HANH.md](file:///d:/Desktop/Tool-Klipper-Calibration/docs/QUY_TRINH_VAN_HANH.md) with separate workflows for XY-only, Z-only, and joint calibrations.
+  - Test suite passing at **55/55 tests** (100%).
 - **Interactive Navigation & Inspection Commands in Klipper Extension:**
   - Added `CALIBRATION_NAVIGATE STATION=CAMERA|SWITCH|DEPART` for safe 3-tier transit between optical station, probe station, and safe altitude.
   - Added `CALIBRATION_CENTER_NOZZLE` for on-demand visual servoing centering on the active toolhead.
