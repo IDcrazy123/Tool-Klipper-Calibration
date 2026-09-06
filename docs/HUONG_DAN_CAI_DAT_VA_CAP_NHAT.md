@@ -50,24 +50,27 @@ git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 ```
 
 ### Bước 2.3: Chạy script cài đặt tự động
-Di chuyển vào thư mục dự án và thực thi installer (script đã có sẵn quyền thực thi trong Git):
+Di chuyển vào thư mục dự án và thực thi installer:
 ```bash
 cd ~/Tool-Klipper-Calibration
 ./scripts/install.sh
-# Hoặc nếu không có quyền sudo / muốn chạy dưới dạng user service không cần root:
+# Hoặc chế độ user-service (rootless, không cần quyền sudo):
 # ./scripts/install.sh --user-service
+
+# Hoặc nếu máy in tổ chức cấu hình theo thư mục con (ví dụ: Printer-Setup):
+# ./scripts/install.sh --user-service --config-subdir Printer-Setup
 ```
 
 **Bộ cài đặt sẽ tự động thực hiện:**
 1. Kiểm tra môi trường hệ thống (ngăn ngừa chạy nhầm bằng `sudo`).
 2. Kiểm tra các gói hệ thống cần thiết (`libgl1`, `libglib2.0-0`, `curl`) và khả năng tạo virtualenv.
 3. Khởi tạo Python virtual environment độc lập tại `~/Tool-Klipper-Calibration/env`.
-4. Cài đặt các thư viện xử lý ảnh: `opencv-python-headless`, `numpy`, `flask`, `waitress`.
-5. Tạo symlink các module Klipper extras vào `~/klipper/klippy/extras/` và symlink bộ macro vào `~/printer_data/config/tool_calibrator/`.
-6. Khởi tạo sẵn tệp `~/printer_data/config/tool_offsets.cfg` (ngăn lỗi `Include file does not exist` khi khởi động Klipper).
-7. Cấu hình Moonraker (ASVC allowlist & khối `[update_manager tool_calibrator]` có sao lưu timestamp `.bak_YYYYMMDD_HHMMSS`).
+4. Cài đặt các thư viện xử lý ảnh: `opencv-python-headless`, `numpy`, `flask`, `waitress` với file constraints ổn định.
+5. Tạo symlink các module Klipper extras vào `~/klipper/klippy/extras/` và symlink bộ macro vào thư mục cấu hình mục tiêu (`~/printer_data/config/[subdir/]tool_calibrator/`).
+6. Khởi tạo sẵn tệp `tool_offsets.cfg` (ngăn lỗi `Include file does not exist` khi khởi động Klipper).
+7. Cấu hình Moonraker (ASVC allowlist, khối `[update_manager tool_calibrator]`, hook tự động restart daemon khi update).
 8. Đăng ký và kích hoạt dịch vụ `tool_calibrator.service` (hỗ trợ cả `--system-service` và `--user-service`).
-9. Khởi động lại Klipper và Moonraker để nạp ngay các module mới.
+9. Khởi động lại Klipper và Moonraker qua API hoặc systemd để nạp ngay các module mới.
 10. Kiểm tra nghiêm ngặt phản hồi JSON từ endpoint `/health` trên cổng `8090`.
 
 ### Bước 2.4: Kiểm tra trạng thái dịch vụ sau khi cài
@@ -80,16 +83,29 @@ Kết quả mong đợi:
 {
   "status": "ok",
   "service": "tool_calibrator_server",
-  "version": "0.8.19",
-  "commit": "...",
+  "version": "v0.8.19",
+  "commit": "6c721e5",
+  "process_ready": true,
+  "camera_ready": true,
+  "scale_ready": false,
+  "matrix_ready": false,
   "matrix_solved": false,
   "session_locked": false
 }
 ```
 
-Kiểm tra trạng thái systemd:
+Kiểm tra hoặc khởi động lại service:
 ```bash
-systemctl status tool_calibrator.service
+# Đối với system service:
+sudo systemctl status tool_calibrator.service
+sudo systemctl restart tool_calibrator.service
+
+# Đối với user service:
+systemctl --user status tool_calibrator.service
+systemctl --user restart tool_calibrator.service
+
+# Hoặc dùng công cụ tích hợp tự nhận diện:
+./scripts/restart_service.sh
 ```
 
 ---
@@ -189,31 +205,36 @@ Nếu bạn không còn nhu cầu sử dụng và muốn đưa máy in về tr�
 ```bash
 cd ~/Tool-Klipper-Calibration
 ./scripts/uninstall.sh
-# Hoặc nếu muốn giữ lại file cấu hình tool_offsets.cfg mà không lưu trữ:
+# Hoặc nếu muốn giữ lại file cấu hình tool_offsets.cfg:
 # ./scripts/uninstall.sh --keep-data
+
+# Hoặc nếu máy in sử dụng thư mục con cấu hình:
+# ./scripts/uninstall.sh --config-subdir Printer-Setup
 ```
 
 **Script sẽ tự động:**
-1. Dừng và vô hiệu hóa `tool_calibrator.service` (cả ở cấp hệ thống lẫn người dùng).
-2. Xóa file unit service (`/etc/systemd/system/tool_calibrator.service` hoặc `~/.config/systemd/user/...`).
-3. Gỡ bỏ an toàn các symlinks do TKC tạo trong `~/klipper/klippy/extras/` (không xóa nhầm tệp của bên thứ ba).
-4. Gỡ bỏ thư mục symlink macro `~/printer_data/config/tool_calibrator/`.
-5. Tự động lưu trữ tệp cấu hình `tool_offsets.cfg` thành bản sao lưu có timestamp `.archived_YYYYMMDD_HHMMSS`.
-6. Xóa `tool_calibrator` khỏi `~/printer_data/moonraker.asvc`.
-7. Gỡ bỏ khối `[update_manager tool_calibrator]` khỏi `moonraker.conf` (có lưu bản backup timestamp).
-8. Xóa môi trường ảo `~/Tool-Klipper-Calibration/env`.
-9. Khởi động lại Moonraker và Klipper.
+1. Dừng và vô hiệu hóa `tool_calibrator.service` (tự động phát hiện cả chế độ system và user).
+2. Xóa file service unit (`/etc/systemd/system/tool_calibrator.service` hoặc `~/.config/systemd/user/...`).
+3. Gỡ bỏ an toàn các symlinks do TKC tạo trong `~/klipper/klippy/extras/` (tuyệt đối không xóa nhầm tệp của bên thứ ba).
+4. Gỡ bỏ symlink macros mà không dùng `rm -rf` (chỉ xóa symlink macros của TKC và dọn thư mục rỗng).
+5. Tự động tìm và comment an toàn các dòng `[include ...tool_offsets.cfg]` trong `printer.cfg` (có lưu bản sao lưu timestamp) để ngăn lỗi Klipper không thể khởi động do thiếu tệp include.
+6. Lưu trữ tệp cấu hình `tool_offsets.cfg` thành bản sao lưu timestamp `.archived_YYYYMMDD_HHMMSS` (trừ khi bật `--keep-data`).
+7. Xóa `tool_calibrator` khỏi `~/printer_data/moonraker.asvc`.
+8. Gỡ bỏ khối `[update_manager tool_calibrator]` khỏi `moonraker.conf` (có lưu bản backup timestamp).
+9. Xóa môi trường ảo `~/Tool-Klipper-Calibration/env`.
+10. Tự động gửi lệnh khởi động lại Klipper và Moonraker qua API hoặc systemd.
 
-### Bước 5.2: Dọn dẹp `printer.cfg`
-Mở `printer.cfg` trên giao diện web và xóa (hoặc comment dấu `#`) dòng:
-```ini
-# [include tool_calibrator/tool_calibrator_macros.cfg]
-# [include tool_calibrator/safe_staging_macros.cfg]
-# [include tool_offsets.cfg]
-# [tool_calibrator]
-# ...
-```
-Sau đó nhấn **Save & Restart**.
+### Bước 5.2: Bảng kiểm tra tàn dư sau gỡ cài đặt (Residue Checklist)
+
+| Mục kiểm tra | Chế độ System Service | Chế độ User Service | Trạng thái sau gỡ |
+|---|---|---|---|
+| Dịch vụ chạy nền | `/etc/systemd/system/tool_calibrator.service` | `~/.config/systemd/user/tool_calibrator.service` | Đã xóa, cổng 8090 đóng |
+| Klipper Extras | `~/klipper/klippy/extras/tool_calibrator*.py` | `~/klipper/klippy/extras/tool_calibrator*.py` | Đã gỡ symlinks |
+| Macros | `[config_dir]/tool_calibrator/` | `[config_dir]/tool_calibrator/` | Đã xóa symlinks |
+| Moonraker ASVC | `~/printer_data/moonraker.asvc` | N/A | Đã xóa dòng `tool_calibrator` |
+| Update Manager | Khối `[update_manager tool_calibrator]` | Khối `[update_manager tool_calibrator]` | Đã dọn sạch |
+| Includes trong `printer.cfg` | Dòng `[include ...tool_offsets.cfg]` | Dòng `[include ...tool_offsets.cfg]` | Đã tự động comment `#` |
+| Dữ liệu đã lưu | `tool_offsets.cfg` | `tool_offsets.cfg` | Đã chuyển thành `.archived_*` |
 
 ---
 

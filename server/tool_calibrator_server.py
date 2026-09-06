@@ -9,13 +9,19 @@ to avoid reactor latency and emergency shutdowns.
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
 from typing import Dict, Any, Tuple, Optional, List
+import cv2
 import numpy as np
+import requests
+import urllib3
 
+import flask
 from flask import Flask, jsonify, request, Response, render_template
+import waitress
 from waitress import serve
 
 try:
@@ -111,27 +117,45 @@ def dashboard():
     return render_template("index.html")
 
 
-def _get_git_commit() -> str:
-    """Retrieves current Git short commit hash for telemetry and diagnostics."""
+def _get_git_version() -> str:
+    """Retrieves current Git tag / version if running from git checkout."""
     try:
-        import subprocess
         repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_dir,
-            stderr=subprocess.DEVNULL,
-            universal_newlines=True
-        ).strip()
-        if commit:
-            dirty = subprocess.check_output(
-                ["git", "status", "--porcelain"],
+        if os.path.isdir(os.path.join(repo_dir, ".git")):
+            ver = subprocess.check_output(
+                ["git", "describe", "--tags", "--always"],
                 cwd=repo_dir,
                 stderr=subprocess.DEVNULL,
                 universal_newlines=True
             ).strip()
-            if dirty:
-                commit += "-dirty"
-            return commit
+            if ver:
+                return ver
+    except Exception:
+        pass
+    return "v0.8.19"
+
+
+def _get_git_commit() -> str:
+    """Retrieves current Git short commit hash for telemetry and diagnostics."""
+    try:
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if os.path.isdir(os.path.join(repo_dir, ".git")):
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=repo_dir,
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True
+            ).strip()
+            if commit:
+                dirty = subprocess.check_output(
+                    ["git", "status", "--porcelain"],
+                    cwd=repo_dir,
+                    stderr=subprocess.DEVNULL,
+                    universal_newlines=True
+                ).strip()
+                if dirty:
+                    commit += "-dirty"
+                return commit
     except Exception:
         pass
     return "unknown"
@@ -140,15 +164,44 @@ def _get_git_commit() -> str:
 @app.route("/health", methods=["GET"])
 def health_check():
     """Service health and readiness check."""
+    camera_configured = bool(grabber.camera_url and grabber.camera_url != "http://localhost/webcam2/?action=snapshot")
+    scale_ready = bool(solver.mpp is not None and solver.mpp > 0.0)
+    matrix_ready = bool(solver.transform_matrix is not None)
+
+    camera_ready = camera_configured
+    if request.args.get("check_camera") in ("1", "true", "yes"):
+        frame, err = grabber.grab_frame()
+        camera_ready = (frame is not None)
+
+    try:
+        import importlib.metadata
+        flask_ver = importlib.metadata.version("flask")
+    except Exception:
+        flask_ver = getattr(flask, "__version__", "unknown")
+
+    deps = {
+        "opencv": str(cv2.__version__),
+        "numpy": str(np.__version__),
+        "flask": str(flask_ver),
+        "requests": str(requests.__version__),
+        "waitress": str(getattr(waitress, "__version__", "unknown")),
+        "urllib3": str(urllib3.__version__)
+    }
+
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.8.19",
+        "version": _get_git_version(),
         "commit": _get_git_commit(),
+        "process_ready": True,
+        "camera_ready": camera_ready,
+        "scale_ready": scale_ready,
+        "matrix_ready": matrix_ready,
         "camera_url": grabber.camera_url,
-        "matrix_solved": solver.transform_matrix is not None,
-        "has_matrix": solver.transform_matrix is not None,
+        "matrix_solved": matrix_ready,
+        "has_matrix": matrix_ready,
         "calibrated_mpp": solver.mpp,
+        "dependencies": deps,
         "session_locked": calibration_lock["session_id"] is not None,
         "abort_requested": calibration_lock.get("abort_requested", False)
     }), 200
@@ -290,6 +343,12 @@ def detect_nozzle():
         min_matches = int(data.get("min_matches", 1))
         timeout = float(data.get("timeout", 5.0))
         tolerance_px = float(data.get("tolerance_px", 1.5))
+        if "min_confidence" in data:
+            detector.min_confidence = float(data["min_confidence"])
+        if "min_radius" in data:
+            detector.min_radius = float(data["min_radius"])
+        if "max_radius" in data:
+            detector.max_radius = float(data["max_radius"])
 
         start_time = time.time()
         last_uv = None

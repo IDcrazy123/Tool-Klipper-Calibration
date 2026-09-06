@@ -17,22 +17,36 @@ echo -e "${BLUE}====================================================${NC}"
 
 # Parse optional arguments
 SERVICE_MODE="system"
-for arg in "$@"; do
-    case "${arg}" in
+CONFIG_SUBDIR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --user-service)
             SERVICE_MODE="user"
+            shift
             ;;
         --system-service)
             SERVICE_MODE="system"
+            shift
+            ;;
+        --config-subdir)
+            CONFIG_SUBDIR="$2"
+            shift 2
+            ;;
+        --config-subdir=*)
+            CONFIG_SUBDIR="${1#*=}"
+            shift
             ;;
         --help|-h)
-            echo "Usage: ./scripts/install.sh [--system-service | --user-service]"
-            echo "  --system-service : Install system-wide systemd unit in /etc/systemd/system (default, requires sudo)"
-            echo "  --user-service   : Install user-level systemd unit in ~/.config/systemd/user (rootless)"
+            echo "Usage: ./scripts/install.sh [--system-service | --user-service] [--config-subdir <subdir>]"
+            echo "  --system-service         : Install system-wide systemd unit in /etc/systemd/system (default, requires sudo)"
+            echo "  --user-service           : Install user-level systemd unit in ~/.config/systemd/user (rootless)"
+            echo "  --config-subdir <subdir> : Machine-specific configuration subdirectory (e.g. Printer-Setup)"
             exit 0
             ;;
         *)
-            echo -e "${YELLOW}[!] Unknown option: ${arg}${NC}"
+            echo -e "${YELLOW}[!] Unknown option: $1${NC}"
+            shift
             ;;
     esac
 done
@@ -49,7 +63,7 @@ fi
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CURRENT_USER="$(id -un)"
 VENV_DIR="${REPO_DIR}/env"
-MANIFEST_FILE="${REPO_DIR}/.install_manifest.txt"
+JOURNAL_FILE="${REPO_DIR}/.install_manifest.txt"
 
 KLIPPER_DIR="${HOME}/klipper"
 if [ ! -d "${KLIPPER_DIR}" ]; then
@@ -71,21 +85,30 @@ if [ ! -d "${CONFIG_DIR}" ]; then
     fi
 fi
 
-echo -e "${GREEN}[+] Repo directory:       ${REPO_DIR}${NC}"
-echo -e "${GREEN}[+] Klipper directory:    ${KLIPPER_DIR}${NC}"
-echo -e "${GREEN}[+] Config directory:     ${CONFIG_DIR}${NC}"
-echo -e "${GREEN}[+] Python virtualenv:    ${VENV_DIR}${NC}"
-echo -e "${GREEN}[+] Service mode:         ${SERVICE_MODE}${NC}"
+TARGET_CONFIG_DIR="${CONFIG_DIR}"
+if [ -n "${CONFIG_SUBDIR}" ]; then
+    TARGET_CONFIG_DIR="${CONFIG_DIR}/${CONFIG_SUBDIR}"
+fi
+mkdir -p "${TARGET_CONFIG_DIR}"
 
-# Setup Transactional Rollback
-rm -f "${MANIFEST_FILE}"
-touch "${MANIFEST_FILE}"
+PERSISTENT_MANIFEST="${TARGET_CONFIG_DIR}/.tool_calibrator_manifest.json"
+
+echo -e "${GREEN}[+] Repo directory:          ${REPO_DIR}${NC}"
+echo -e "${GREEN}[+] Klipper directory:       ${KLIPPER_DIR}${NC}"
+echo -e "${GREEN}[+] Config directory:        ${TARGET_CONFIG_DIR}${NC}"
+echo -e "${GREEN}[+] Python virtualenv:       ${VENV_DIR}${NC}"
+echo -e "${GREEN}[+] Service mode:            ${SERVICE_MODE}${NC}"
+
+# Setup Transactional Rollback Journal
+rm -f "${JOURNAL_FILE}"
+touch "${JOURNAL_FILE}"
 
 cleanup_on_error() {
     local exit_code=$?
-    echo -e "\n${RED}[ERR] Quá trình cài đặt bị gián đoạn (Exit code: ${exit_code})! Đang hoàn tác...${NC}"
-    if [ -f "${MANIFEST_FILE}" ]; then
-        while IFS= read -r line || [ -n "${line}" ]; do
+    echo -e "\n${RED}[ERR] Quá trình cài đặt bị gián đoạn (Exit code: ${exit_code})! Đang hoàn tác theo thứ tự ngược lại...${NC}"
+    if [ -f "${JOURNAL_FILE}" ]; then
+        # Rollback in reverse order
+        tac "${JOURNAL_FILE}" 2>/dev/null || cat "${JOURNAL_FILE}" | while IFS= read -r line || [ -n "${line}" ]; do
             key="$(echo "${line}" | cut -d'=' -f1)"
             val="$(echo "${line}" | cut -d'=' -f2-)"
             case "${key}" in
@@ -95,14 +118,17 @@ cleanup_on_error() {
                 FILE)
                     [ -f "${val}" ] && rm -f "${val}"
                     ;;
+                DIR)
+                    [ -d "${val}" ] && rmdir "${val}" 2>/dev/null || true
+                    ;;
                 BACKUP)
                     src="$(echo "${val}" | cut -d':' -f1)"
                     dst="$(echo "${val}" | cut -d':' -f2)"
                     [ -f "${src}" ] && cp -f "${src}" "${dst}"
                     ;;
             esac
-        done < "${MANIFEST_FILE}"
-        rm -f "${MANIFEST_FILE}"
+        done
+        rm -f "${JOURNAL_FILE}"
     fi
     echo -e "${YELLOW}[!] Đã hoàn tác các thay đổi tạm thời. Vui lòng kiểm tra lỗi trước khi thử lại.${NC}"
     exit "${exit_code}"
@@ -164,7 +190,11 @@ fi
 
 echo -e "${GREEN}[+] Đang nâng cấp pip và cài đặt thư viện từ server/requirements.txt...${NC}"
 "${VENV_DIR}/bin/pip" install --upgrade pip
-"${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt"
+if [ -f "${REPO_DIR}/server/constraints.txt" ]; then
+    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt" -c "${REPO_DIR}/server/constraints.txt" || "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt"
+else
+    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt"
+fi
 
 # 4. Link Klipper Extras & Macro Bundle
 echo -e "\n${BLUE}[3/6] Tạo liên kết tượng trưng (Symlinks) vào Klipper extras & macros...${NC}"
@@ -180,7 +210,7 @@ for file in "tool_calibrator.py" "tool_calibrator_station.py" "tool_offsets.py" 
     TARGET="${KLIPPY_EXTRAS}/${file}"
     SOURCE="${REPO_DIR}/klippy/extras/${file}"
     ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${MANIFEST_FILE}"
+    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}    Linked ${file} -> ${KLIPPY_EXTRAS}/${NC}"
 done
 
@@ -188,24 +218,25 @@ for zb_file in "__init__.py" "base_z.py" "switch_backend.py" "cartographer_backe
     TARGET="${KLIPPY_EXTRAS}/z_backends/${zb_file}"
     SOURCE="${REPO_DIR}/klippy/extras/z_backends/${zb_file}"
     ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${MANIFEST_FILE}"
+    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}    Linked z_backends/${zb_file} -> ${KLIPPY_EXTRAS}/z_backends/${NC}"
 done
 
-# Setup Macro Bundle under printer config directory
-MACRO_DIR="${CONFIG_DIR}/tool_calibrator"
+# Setup Macro Bundle under target config directory
+MACRO_DIR="${TARGET_CONFIG_DIR}/tool_calibrator"
 mkdir -p "${MACRO_DIR}"
+echo "DIR=${MACRO_DIR}" >> "${JOURNAL_FILE}"
 
 for macro_file in "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
     TARGET="${MACRO_DIR}/${macro_file}"
     SOURCE="${REPO_DIR}/macros/${macro_file}"
     ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${MANIFEST_FILE}"
+    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}    Linked ${macro_file} -> ${MACRO_DIR}/${NC}"
 done
 
 # Ensure tool_offsets.cfg placeholder exists to prevent Klipper startup include errors
-OFFSETS_CFG="${CONFIG_DIR}/tool_offsets.cfg"
+OFFSETS_CFG="${TARGET_CONFIG_DIR}/tool_offsets.cfg"
 if [ ! -f "${OFFSETS_CFG}" ]; then
     echo -e "${CYAN}[+] Khởi tạo tệp cấu hình ban đầu: ${OFFSETS_CFG}...${NC}"
     cat > "${OFFSETS_CFG}" << 'EOF'
@@ -215,7 +246,7 @@ if [ ! -f "${OFFSETS_CFG}" ]; then
 
 # Calibrated station waypoints and tool offsets will be automatically written here.
 EOF
-    echo "FILE=${OFFSETS_CFG}" >> "${MANIFEST_FILE}"
+    echo "FILE=${OFFSETS_CFG}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}[✔] Đã tạo file ${OFFSETS_CFG} (ngăn lỗi missing include khi Klipper khởi động).${NC}"
 fi
 
@@ -241,7 +272,7 @@ if [ -f "${MOONRAKER_CONF}" ]; then
         TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
         BACKUP_CONF="${MOONRAKER_CONF}.bak_${TIMESTAMP}"
         cp "${MOONRAKER_CONF}" "${BACKUP_CONF}"
-        echo "BACKUP=${BACKUP_CONF}:${MOONRAKER_CONF}" >> "${MANIFEST_FILE}"
+        echo "BACKUP=${BACKUP_CONF}:${MOONRAKER_CONF}" >> "${JOURNAL_FILE}"
 
         if [ "${SERVICE_MODE}" = "system" ]; then
             cat >> "${MOONRAKER_CONF}" << EOF
@@ -270,6 +301,7 @@ origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 primary_branch: main
 virtualenv: ${VENV_DIR}
 requirements: server/requirements.txt
+install_script: scripts/update_hook.sh
 is_system_service: False
 managed_services:
     klipper
@@ -320,39 +352,65 @@ else
     systemctl --user restart tool_calibrator.service
 fi
 
-# Khởi động lại Moonraker và Klipper để nhận diện service và module mới
-if systemctl is-active --quiet moonraker.service 2>/dev/null; then
-    echo -e "${GREEN}[+] Khởi động lại Moonraker...${NC}"
-    sudo systemctl restart moonraker.service || true
-fi
-if systemctl is-active --quiet klipper.service 2>/dev/null; then
-    echo -e "${GREEN}[+] Khởi động lại Klipper để nạp các module extras...${NC}"
-    sudo systemctl restart klipper.service || true
+# Restart Moonraker and Klipper
+RELOAD_SUCCESS=true
+if [ "${SERVICE_MODE}" = "system" ]; then
+    if systemctl is-active --quiet moonraker.service 2>/dev/null; then
+        echo -e "${GREEN}[+] Khởi động lại Moonraker...${NC}"
+        sudo systemctl restart moonraker.service || RELOAD_SUCCESS=false
+    fi
+    if systemctl is-active --quiet klipper.service 2>/dev/null; then
+        echo -e "${GREEN}[+] Khởi động lại Klipper để nạp các module extras...${NC}"
+        sudo systemctl restart klipper.service || RELOAD_SUCCESS=false
+    fi
+else
+    echo -e "${CYAN}[+] Đang khởi động lại dịch vụ qua Moonraker API hoặc sudo...${NC}"
+    API_SUCCESS=false
+    if curl -sS --fail --max-time 3 -X POST "http://127.0.0.1:7125/machine/services/restart?service=klipper" >/dev/null 2>&1; then
+        echo -e "${GREEN}[✔] Đã gửi yêu cầu khởi động lại Klipper qua Moonraker API.${NC}"
+        API_SUCCESS=true
+    fi
+    if curl -sS --fail --max-time 3 -X POST "http://127.0.0.1:7125/machine/services/restart?service=moonraker" >/dev/null 2>&1; then
+        echo -e "${GREEN}[✔] Đã gửi yêu cầu khởi động lại Moonraker qua Moonraker API.${NC}"
+    fi
+
+    if [ "${API_SUCCESS}" = false ]; then
+        if sudo -n true 2>/dev/null; then
+            sudo systemctl restart moonraker.service || true
+            sudo systemctl restart klipper.service || true
+        else
+            RELOAD_SUCCESS=false
+        fi
+    fi
 fi
 
 # 7. Verify Service Health
 echo -e "\n${BLUE}[6/6] Kiểm tra trạng thái Vision Server daemon...${NC}"
 HEALTH_SUCCESS=false
-VERSION_INFO=""
+HEALTH_OUTPUT=""
+
 for i in {1..10}; do
     HEALTH_RESP=$(curl -sS --fail --max-time 3 http://127.0.0.1:8090/health 2>/dev/null || true)
     if [ -n "${HEALTH_RESP}" ]; then
-        HEALTH_CHECK=$(python3 -c "
+        HEALTH_OUTPUT=$(python3 -c "
 import sys, json
 try:
     data = json.loads('''${HEALTH_RESP}''')
     if data.get('status') == 'ok' and data.get('service') == 'tool_calibrator_server':
-        v = data.get('version', '')
-        c = data.get('commit', '')
-        print(f'OK {v} {c}'.strip())
+        ver = data.get('version', 'unknown')
+        cmt = data.get('commit', 'unknown')
+        proc = data.get('process_ready', True)
+        cam = 'YES' if data.get('camera_ready') else 'PENDING/OFFLINE'
+        scale = 'SOLVED' if data.get('scale_ready') else 'NOT_SET'
+        mat = 'LOADED' if data.get('matrix_ready') else 'NOT_SET'
+        print(f'{ver} (Commit: {cmt}) | Process: READY | Camera: {cam} | Scale: {scale} | Matrix: {mat}')
         sys.exit(0)
-except Exception:
+except Exception as ex:
     pass
 sys.exit(1)
 " 2>/dev/null || true)
-        if [[ "${HEALTH_CHECK}" =~ ^OK ]]; then
+        if [ -n "${HEALTH_OUTPUT}" ]; then
             HEALTH_SUCCESS=true
-            VERSION_INFO=$(echo "${HEALTH_CHECK}" | cut -d' ' -f2-)
             break
         fi
     fi
@@ -360,7 +418,8 @@ sys.exit(1)
 done
 
 if [ "${HEALTH_SUCCESS}" = true ]; then
-    echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090 (${VERSION_INFO})${NC}"
+    echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090${NC}"
+    echo -e "${CYAN}    Chi tiết: ${HEALTH_OUTPUT}${NC}"
 else
     echo -e "${RED}[ERR] Service không khởi động được hoặc phản hồi /health không hợp lệ!${NC}"
     echo -e "${YELLOW}Log chi tiết từ journalctl:${NC}"
@@ -372,18 +431,51 @@ else
     exit 1
 fi
 
-# Clear manifest on clean success
-rm -f "${MANIFEST_FILE}"
+# Write persistent manifest for safe uninstall and upgrade tracking
+python3 -c "
+import json, time
+manifest = {
+    'installed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    'service_mode': '${SERVICE_MODE}',
+    'config_subdir': '${CONFIG_SUBDIR}',
+    'target_config_dir': '${TARGET_CONFIG_DIR}',
+    'macro_dir': '${MACRO_DIR}',
+    'offsets_cfg': '${OFFSETS_CFG}',
+    'version': '${HEALTH_OUTPUT}'
+}
+with open('${PERSISTENT_MANIFEST}', 'w') as f:
+    json.dump(manifest, f, indent=2)
+" 2>/dev/null || true
+
+# Clear temporary rollback journal
+rm -f "${JOURNAL_FILE}"
 trap - ERR
+
+if [ "${RELOAD_SUCCESS}" = false ]; then
+    echo -e "\n${YELLOW}====================================================${NC}"
+    echo -e "${YELLOW}    LƯU Ý: CẦN KHỞI ĐỘNG LẠI DỊCH VỤ THỦ CÔNG       ${NC}"
+    echo -e "${YELLOW}====================================================${NC}"
+    echo -e "${YELLOW}[!] Do script chạy chế độ user và không có quyền sudo trực tiếp,${NC}"
+    echo -e "${YELLOW}    hãy khởi động lại dịch vụ trong Mainsail/Fluidd hoặc chạy:${NC}"
+    echo -e "    - sudo systemctl restart moonraker.service"
+    echo -e "    - sudo systemctl restart klipper.service"
+fi
 
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}    CÀI ĐẶT HOÀN TẤT THÀNH CÔNG!                     ${NC}"
 echo -e "${GREEN}====================================================${NC}"
 echo -e "${CYAN}Các bước tiếp theo trong printer.cfg:${NC}"
-echo -e "1. Thêm include macro:"
-echo -e "   ${YELLOW}[include tool_calibrator/tool_calibrator_macros.cfg]${NC}"
-echo -e "   ${YELLOW}[include tool_calibrator/safe_staging_macros.cfg]${NC}"
-echo -e "   ${YELLOW}[include tool_offsets.cfg]${NC}"
+if [ -n "${CONFIG_SUBDIR}" ]; then
+    echo -e "1. Thêm include macro:"
+    echo -e "   ${YELLOW}[include ${CONFIG_SUBDIR}/tool_calibrator/tool_calibrator_macros.cfg]${NC}"
+    echo -e "   ${YELLOW}[include ${CONFIG_SUBDIR}/tool_calibrator/safe_staging_macros.cfg]${NC}"
+    echo -e "   ${YELLOW}[include ${CONFIG_SUBDIR}/tool_offsets.cfg]${NC}"
+else
+    echo -e "1. Thêm include macro:"
+    echo -e "   ${YELLOW}[include tool_calibrator/tool_calibrator_macros.cfg]${NC}"
+    echo -e "   ${YELLOW}[include tool_calibrator/safe_staging_macros.cfg]${NC}"
+    echo -e "   ${YELLOW}[include tool_offsets.cfg]${NC}"
+fi
 echo -e "2. Cấu hình khối [tool_calibrator] (tham khảo macros/sample_tool_calibrator.cfg)."
 echo -e "3. Vào Mainsail/Fluidd -> Settings -> Update Manager để kiểm tra trạng thái cập nhật!"
 echo ""

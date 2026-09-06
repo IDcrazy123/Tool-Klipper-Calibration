@@ -72,11 +72,19 @@ class DummyToolhead:
 
 
 class DummyReactor:
+    def __init__(self):
+        self.callbacks = []
+        self.pause_allowed = True
+
     def monotonic(self):
         return 0.0
 
     def pause(self, until):
-        pass
+        if not self.pause_allowed:
+            raise Exception("Internal error - reactor pause disabled")
+
+    def register_callback(self, cb):
+        self.callbacks.append(cb)
 
 
 class DummyTemplateWrapper:
@@ -1173,6 +1181,94 @@ class TestCalibrationCycle(unittest.TestCase):
         calibrator.cmd_CALIBRATION_TEST_VISION(gcmd)
 
         self.assertTrue(len(sync_called) > 0, "_ensure_vision_sync was not called during cmd_CALIBRATION_TEST_VISION")
+
+    def test_handle_klippy_ready_schedules_delayed_sync(self):
+        """_handle_klippy_ready must register callback with reactor rather than pausing synchronously."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.reactor.callbacks.clear()
+        calibrator._handle_klippy_ready()
+        self.assertEqual(len(calibrator.reactor.callbacks), 1)
+        self.assertEqual(calibrator.reactor.callbacks[0], calibrator._delayed_vision_sync)
+
+    def test_delayed_vision_sync_executes_ensure_vision_sync(self):
+        """_delayed_vision_sync executes _ensure_vision_sync safely."""
+        calibrator = ToolCalibrator(self.config)
+        called = []
+        calibrator._ensure_vision_sync = lambda: called.append(True)
+        calibrator._delayed_vision_sync(0.0)
+        self.assertEqual(len(called), 1)
+
+    def test_query_vision_fallback_when_pause_disabled(self):
+        """_query_vision must fallback to done_flag.wait without crashing when reactor pause is disabled."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.reactor.pause_allowed = False
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{"status": "ok", "service": "tool_calibrator_server"}'
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            result = calibrator._query_vision("health", timeout=1.0)
+            self.assertEqual(result.get("status"), "ok")
+
+    def test_calibration_test_vision_negative_does_not_raise(self):
+        """Negative test vision outputs clear report without raising GCode CommandError."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+        calibrator._sample_burst = MagicMock(return_value={"found": False, "reason": "Nozzle NOT detected"})
+
+        gcmd = DummyGCodeCommand({"SAMPLES": 3})
+        # Should NOT raise
+        calibrator.cmd_CALIBRATION_TEST_VISION(gcmd)
+        info_str = " ".join(gcmd.info_messages)
+        self.assertIn("Vision Inspection Report", info_str)
+        self.assertIn("Found:       NO", info_str)
+
+    def test_calibration_test_vision_restores_cleared_active_tool(self):
+        """If toolchanger active_tool becomes None during test vision, finally: restores it."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._ensure_vision_sync = MagicMock()
+
+        tc = calibrator.printer.lookup_object("toolchanger")
+        tc.active_tool = 2  # Active tool is T2
+
+        def corrupt_sample(*args, **kwargs):
+            # Simulate a side-effect that cleared active_tool
+            tc.active_tool = None
+            return {"found": True, "center_uv": [640.0, 360.0], "radius_px": 22.0, "confidence": 0.99, "spread_px": 0.05, "burst_count": 3, "burst_total": 3, "tier": 0, "combo": 10}
+
+        calibrator._sample_burst = corrupt_sample
+        gcmd = DummyGCodeCommand({"SAMPLES": 3})
+        calibrator.cmd_CALIBRATION_TEST_VISION(gcmd)
+
+        self.assertEqual(tc.active_tool, 2, "Toolchanger active_tool was not restored after test vision")
+
+    def test_sample_burst_quality_gates(self):
+        """_sample_burst filters out low-confidence (<0.70) and invalid radius features."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.min_detection_confidence = 0.70
+        calibrator.min_nozzle_radius = 10.0
+        calibrator.max_nozzle_radius = 55.0
+
+        # Frame 1: Low confidence (0.40, 20.0px) -> reject
+        # Frame 2: Low radius (0.90, 8.6px) -> reject
+        # Frame 3: Valid (0.95, 22.0px) -> accept
+        # Frame 4: Valid (0.96, 22.1px) -> accept
+        # Frame 5: Valid (0.95, 22.0px) -> accept
+        responses = [
+            {"found": True, "center_uv": [614.5, 270.4], "confidence": 0.40, "radius": 20.0},
+            {"found": True, "center_uv": [614.5, 270.4], "confidence": 0.90, "radius": 8.6},
+            {"found": True, "center_uv": [640.0, 360.0], "confidence": 0.95, "radius": 22.0},
+            {"found": True, "center_uv": [640.1, 360.1], "confidence": 0.96, "radius": 22.1},
+            {"found": True, "center_uv": [640.0, 360.0], "confidence": 0.95, "radius": 22.0},
+        ]
+        calibrator._query_vision = MagicMock(side_effect=responses)
+        toolhead = calibrator.printer.lookup_object("toolhead")
+        burst = calibrator._sample_burst(toolhead, samples=5)
+
+        self.assertTrue(burst.get("found"))
+        self.assertEqual(burst.get("burst_count"), 3)
+        self.assertAlmostEqual(burst.get("center_uv")[0], 640.0, places=1)
 
 
 if __name__ == "__main__":

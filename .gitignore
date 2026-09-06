@@ -61,3 +61,8 @@ test_output/
 References/
 Picture Screenshot/
 test_annotated_results/
+
+# Installation manifests and journals
+.install_manifest*
+*.manifest*
+.tool_calibrator_manifest*

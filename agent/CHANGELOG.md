@@ -8,6 +8,46 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.20] - 2026-09-06
+### Fixed
+- **1. User-Mode Non-Sudo Service & API Reloads**:
+  - `install.sh` and `uninstall.sh` now attempt reload of Moonraker and Klipper via Moonraker HTTP API (`/machine/services/restart`, `/printer/restart`, `/server/restart`) when running without passwordless sudo.
+  - If automatic service reload is not possible, explicit manual reload steps are reported to the operator.
+- **2. Klipper Reactor Pause Collision on `klippy:ready`**:
+  - `_handle_klippy_ready()` now registers a delayed callback `_delayed_vision_sync` via `reactor.register_callback()`, deferring synchronization until the reactor main dispatch loop is active where `pause_allowed` is True.
+  - In `_query_vision()`, added fallback from `reactor.pause()` to `done_flag.wait(0.05)` if `reactor.pause_allowed` is False or if `reactor.pause()` throws.
+  - Escalated sync failure logs for camera URL, MPP, and matrix re-sync from `debug` to `warning`.
+- **3. Readiness Disambiguation in Health Telemetry**:
+  - Expanded `/health` response with distinct boolean fields: `process_ready`, `camera_ready`, `scale_ready`, and `matrix_ready`.
+  - Added `dependencies` dictionary exposing runtime versions of OpenCV, NumPy, Flask, Waitress, Requests, and Urllib3.
+  - `install.sh` now displays full readiness breakdown upon installation verification.
+- **4. User-Service Update Daemon Restart Hook**:
+  - Added `scripts/update_hook.sh` (mode 100755) and registered it as `install_script` in the user-mode Moonraker Update Manager block.
+  - Added `scripts/restart_service.sh` (mode 100755) allowing operators to check and restart the service in either mode.
+  - Added source commit vs running daemon commit mismatch detection in `_ensure_vision_sync()`.
+- **5. Safe Uninstallation & Custom Layout Awareness**:
+  - Added `--config-subdir <subdir>` support to both `install.sh` and `uninstall.sh` for organized machine layouts (e.g. `Printer-Setup/`).
+  - `uninstall.sh` automatically comments out active `[include ...tool_offsets.cfg]` in `printer.cfg` (with timestamped backup) before archiving offsets, preventing Klipper missing-include startup crashes.
+  - Replaced `rm -rf` on macro directories with safe symlink removal and `rmdir` on empty folders only.
+- **6. Transactional Rollback Reverse Ordering & Clean Git Status**:
+  - Added `.install_manifest*`, `*.manifest*`, and `.tool_calibrator_manifest*` to `.gitignore`, preventing `-dirty` git status during installation.
+  - Rollback journal is now executed in reverse order upon error.
+  - Created persistent installation manifest `.tool_calibrator_manifest.json` in the target config directory for reliable upgrade and uninstall tracking.
+- **7. False Positive Elimination & Quality Gates**:
+  - Enforced configurable quality gates in `nozzle_detector.py` and `tool_calibrator.py`: `min_detection_confidence = 0.70`, `min_nozzle_radius = 10.0px`, `max_nozzle_radius = 55.0px`.
+  - Removed artificial `0.40` confidence clipping floor from `nozzle_detector.py`.
+  - Clamped `samples >= 3` in `cmd_CALIBRATION_CENTER_NOZZLE`, `cmd_CALIBRATE_TOOL_OFFSET`, and `cmd_CALIBRATION_TEACH_STATION` to disallow risky single-frame measurements that lead to motion or saved offsets.
+- **8. Toolchanger State Protection during Inspection Commands**:
+  - `cmd_CALIBRATION_TEST_VISION` now outputs negative detections cleanly via `gcmd.respond_info` rather than raising a G-code `CommandError`, preventing Klipper toolchanger error handlers from tripping into `uninitialized` state.
+  - `cmd_CALIBRATION_TEST_VISION` queries and stores `tc.active_tool` and restores it in `finally:` if it was inadvertently cleared.
+- **9. Reproducible Dependency Constraints**:
+  - Published `server/constraints.txt` containing verified pinned package versions for reference/reproducible lock installs.
+  - `install.sh` uses `-c server/constraints.txt` if present.
+- **10. Release Tagging & Metadata Alignment**:
+  - Server version derived dynamically from `git describe --tags --always`.
+  - Created release tag `v0.8.19` so Moonraker Update Manager recognizes true release tags instead of `v0.0.0-46`.
+  - Updated documentation with user vs system service differences, `--config-subdir` usage, and uninstall residue checklists.
+
 ## [0.8.19] - 2026-09-06
 ### Fixed
 - **[P1] Daemon Typing Imports & Dirty Status Telemetry**:

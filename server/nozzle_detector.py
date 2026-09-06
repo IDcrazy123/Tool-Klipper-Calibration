@@ -32,10 +32,20 @@ class NozzleDetector:
     Multi-stage OpenCV cascade blob detector for 3D printer nozzle orifices.
     """
 
-    def __init__(self, frame_width: int = 640, frame_height: int = 480) -> None:
+    def __init__(
+        self,
+        frame_width: int = 640,
+        frame_height: int = 480,
+        min_confidence: float = 0.45,
+        min_radius: float = 8.0,
+        max_radius: float = 55.0
+    ) -> None:
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.image_center = (frame_width / 2.0, frame_height / 2.0)
+        self.min_confidence = min_confidence
+        self.min_radius = min_radius
+        self.max_radius = max_radius
 
         # Gamma lookup table for contrast enhancement
         self._gamma_table = self._build_gamma_table(gamma=1.2)
@@ -528,11 +538,14 @@ class NozzleDetector:
 
             # False positive rejection: random noise, blank textures, or untextured frames
             lap_std = float(cv2.Laplacian(gray, cv2.CV_32F).std())
-            if lap_std < 0.5 or lap_std > 120.0 or contrast < 1.0 or continuity < 0.15:
+            tier_mult = 1.0 if matched_tier == 1 else (0.88 if matched_tier == 2 else 0.70)
+            dynamic_conf = round(float(np.clip(conf_val * tier_mult, 0.0, 0.99)), 3)
+
+            # Strict false-positive gating: texture, contrast/continuity, radius sanity, confidence floor
+            if (lap_std < 0.5 or lap_std > 120.0 or contrast < 1.0 or continuity < 0.15
+                    or radius < self.min_radius or radius > self.max_radius
+                    or dynamic_conf < self.min_confidence):
                 pt_x, pt_y = None, None
-            else:
-                tier_mult = 1.0 if matched_tier == 1 else (0.88 if matched_tier == 2 else 0.70)
-                dynamic_conf = round(float(np.clip(conf_val * tier_mult, 0.40, 0.99)), 3)
 
 
         if pt_x is not None and pt_y is not None:

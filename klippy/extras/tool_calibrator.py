@@ -107,6 +107,9 @@ class ToolCalibrator:
         self.cached_offsets: Dict[int, Dict[str, float]] = {}
         self.calibrated_mpp: Optional[float] = None
         self.physical_spread_limit_mm = config.getfloat("burst_spread_limit_mm", 0.08, minval=0.01, maxval=0.5)
+        self.min_detection_confidence = config.getfloat("min_detection_confidence", 0.70, minval=0.10, maxval=1.0)
+        self.min_nozzle_radius = config.getfloat("min_nozzle_radius", 10.0, minval=2.0, maxval=100.0)
+        self.max_nozzle_radius = config.getfloat("max_nozzle_radius", 55.0, minval=5.0, maxval=200.0)
         self.last_run_status = "UNINITIALIZED"
         self.cancel_requested = False
         self.run_record: Dict[str, Any] = {
@@ -164,11 +167,21 @@ class ToolCalibrator:
             self.printer.register_event_handler("klippy:ready", self._handle_klippy_ready)
 
     def _handle_klippy_ready(self) -> None:
-        """Called when Klipper is fully initialized; synchronizes camera URL and station data."""
+        """Called when Klipper is fully initialized; schedules vision sync on next reactor iteration."""
+        if hasattr(self.reactor, "register_callback"):
+            self.reactor.register_callback(self._delayed_vision_sync)
+        else:
+            try:
+                self._ensure_vision_sync()
+            except Exception as ex:
+                logger.warning(f"[tool_calibrator] Background vision sync on ready failed: {ex}")
+
+    def _delayed_vision_sync(self, eventtime: float) -> None:
+        """Executed on main reactor loop after ready dispatch completes with pause enabled."""
         try:
             self._ensure_vision_sync()
         except Exception as ex:
-            logger.debug(f"[tool_calibrator] Background vision sync on ready: {ex}")
+            logger.warning(f"[tool_calibrator] Scheduled vision sync on ready failed: {ex}")
 
     def _load_saved_stations(self) -> None:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
@@ -244,6 +257,22 @@ class ToolCalibrator:
         if self.navigator.switch_target_z is None and hasattr(tools_cal, "pin_loc_z") and tools_cal.pin_loc_z is not None:
             self.navigator.switch_target_z = float(tools_cal.pin_loc_z)
 
+    def _get_source_git_commit(self) -> str:
+        """Helper to retrieve current git commit hash of the local repository checkout."""
+        try:
+            import subprocess
+            repo_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if os.path.isdir(os.path.join(repo_dir, ".git")):
+                return subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=repo_dir,
+                    stderr=subprocess.DEVNULL,
+                    universal_newlines=True
+                ).strip()
+        except Exception:
+            pass
+        return ""
+
     def _ensure_vision_sync(self) -> None:
         """
         Validates Vision Service connectivity and re-synchronizes camera_stream_url,
@@ -255,6 +284,14 @@ class ToolCalibrator:
             logger.warning(f"Could not contact vision service health: {ex}")
             return
 
+        daemon_commit = str(health.get("commit", "unknown"))
+        src_commit = self._get_source_git_commit()
+        if src_commit and daemon_commit not in ("unknown", "") and src_commit != daemon_commit and not daemon_commit.startswith(src_commit):
+            logger.warning(
+                f"[tool_calibrator] Running vision daemon commit ({daemon_commit}) differs from active source commit ({src_commit})! "
+                f"Please restart vision service ('systemctl --user restart tool_calibrator.service' or 'sudo systemctl restart tool_calibrator.service')."
+            )
+
         has_mpp = bool(health.get("calibrated_mpp", False) or health.get("mpp", None))
         has_matrix = bool(health.get("matrix_solved", health.get("has_matrix", False)))
 
@@ -262,13 +299,13 @@ class ToolCalibrator:
             try:
                 self._query_vision("set_camera_url", {"url": self.camera_stream_url}, timeout=2.0)
             except Exception as ex:
-                logger.debug(f"Could not forward camera_stream_url: {ex}")
+                logger.warning(f"Could not forward camera_stream_url: {ex}")
 
         if not has_mpp and self.calibrated_mpp is not None:
             try:
                 self._query_vision("set_mpp", {"mpp": self.calibrated_mpp}, timeout=2.0)
             except Exception as ex:
-                logger.debug(f"Failed to re-sync MPP: {ex}")
+                logger.warning(f"Failed to re-sync MPP: {ex}")
 
         if not has_matrix:
             cam_saved = self.config_manager.load_section("tool_calibrator_station camera")
@@ -282,7 +319,7 @@ class ToolCalibrator:
                     mty = float(cam_saved.get("matrix_ty", 0.0))
                     self._query_vision("set_matrix", {"matrix": [[ma, mb, mtx], [mc, md, mty]]}, timeout=2.0)
                 except Exception as ex:
-                    logger.debug(f"Failed to re-sync matrix: {ex}")
+                    logger.warning(f"Failed to re-sync matrix: {ex}")
 
     def _query_vision(self, endpoint: str, payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Dict[str, Any]:
         """
@@ -323,7 +360,13 @@ class ToolCalibrator:
         while not done_flag.is_set():
             if self.reactor.monotonic() - start_time > timeout + 0.5:
                 break
-            self.reactor.pause(self.reactor.monotonic() + 0.05)
+            if getattr(self.reactor, "pause_allowed", True):
+                try:
+                    self.reactor.pause(self.reactor.monotonic() + 0.05)
+                except Exception:
+                    done_flag.wait(0.05)
+            else:
+                done_flag.wait(0.05)
 
         if not done_flag.is_set():
             raise SafeNavigatorException(f"[ERR_CAM_101] HTTP request timed out after {timeout}s: {url}")
@@ -370,9 +413,23 @@ class ToolCalibrator:
             if i > 0:
                 self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
             try:
-                resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0}, timeout=5.0)
+                resp = self._query_vision("detect_nozzle", {
+                    "min_matches": 1,
+                    "timeout": 3.0,
+                    "min_confidence": self.min_detection_confidence,
+                    "min_radius": self.min_nozzle_radius,
+                    "max_radius": self.max_nozzle_radius
+                }, timeout=5.0)
                 if resp.get("found") and resp.get("center_uv") and len(resp.get("center_uv")) >= 2:
-                    valid_frames.append(resp)
+                    conf = float(resp.get("confidence", 1.0))
+                    rad = float(resp.get("radius", resp.get("radius_px", 20.0)))
+                    if conf >= self.min_detection_confidence and (self.min_nozzle_radius <= rad <= self.max_nozzle_radius):
+                        valid_frames.append(resp)
+                    else:
+                        logger.warning(
+                            f"[tool_calibrator] Frame rejected by quality gate: conf={conf*100:.1f}% (min {self.min_detection_confidence*100:.1f}%), "
+                            f"radius={rad:.1f}px (bounds {self.min_nozzle_radius:.1f}-{self.max_nozzle_radius:.1f}px)"
+                        )
             except Exception as ex:
                 logger.debug(f"[tool_calibrator] Query vision burst exception: {ex}")
 
@@ -931,6 +988,9 @@ class ToolCalibrator:
         compensate_focal_z = gcmd.get_int("COMPENSATE_FOCAL_Z", 0) == 1
         tools_param = gcmd.get("TOOLS", None)
         samples_param = gcmd.get_int("SAMPLES", self.centering_samples)
+        if samples_param < 3:
+            gcmd.respond_info(f"[tool_calibrator] Notice: Clamping SAMPLES from {samples_param} to 3 for calibration reliability.")
+            samples_param = 3
         wiggle_param = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
 
         toolhead = self.printer.lookup_object("toolhead")
@@ -1580,6 +1640,9 @@ class ToolCalibrator:
         """
         toolhead = self.printer.lookup_object("toolhead")
         samples = gcmd.get_int("SAMPLES", self.centering_samples)
+        if samples < 3:
+            gcmd.respond_info(f"[tool_calibrator] Notice: Clamping SAMPLES from {samples} to 3 for visual centering safety.")
+            samples = 3
         wiggle = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
 
         if not self.navigator.is_homed():
@@ -1604,17 +1667,29 @@ class ToolCalibrator:
         """
         Test vision detection at current toolhead position without moving.
         Reports detected center UV, radius, confidence, and burst dispersion.
+        Does not raise G-code CommandError on negative detection to protect toolchanger state.
         """
         self._ensure_vision_sync()
         toolhead = self.printer.lookup_object("toolhead")
         samples = gcmd.get_int("SAMPLES", self.centering_samples)
+        active_t = self._get_active_tool_no()
+
+        tc = self.printer.lookup_object("toolchanger", None)
+        saved_active_tool = getattr(tc, "active_tool", None) if tc is not None else None
 
         gcmd.respond_info(f"[tool_calibrator] Sampling {samples} vision frames at current position...")
-        self._set_inspection_lighting(True, self.reference_tool)
+        self._set_inspection_lighting(True, active_t)
         try:
             burst = self._sample_burst(toolhead, gcmd, samples=samples)
             if not burst or not burst.get("found"):
-                raise gcmd.error("❌ Nozzle NOT detected at current position. Check lighting, focal distance, or nozzle alignment.")
+                reason = burst.get("reason", "Nozzle NOT detected at current position") if burst else "Empty burst"
+                gcmd.respond_info(
+                    f"❌ [Vision Inspection Report]\n"
+                    f"  Found:       NO (0/{samples} frames)\n"
+                    f"  Reason:      {reason}\n"
+                    f"  Suggestion:  Verify lighting, focal distance, or nozzle position over camera."
+                )
+                return
 
             uv = burst.get("center_uv")
             radius = burst.get("radius_px", 0.0)
@@ -1634,9 +1709,17 @@ class ToolCalibrator:
                 f"  Algorithm:   {tier_desc}"
             )
         except Exception as ex:
-            raise gcmd.error(f"Vision test error: {ex}")
+            gcmd.respond_info(f"!! [tool_calibrator] Vision test error: {ex}")
         finally:
-            self._set_inspection_lighting(False, self.reference_tool)
+            self._set_inspection_lighting(False, active_t)
+            if tc is not None and saved_active_tool is not None:
+                curr_active = getattr(tc, "active_tool", None)
+                if curr_active is None:
+                    try:
+                        tc.active_tool = saved_active_tool
+                        logger.info(f"[tool_calibrator] Preserved and restored toolchanger active_tool: {saved_active_tool}")
+                    except Exception as err:
+                        logger.warning(f"[tool_calibrator] Could not restore toolchanger active_tool: {err}")
 
     def cmd_CALIBRATION_ABORT(self, gcmd) -> None:
         """Aborts active calibration run cleanly at the next step."""
