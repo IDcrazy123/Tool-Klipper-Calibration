@@ -8,6 +8,24 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.12] - 2026-09-06
+### Added
+- **Interactive Navigation & Inspection Commands in Klipper Extension:**
+  - Added `CALIBRATION_NAVIGATE STATION=CAMERA|SWITCH|DEPART` for safe 3-tier transit between optical station, probe station, and safe altitude.
+  - Added `CALIBRATION_CENTER_NOZZLE` for on-demand visual servoing centering on the active toolhead.
+  - Added `CALIBRATION_TEST_VISION` to generate instant live inspection reports (UV center, radius, confidence, dispersion, algorithm tier) without moving the toolhead.
+- **Enhanced User Macro Suite (`macros/`):**
+  - Upgraded `GOTO_CAMERA_TARGET` to execute physical safe 3-tier waypoint approach to the camera station.
+  - Added `GOTO_SWITCH_TARGET` and `LEAVE_CALIBRATION_STATION` for complete interactive staging control.
+  - Added `CENTER_NOZZLE` and `TEST_NOZZLE_VISION` user macros for quick diagnostic checks.
+  - Upgraded `CALIBRATE_ALL_TOOLS` and `CALIBRATE_TOOL` with all tuning parameters (`SAMPLES`, `WIGGLE`, `ORDER`, `COMPENSATE_FOCAL_Z`, `CLEAN_NOZZLE`, `DRY_RUN`).
+- **Comprehensive 6-Step Operational Workflow Guide:**
+  - Authored [docs/QUY_TRINH_VAN_HANH.md](file:///d:/Desktop/Tool-Klipper-Calibration/docs/QUY_TRINH_VAN_HANH.md): Complete Standard Operating Procedure (SOP) from hardware setup, 1-click auto-teaching, vision testing, camera scale calibration, dry-run, to full multi-tool calibration.
+  - Linked guide into root [README.vi.md](file:///d:/Desktop/Tool-Klipper-Calibration/README.vi.md) and [README.md](file:///d:/Desktop/Tool-Klipper-Calibration/README.md).
+- **Unit & Integration Test Suite:**
+  - Added 3 unit tests in [tests/test_calibration_cycle.py](file:///d:/Desktop/Tool-Klipper-Calibration/tests/test_calibration_cycle.py) verifying navigation, active tool centering, and test vision report outputs.
+  - Total test suite expanded to **53 passing tests** with 100% success rate.
+
 ## [0.8.11] - 2026-09-06
 ### Added
 - **Multi-frame Burst Sampling in Visual Servoing Loop:**

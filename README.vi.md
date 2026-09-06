@@ -16,9 +16,9 @@ Hệ thống tự động cân chỉnh độ lệch không gian XY (Thị giác 
 
 ---
 
-## 📖 Bộ Tài Liệu Kiến Trúc & Quản Trị Dự Án
-Toàn bộ quy chuẩn kiến trúc, phân rã công việc (WBS), chính sách Git, quy chuẩn viết code và các quyết định kỹ thuật được module hoá trong thư mục [`agent/`](agent/):
-👉 **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Tiếng Việt)* | **[agent/AGENTS.md](agent/AGENTS.md)** *(English)*
+## 📖 Bộ Tài Liệu Kiến Trúc & Hướng Dẫn Vận Hành
+- 📘 **[Quy trình Vận hành Chuẩn & Danh mục Macro](docs/QUY_TRINH_VAN_HANH.md)** *(Hướng dẫn 6 bước từ A-Z)*
+- 🏛️ **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Quy chuẩn kiến trúc, kỹ thuật & quản trị dự án)* | **[agent/AGENTS.md](agent/AGENTS.md)** *(English)*
 
 ---
 

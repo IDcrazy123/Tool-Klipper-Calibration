@@ -16,9 +16,9 @@ An automated spatial calibration engine for multi-toolhead 3D printers running K
 
 ---
 
-## 📖 Architecture & Documentation Suite
-All engineering blueprints, coding standards, safety rules, and work breakdown structures are partitioned in the [`agent/`](agent/) folder:
-👉 **[agent/AGENTS.md](agent/AGENTS.md)** *(English)* | **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Tiếng Việt)*
+## 📖 Architecture & Operational Workflow Guides
+- 📘 **[Standard Operating Procedure & Macro Guide (Vietnamese)](docs/QUY_TRINH_VAN_HANH.md)** *(Comprehensive Step-by-Step SOP)*
+- 🏛️ **[agent/AGENTS.md](agent/AGENTS.md)** *(Engineering blueprints & specifications)* | **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Tiếng Việt)*
 
 ---
 

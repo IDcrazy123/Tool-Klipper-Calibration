@@ -44,6 +44,8 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 4.2:** Develop interactive teaching macros `CALIBRATION_SET_SAFE_POS`.
 - [x] **Task 4.3:** Integrate lifecycle hooks: `before_pickup_gcode`, `after_pickup_gcode`, `start_gcode`, `finish_gcode`.
 - [x] **Task 4.4:** Implement rollback macro `CALIBRATION_ROLLBACK_OFFSETS`.
+- [x] **Task 4.5:** Implement Interactive Navigation (`CALIBRATION_NAVIGATE`), Vision Testing (`TEST_NOZZLE_VISION`), and Single-Tool Centering (`CENTER_NOZZLE`).
+- [x] **Task 4.6:** Author Complete 6-Step Operational Standard Operating Procedure (`docs/QUY_TRINH_VAN_HANH.md`).
 
 ### Phase 5: Verification & Benchmarking
 - [x] **Task 5.1:** Offline unit tests using synthetic nozzle sample images across diverse illumination profiles (14 unit/integration tests).

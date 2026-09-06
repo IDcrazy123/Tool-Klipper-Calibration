@@ -96,6 +96,9 @@ class ToolCalibrator:
         self.gcode.register_command("CALIBRATION_SET_SAFE_POS", self.cmd_CALIBRATION_SET_SAFE_POS, desc="Interactive Safe Position Teaching")
         self.gcode.register_command("CALIBRATION_ROLLBACK_OFFSETS", self.cmd_CALIBRATION_ROLLBACK_OFFSETS, desc="Rollback to Previous Configuration Backup")
         self.gcode.register_command("CALIBRATION_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets")
+        self.gcode.register_command("CALIBRATION_NAVIGATE", self.cmd_CALIBRATION_NAVIGATE, desc="Safely navigate toolhead between stations")
+        self.gcode.register_command("CALIBRATION_CENTER_NOZZLE", self.cmd_CALIBRATION_CENTER_NOZZLE, desc="Perform visual servoing centering on active tool")
+        self.gcode.register_command("CALIBRATION_TEST_VISION", self.cmd_CALIBRATION_TEST_VISION, desc="Test nozzle vision detection and report coordinates")
 
     def _load_saved_stations(self) -> None:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
@@ -880,6 +883,110 @@ class ToolCalibrator:
             gcmd.respond_info(f"[tool_calibrator] Restored configuration from {restored_file}. Please issue FIRMWARE_RESTART.")
         except Exception as ex:
             gcmd.respond_error(f"[tool_calibrator] Rollback failed: {ex}")
+
+    def cmd_CALIBRATION_NAVIGATE(self, gcmd) -> None:
+        """
+        Safely navigates toolhead to Camera station, Z Switch station, or departs safely.
+        Usage: CALIBRATION_NAVIGATE STATION=CAMERA|SWITCH|DEPART
+        """
+        toolhead = self.printer.lookup_object("toolhead")
+        gcode_move = self.printer.lookup_object("gcode_move")
+        station = gcmd.get("STATION", "CAMERA").upper()
+
+        if not self.navigator.is_homed():
+            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before navigation.")
+            return
+
+        if station in ("CAMERA", "CAM"):
+            gcmd.respond_info("[tool_calibrator] Approaching Camera Station via safe 3-tier waypoints...")
+            self._set_inspection_lighting(True, self.reference_tool)
+            try:
+                self.navigator.approach_camera(toolhead, gcode_move)
+                pos = toolhead.get_position()
+                gcmd.respond_info(f"✔ Reached Camera Station: X{pos[0]:.3f} Y{pos[1]:.3f} Z{pos[2]:.3f}")
+            except Exception as ex:
+                self._set_inspection_lighting(False, self.reference_tool)
+                gcmd.respond_error(f"Navigation error: {ex}")
+        elif station in ("SWITCH", "Z_SWITCH"):
+            gcmd.respond_info("[tool_calibrator] Approaching Z Switch Station via safe 3-tier waypoints...")
+            try:
+                self.navigator.approach_switch(toolhead, gcode_move)
+                pos = toolhead.get_position()
+                gcmd.respond_info(f"✔ Reached Switch Station: X{pos[0]:.3f} Y{pos[1]:.3f} Z{pos[2]:.3f}")
+            except Exception as ex:
+                gcmd.respond_error(f"Navigation error: {ex}")
+        elif station in ("DEPART", "LEAVE", "SAFE_Z"):
+            gcmd.respond_info("[tool_calibrator] Departing station to safe Z altitude...")
+            self._set_inspection_lighting(False, self.reference_tool)
+            self.navigator.depart_station(toolhead, gcode_move)
+            pos = toolhead.get_position()
+            gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
+        else:
+            gcmd.respond_error(f"Invalid STATION '{station}'. Must be CAMERA, SWITCH, or DEPART.")
+
+    def cmd_CALIBRATION_CENTER_NOZZLE(self, gcmd) -> None:
+        """
+        Perform visual servoing centering on the active toolhead over the camera.
+        Parameters:
+            SAMPLES (int): Number of frames in burst (default: config value or 3)
+            WIGGLE (int): 1 to enable adaptive wiggle recovery (default: 1)
+        """
+        toolhead = self.printer.lookup_object("toolhead")
+        samples = gcmd.get_int("SAMPLES", self.centering_samples)
+        wiggle = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
+
+        if not self.navigator.is_homed():
+            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28).")
+            return
+
+        gcmd.respond_info("[tool_calibrator] Centering active nozzle over camera...")
+        self._set_inspection_lighting(True, self.reference_tool)
+        try:
+            self._center_nozzle(toolhead, gcmd, samples=samples, enable_wiggle=wiggle)
+            pos = toolhead.get_position()
+            gcmd.respond_info(f"✔ Nozzle centered successfully at X{pos[0]:.3f} Y{pos[1]:.3f}")
+        except Exception as ex:
+            gcmd.respond_error(f"Centering failed: {ex}")
+        finally:
+            self._set_inspection_lighting(False, self.reference_tool)
+
+    def cmd_CALIBRATION_TEST_VISION(self, gcmd) -> None:
+        """
+        Test vision detection at current toolhead position without moving.
+        Reports detected center UV, radius, confidence, and burst dispersion.
+        """
+        toolhead = self.printer.lookup_object("toolhead")
+        samples = gcmd.get_int("SAMPLES", self.centering_samples)
+
+        gcmd.respond_info(f"[tool_calibrator] Sampling {samples} vision frames at current position...")
+        self._set_inspection_lighting(True, self.reference_tool)
+        try:
+            burst = self._sample_burst(toolhead, gcmd, samples=samples)
+            if not burst or not burst.get("found"):
+                gcmd.respond_error("❌ Nozzle NOT detected at current position. Check lighting, focal distance, or nozzle alignment.")
+                return
+
+            uv = burst.get("center_uv")
+            radius = burst.get("radius_px", 0.0)
+            conf = burst.get("confidence", 0.0)
+            spread = burst.get("spread_px", 0.0)
+            tier = burst.get("tier", 1)
+            combo = burst.get("combo", 0)
+            tier_desc = "Tier 0 Curvature (Symmetric)" if combo == 10 else f"Tier {tier}"
+
+            gcmd.respond_info(
+                f"✔ [Vision Inspection Report]\n"
+                f"  Found:       YES ({burst.get('burst_count')}/{burst.get('burst_total')} frames)\n"
+                f"  Center UV:   U{uv[0]:.2f} px, V{uv[1]:.2f} px\n"
+                f"  Radius:      {radius:.2f} px\n"
+                f"  Confidence:  {conf*100:.1f}%\n"
+                f"  Dispersion:  {spread:.2f} px\n"
+                f"  Algorithm:   {tier_desc}"
+            )
+        except Exception as ex:
+            gcmd.respond_error(f"Vision test error: {ex}")
+        finally:
+            self._set_inspection_lighting(False, self.reference_tool)
 
     def cmd_CALIBRATION_STATUS(self, gcmd) -> None:
         """Emits current calibration state and cached offsets."""

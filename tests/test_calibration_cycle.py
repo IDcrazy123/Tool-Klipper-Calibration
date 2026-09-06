@@ -485,6 +485,57 @@ class TestCalibrationCycle(unittest.TestCase):
         info_str = " ".join(gcmd.info_messages)
         self.assertNotIn("Wiggle Recovery", info_str)
 
+    def test_calibration_navigate_camera_and_depart(self):
+        """CALIBRATION_NAVIGATE navigates safely to camera and departs to safe altitude."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd_approach = DummyGCodeCommand({"STATION": "CAMERA"})
+        calibrator.cmd_CALIBRATION_NAVIGATE(gcmd_approach)
+
+        # Check toolhead arrived at camera target position [150.0, 10.0, 22.0]
+        pos = self.toolhead.get_position()
+        self.assertEqual(pos[:3], [150.0, 10.0, 22.0])
+        self.assertTrue(any("Reached Camera Station" in m for m in gcmd_approach.info_messages))
+
+        # Depart station
+        gcmd_depart = DummyGCodeCommand({"STATION": "DEPART"})
+        calibrator.cmd_CALIBRATION_NAVIGATE(gcmd_depart)
+        pos_depart = self.toolhead.get_position()
+        self.assertEqual(pos_depart[2], calibrator.navigator.safe_z)
+        self.assertTrue(any("Departed station" in m for m in gcmd_depart.info_messages))
+
+    def test_calibration_center_nozzle_cmd(self):
+        """CALIBRATION_CENTER_NOZZLE executes visual servoing centering on active tool."""
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        def mock_vision(endpoint, payload=None, timeout=3.0):
+            if endpoint == "detect_nozzle":
+                return {"found": True, "center_uv": [320.0, 240.0], "radius": 40.0, "confidence": 0.95, "tier": 0, "combo": 10}
+            elif endpoint == "calculate_offset":
+                return {"offset_xy": [0.0, 0.0]}
+            return {}
+
+        calibrator._query_vision = mock_vision
+        gcmd = DummyGCodeCommand({"SAMPLES": 3, "WIGGLE": 1})
+        calibrator.cmd_CALIBRATION_CENTER_NOZZLE(gcmd)
+
+        self.assertTrue(any("centered successfully" in m for m in gcmd.info_messages))
+
+    def test_calibration_test_vision_cmd(self):
+        """CALIBRATION_TEST_VISION outputs full inspection report with center UV and confidence."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator._query_vision = MagicMock(return_value={
+            "found": True, "center_uv": [320.5, 240.2], "radius": 42.1, "confidence": 0.98, "tier": 0, "combo": 10
+        })
+
+        gcmd = DummyGCodeCommand({"SAMPLES": 2})
+        calibrator.cmd_CALIBRATION_TEST_VISION(gcmd)
+
+        info_str = " ".join(gcmd.info_messages)
+        self.assertIn("Vision Inspection Report", info_str)
+        self.assertIn("U320.50 px, V240.20 px", info_str)
+        self.assertIn("98.0%", info_str)
+
 
 if __name__ == "__main__":
     unittest.main()
