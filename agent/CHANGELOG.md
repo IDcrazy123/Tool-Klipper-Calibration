@@ -12,12 +12,15 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Added
 - **Multi-frame Burst Sampling in Visual Servoing Loop:**
   - Implemented `_sample_burst()` in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py).
+  - Enforces physical settling pause `max(0.12s, sample_delay)` before initial capture to allow mechanical ringing and camera MJPEG buffers to clear.
   - Collects $N$ settled frames (default `centering_samples = 3`, configurable 1–7) separated by `sample_delay` (default $0.08\text{s}$).
   - Uses median filtering across $(U, V, R)$ to eliminate frame outliers caused by mechanical vibrations, streamer buffering latency, or single-frame exposure spikes.
-  - Computes and logs burst consensus telemetry: `burst_count`, `burst_total`, and sub-pixel `spread_px`.
+  - Computes and logs burst consensus telemetry: `burst_count`, `burst_total`, and sub-pixel `spread_px` (with high-dispersion diagnostic alert if `spread > 15px`).
+  - Integrated `_sample_burst` into both nozzle centering and star-pattern camera scale calibration (`CALIBRATE_CAMERA_SCALE`).
 - **Adaptive Wiggle Recovery Routine:**
   - Implemented `_recover_with_wiggle()` in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py).
-  - When the nozzle is temporarily lost during servoing (e.g. blind spots or specular glare), automatically executes 4 micro-moves around the anchor position ($\pm 0.1\text{mm}$ in X and Y) to break the reflection angle before aborting.
+  - When the nozzle is temporarily lost during servoing (e.g. blind spots or specular glare), automatically executes 4 micro-moves around the anchor position ($\pm \text{wiggle\_distance}$, default $0.1\text{mm}$) to break the reflection angle before aborting.
+  - Added configurable `wiggle_distance` parameter in `[tool_calibrator]` configuration.
   - Validates all micro-moves against printer frame boundaries via `SafeNavigator.validate_coordinate_safety`.
   - Automatically recovers optical lock or safely reverts toolhead to anchor coordinates if all attempts are exhausted.
   - Adds G-Code command parameters `SAMPLES` and `WIGGLE` to `CALIBRATE_TOOL_OFFSETS` for runtime overrides.

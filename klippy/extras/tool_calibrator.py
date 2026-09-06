@@ -44,6 +44,7 @@ class ToolCalibrator:
         self.tolerance_mm = config.getfloat("tolerance_mm", 0.015, above=0.001)
         self.centering_samples = config.getint("centering_samples", 3, minval=1, maxval=7)
         self.sample_delay = config.getfloat("sample_delay", 0.08, minval=0.01, maxval=0.5)
+        self.wiggle_distance = config.getfloat("wiggle_distance", 0.1, above=0.01, maxval=1.0)
         if hasattr(config, "getboolean"):
             self.wiggle_on_failure = config.getboolean("wiggle_on_failure", True)
         else:
@@ -169,7 +170,8 @@ class ToolCalibrator:
         """
         n_samples = samples if samples is not None else self.centering_samples
         toolhead.wait_moves()
-        self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
+        settle_time = max(0.12, self.sample_delay)
+        self.reactor.pause(self.reactor.monotonic() + settle_time)
 
         valid_frames = []
         for i in range(n_samples):
@@ -194,6 +196,9 @@ class ToolCalibrator:
         spread_v = max(v_vals) - min(v_vals) if len(v_vals) > 1 else 0.0
         max_spread = max(spread_u, spread_v)
 
+        if max_spread > 15.0 and gcmd:
+            gcmd.respond_info(f"  -> Note: High burst dispersion ({max_spread:.1f}px), median filtering applied.")
+
         best_frame = max(valid_frames, key=lambda x: x.get("confidence", 0.5))
 
         return {
@@ -212,17 +217,18 @@ class ToolCalibrator:
     def _recover_with_wiggle(self, toolhead, gcmd, iteration: int, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Adaptive Wiggle Recovery:
-        Executes progressive micro-moves (±0.1mm) around the anchor position to break specular
+        Executes progressive micro-moves around the anchor position to break specular
         glare / reflection blindspots when nozzle detection temporarily fails.
         Returns aggregated burst detection if recovered, or None if all attempts fail.
         """
         anchor_pos = list(toolhead.get_position())
-        # Micro-move patterns relative to anchor: +0.1 X, -0.1 X, +0.1 Y, -0.1 Y
+        dist = self.wiggle_distance
+        # Micro-move patterns relative to anchor: +dist X, -dist X, +dist Y, -dist Y
         wiggle_steps = [
-            ("+X", 0.1, 0.0),
-            ("-X", -0.1, 0.0),
-            ("+Y", 0.0, 0.1),
-            ("-Y", 0.0, -0.1),
+            ("+X", dist, 0.0),
+            ("-X", -dist, 0.0),
+            ("+Y", 0.0, dist),
+            ("-Y", 0.0, -dist),
         ]
 
         if gcmd:
@@ -730,8 +736,8 @@ class ToolCalibrator:
         self.reactor.pause(self.reactor.monotonic() + 0.2)
 
         # Baseline detection
-        base_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-        if not base_resp.get("found"):
+        base_resp = self._sample_burst(toolhead, gcmd)
+        if not base_resp or not base_resp.get("found"):
             self.navigator.depart_station(toolhead, gcode_move)
             gcmd.respond_error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
             return
@@ -758,10 +764,9 @@ class ToolCalibrator:
             for label, tx, ty, rdx, rdy in moves:
                 toolhead.manual_move([tx, ty, None], self.navigator.approach_speed)
                 toolhead.wait_moves()
-                self.reactor.pause(self.reactor.monotonic() + 0.2)
 
-                det = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-                if not det.get("found"):
+                det = self._sample_burst(toolhead, gcmd)
+                if not det or not det.get("found"):
                     gcmd.respond_error(f"Failed to detect nozzle during displacement {label}.")
                     continue
 
