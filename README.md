@@ -17,8 +17,20 @@ An automated spatial calibration engine for multi-toolhead 3D printers running K
 ---
 
 ## 📖 Architecture & Operational Workflow Guides
+- 🚀 **[Installation, Moonraker Auto-Update & Uninstallation Guide](docs/HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md)** *(Comprehensive Guide with Moonraker Update Manager)*
 - 📘 **[Standard Operating Procedure & Macro Guide (Vietnamese)](docs/QUY_TRINH_VAN_HANH.md)** *(Comprehensive Step-by-Step SOP)*
 - 🏛️ **[agent/AGENTS.md](agent/AGENTS.md)** *(Engineering blueprints & specifications)* | **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Tiếng Việt)*
+
+---
+
+## ⚡ Quick Installation
+
+Run the following commands via SSH using a normal user account (`pi`, `btt`,... **do not run as root**):
+```bash
+cd ~
+git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
+cd ~/Tool-Klipper-Calibration && ./scripts/install.sh
+```
 
 ---
 
@@ -33,4 +45,5 @@ Built upon proven concepts synthesized and improved from three stable open-sourc
 ## 🚀 Git Strategy & Moonraker Auto-Updates
 - **Remote Repository:** `https://github.com/IDcrazy123/Tool-Klipper-Calibration.git`
 - **Branch Policy:** Strict single **`main`** branch (Trunk-based development). No side branches.
-- Fully compatible with Moonraker Update Manager for 1-click updates in Mainsail and Fluidd.
+- Fully compatible with Moonraker Update Manager for 1-click updates in Mainsail and Fluidd (see [Installation & Update Guide](docs/HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md)).
+

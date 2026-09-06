@@ -17,8 +17,20 @@ Hệ thống tự động cân chỉnh độ lệch không gian XY (Thị giác 
 ---
 
 ## 📖 Bộ Tài Liệu Kiến Trúc & Hướng Dẫn Vận Hành
+- 🚀 **[Hướng Dẫn Cài Đặt, Tự Động Cập Nhật & Gỡ Bỏ](docs/HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md)** *(Hướng dẫn chi tiết từ A-Z với Moonraker Update Manager)*
 - 📘 **[Quy trình Vận hành Chuẩn & Danh mục Macro](docs/QUY_TRINH_VAN_HANH.md)** *(Hướng dẫn 6 bước từ A-Z)*
 - 🏛️ **[agent/AGENTS.vi.md](agent/AGENTS.vi.md)** *(Quy chuẩn kiến trúc, kỹ thuật & quản trị dự án)* | **[agent/AGENTS.md](agent/AGENTS.md)** *(English)*
+
+---
+
+## ⚡ Cài Đặt Nhanh Vào Máy In (Quick Install)
+
+Chạy 3 lệnh sau qua SSH bằng tài khoản thường (`pi`, `btt`,... **không dùng sudo**):
+```bash
+cd ~
+git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
+cd ~/Tool-Klipper-Calibration && ./scripts/install.sh
+```
 
 ---
 
@@ -33,4 +45,5 @@ Dự án được tổng hợp và nâng cấp từ 3 dự án mã nguồn mở 
 ## 🚀 Quản Lý Git & Cập Nhật Tự Động Moonraker
 - **Kho lưu trữ từ xa:** `https://github.com/IDcrazy123/Tool-Klipper-Calibration.git`
 - **Chính sách nhánh:** Duy nhất một nhánh **`main`** (Trunk-based development), tuyệt đối không phân nhánh.
-- Tương thích hoàn hảo với Moonraker Update Manager để cập nhật 1-click trên giao diện Mainsail và Fluidd.
+- Tương thích hoàn hảo với Moonraker Update Manager để cập nhật 1-click trên giao diện Mainsail và Fluidd (xem [Hướng Dẫn Cập Nhật Moonraker](docs/HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md)).
+
