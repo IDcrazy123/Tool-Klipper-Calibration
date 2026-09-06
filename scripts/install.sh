@@ -86,7 +86,7 @@ KLIPPY_EXTRAS="${KLIPPER_DIR}/klippy/extras"
 
 mkdir -p "${KLIPPY_EXTRAS}/z_backends"
 
-for file in "tool_calibrator.py" "tool_calibrator_station.py" "safe_navigator.py" "config_manager.py"; do
+for file in "tool_calibrator.py" "tool_calibrator_station.py" "tool_offsets.py" "safe_navigator.py" "config_manager.py"; do
     TARGET="${KLIPPY_EXTRAS}/${file}"
     SOURCE="${REPO_DIR}/klippy/extras/${file}"
     ln -sf "${SOURCE}" "${TARGET}"

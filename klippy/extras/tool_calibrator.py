@@ -109,16 +109,26 @@ class ToolCalibrator:
         # Auto-load saved station waypoints from tool_offsets.cfg if not explicitly set in printer.cfg
         self._load_saved_stations()
 
-        # Register G-Code Commands
+        # Register G-Code Commands (Core & Direct Python Convenience Aliases)
         self.gcode.register_command("CALIBRATE_TOOL_OFFSETS", self.cmd_CALIBRATE_TOOL_OFFSETS, desc="Automated Full Tool Offset Calibration")
         self.gcode.register_command("CALIBRATE_CAMERA_SCALE", self.cmd_CALIBRATE_CAMERA_SCALE, desc="Star-pattern Camera Scale and Affine Matrix Calibration")
         self.gcode.register_command("CALIBRATION_TEACH_STATION", self.cmd_CALIBRATION_TEACH_STATION, desc="1-Click Interactive Teaching & Auto-Persistence")
+        self.gcode.register_command("AUTO_TEACH_CAMERA", self.cmd_AUTO_TEACH_CAMERA, desc="1-Click Auto-Teach Camera Station")
+        self.gcode.register_command("AUTO_TEACH_SWITCH", self.cmd_AUTO_TEACH_SWITCH, desc="1-Click Auto-Teach Switch Station")
+        self.gcode.register_command("CENTER_NOZZLE", self.cmd_CALIBRATION_CENTER_NOZZLE, desc="Center active nozzle over camera")
+        self.gcode.register_command("CALIBRATION_CENTER_NOZZLE", self.cmd_CALIBRATION_CENTER_NOZZLE, desc="Center active nozzle over camera")
+        self.gcode.register_command("TEST_NOZZLE_VISION", self.cmd_CALIBRATION_TEST_VISION, desc="Test nozzle vision detection and report coordinates")
+        self.gcode.register_command("CALIBRATION_TEST_VISION", self.cmd_CALIBRATION_TEST_VISION, desc="Test nozzle vision detection and report coordinates")
         self.gcode.register_command("CALIBRATION_SET_SAFE_POS", self.cmd_CALIBRATION_SET_SAFE_POS, desc="Interactive Safe Position Teaching")
         self.gcode.register_command("CALIBRATION_ROLLBACK_OFFSETS", self.cmd_CALIBRATION_ROLLBACK_OFFSETS, desc="Rollback to Previous Configuration Backup")
-        self.gcode.register_command("CALIBRATION_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets")
+        self.gcode.register_command("TOOL_CALIBRATOR_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets")
+        self.gcode.register_command("TKC_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets (Short Alias)")
+        if "CALIBRATION_STATUS" not in getattr(self.gcode, "commands", {}):
+            try:
+                self.gcode.register_command("CALIBRATION_STATUS", self.cmd_CALIBRATION_STATUS, desc="Display Tool Calibration Status & Offsets (Legacy Alias)")
+            except Exception:
+                pass
         self.gcode.register_command("CALIBRATION_NAVIGATE", self.cmd_CALIBRATION_NAVIGATE, desc="Safely navigate toolhead between stations")
-        self.gcode.register_command("CALIBRATION_CENTER_NOZZLE", self.cmd_CALIBRATION_CENTER_NOZZLE, desc="Perform visual servoing centering on active tool")
-        self.gcode.register_command("CALIBRATION_TEST_VISION", self.cmd_CALIBRATION_TEST_VISION, desc="Test nozzle vision detection and report coordinates")
 
     def _load_saved_stations(self) -> None:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
@@ -863,7 +873,17 @@ class ToolCalibrator:
                     pass
                 self.session_token = None
 
-    def cmd_CALIBRATION_TEACH_STATION(self, gcmd) -> None:
+    def cmd_AUTO_TEACH_CAMERA(self, gcmd) -> None:
+        """1-Click: Visual auto-centering, automatic approach vector calculation, and instant save to config."""
+        gcmd.respond_info("=== Auto-Teaching Camera Station ===")
+        self.cmd_CALIBRATION_TEACH_STATION(gcmd, default_station="CAMERA")
+
+    def cmd_AUTO_TEACH_SWITCH(self, gcmd) -> None:
+        """1-Click: Probes contact height, calculates approach vector towards bed center, and saves to config."""
+        gcmd.respond_info("=== Auto-Teaching Z Switch Station ===")
+        self.cmd_CALIBRATION_TEACH_STATION(gcmd, default_station="SWITCH")
+
+    def cmd_CALIBRATION_TEACH_STATION(self, gcmd, default_station: Optional[str] = None) -> None:
         """
         1-Click Interactive Teaching & Auto-Persistence Command.
         Automatically centers (via visual servoing) or probes contact height,
@@ -873,7 +893,7 @@ class ToolCalibrator:
             CALIBRATION_TEACH_STATION STATION=CAMERA [AUTO_CENTER=1] [APPROACH_DIST=25]
             CALIBRATION_TEACH_STATION STATION=SWITCH [AUTO_TOUCH=1] [APPROACH_DIST=20]
         """
-        station = gcmd.get("STATION", "").upper()
+        station = gcmd.get("STATION", default_station or "").upper()
         if station not in ("CAMERA", "SWITCH", "Z_SWITCH"):
             raise gcmd.error("STATION must be CAMERA or SWITCH.")
 

@@ -18,8 +18,9 @@ class TransformationSolver:
     Solves spatial coordinate mapping from camera pixel coordinates to 3D printer physical XY space.
     """
 
-    def __init__(self, damping_factor: float = 0.55) -> None:
+    def __init__(self, damping_factor: float = 0.55, default_mpp: float = 0.040) -> None:
         self.damping_factor = damping_factor
+        self.default_mpp = default_mpp
         self.transform_matrix: Optional[np.ndarray] = None
         self.mpp: Optional[float] = None
         self.frame_center: Tuple[float, float] = (320.0, 240.0)
@@ -193,7 +194,25 @@ class TransformationSolver:
                 (round(raw_x, 4), round(raw_y, 4))
             )
 
-        raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
+        # Fallback to default_mpp for coarse visual servoing if camera scale has not been calibrated yet
+        mpp = self.default_mpp
+        cx, cy = self.frame_center
+        du = detected_uv[0] - cx
+        dv = detected_uv[1] - cy
+        raw_x = -1.0 * du * mpp
+        raw_y = -1.0 * dv * mpp
+        damped_x = self.damping_factor * raw_x
+        damped_y = self.damping_factor * raw_y
+        if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
+            raise RuntimeError("Calculated offset resulted in non-finite values")
+        logger.warning(
+            f"Using uncalibrated fallback default MPP ({mpp:.4f} mm/px) for offset calculation. "
+            f"Run CALIBRATE_CAMERA_SCALE to calibrate high-precision scale and matrix."
+        )
+        return (
+            (round(damped_x, 4), round(damped_y, 4)),
+            (round(raw_x, 4), round(raw_y, 4))
+        )
 
     def calculate_offset(self, detected_uv: Tuple[float, float]) -> Tuple[float, float]:
         """
@@ -244,5 +263,16 @@ class TransformationSolver:
                 raise RuntimeError("Calculated tool delta resulted in non-finite values")
             return (round(delta_x, 4), round(delta_y, 4))
 
-        raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
+        # Fallback to default_mpp for tool delta if uncalibrated
+        mpp = self.default_mpp
+        du = target_uv[0] - reference_uv[0]
+        dv = target_uv[1] - reference_uv[1]
+        delta_x = -1.0 * du * mpp
+        delta_y = -1.0 * dv * mpp
+        if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
+            raise RuntimeError("Calculated tool delta resulted in non-finite values")
+        logger.warning(
+            f"Using uncalibrated fallback default MPP ({mpp:.4f} mm/px) for tool delta calculation."
+        )
+        return (round(delta_x, 4), round(delta_y, 4))
 

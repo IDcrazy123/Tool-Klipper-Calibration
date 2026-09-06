@@ -236,11 +236,10 @@ class TestCalibrationCycle(unittest.TestCase):
         with open(self.config_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Tool 0 reference offsets should be present
-        self.assertIn("[tool 0]", content)
-        # Tool 1 secondary offsets should be present
-        self.assertIn("[tool 1]", content)
-        self.assertIn("gcode_z_offset: -0.125", content)
+        # Tool offsets should be present in unified [tool_offsets] section
+        self.assertIn("[tool_offsets]", content)
+        self.assertIn("t0_z: 0.0000", content)
+        self.assertIn("t1_z: -0.1250", content)
 
     def test_dry_run_does_not_modify_disk(self):
         """Dry run must compute offsets without saving to disk."""

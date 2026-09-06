@@ -52,12 +52,18 @@ class StreamGrabber:
         Normalizes relative Nginx paths (e.g., /webcam2/?action=snapshot)
         to absolute localhost URLs, and automatically converts stream URLs
         (e.g., ?action=stream or /stream) to static snapshot endpoints.
+        Preserves URLs that explicitly point to image files (e.g. .jpg, .jpeg).
         """
         clean_url = url.strip()
         if clean_url.startswith("/"):
             clean_url = f"http://localhost{clean_url}"
         elif not (clean_url.startswith("http://") or clean_url.startswith("https://")):
             clean_url = f"http://{clean_url}"
+
+        # If URL already explicitly has an image file extension, preserve it
+        lower_url = clean_url.lower()
+        if lower_url.endswith(".jpg") or lower_url.endswith(".jpeg") or ".jpg?" in lower_url:
+            return clean_url
 
         # Convert Crowsnest / ustreamer / mjpg-streamer action=stream to snapshot
         if "action=stream" in clean_url:
@@ -83,6 +89,7 @@ class StreamGrabber:
         """
         Pulls a single JPEG frame from the snapshot endpoint and decodes it to a BGR numpy array.
         Uses a high-speed in-memory cache (~80ms TTL) to minimize redundant network I/O and JPEG decoding.
+        Automatically probes WebRTC /snapshot.jpg endpoint on 404 errors.
 
         Returns:
             Tuple[Optional[np.ndarray], Optional[str]]:
@@ -96,6 +103,33 @@ class StreamGrabber:
 
         try:
             resp = self.session.get(self.camera_url, timeout=self.timeout)
+            if resp.status_code == 404:
+                # Automatic WebRTC / Crowsnest v4 fallback probe: try /snapshot.jpg
+                fallback_candidate = None
+                if "action=snapshot" in self.camera_url:
+                    base_prefix = self.camera_url.split("?")[0].rstrip("/")
+                    fallback_candidate = f"{base_prefix}/snapshot.jpg"
+                elif self.camera_url.endswith("/snapshot"):
+                    fallback_candidate = f"{self.camera_url}.jpg"
+
+                if fallback_candidate and fallback_candidate != self.camera_url:
+                    logger.info(f"Received 404 from {self.camera_url}, trying WebRTC fallback: {fallback_candidate}")
+                    try:
+                        fb_resp = self.session.get(fallback_candidate, timeout=self.timeout)
+                        if fb_resp.status_code == 200:
+                            fb_array = np.frombuffer(fb_resp.content, dtype=np.uint8)
+                            fb_frame = cv2.imdecode(fb_array, cv2.IMREAD_COLOR)
+                            if fb_frame is not None and fb_frame.size > 0:
+                                logger.info(f"Successfully auto-switched camera endpoint to: {fallback_candidate}")
+                                with self._cache_lock:
+                                    self.camera_url = fallback_candidate
+                                    self._cached_frame = fb_frame
+                                    self._cached_error = None
+                                    self._cached_time = now
+                                return fb_frame.copy(), None
+                    except Exception as fb_ex:
+                        logger.debug(f"Fallback probe to {fallback_candidate} failed: {fb_ex}")
+
             if resp.status_code != 200:
                 err_msg = f"HTTP {resp.status_code} while fetching snapshot from {self.camera_url}"
                 logger.warning(err_msg)

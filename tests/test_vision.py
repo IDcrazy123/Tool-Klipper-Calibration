@@ -155,6 +155,23 @@ class TestAffineTransform(unittest.TestCase):
         self.assertAlmostEqual(dx_aff, -0.50, delta=0.01)
         self.assertAlmostEqual(dy_aff, 0.20, delta=0.01)
 
+    def test_uncalibrated_offset_uses_default_mpp(self):
+        """Verify calculate_offset_detail and calculate_tool_delta succeed with default_mpp when scale is uncalibrated."""
+        self.solver.transform_matrix = None
+        self.solver.mpp = None
+        # Center UV at (340.0, 240.0) -> du = +20px
+        # default_mpp = 0.040 -> raw_x = -1 * 20 * 0.040 = -0.8mm, damped_x = 0.55 * -0.8 = -0.44mm
+        damped_xy, raw_error = self.solver.calculate_offset_detail((340.0, 240.0))
+        self.assertAlmostEqual(damped_xy[0], -0.44, delta=0.01)
+        self.assertAlmostEqual(damped_xy[1], 0.0, delta=0.01)
+        self.assertAlmostEqual(raw_error[0], -0.80, delta=0.01)
+
+        # calculate_tool_delta also falls back cleanly without raising RuntimeError
+        dx, dy = self.solver.calculate_tool_delta((320.0, 240.0), (330.0, 250.0))
+        # du = +10, dv = +10 -> -1 * 10 * 0.04 = -0.4mm
+        self.assertAlmostEqual(dx, -0.40, delta=0.01)
+        self.assertAlmostEqual(dy, -0.40, delta=0.01)
+
     def test_solve_matrix_rejects_degenerate_points(self):
         """Verify solve_matrix raises ValueError when points are collinear or identical."""
         identical_points = [
@@ -273,6 +290,36 @@ class TestNozzleDetector(unittest.TestCase):
         self.assertAlmostEqual(refined_y, 130.0, delta=0.15)
 
 
+class TestStreamGrabberWebRTC(unittest.TestCase):
+    def test_url_normalization_preserves_jpg(self):
+        from server.stream_grabber import StreamGrabber
+        grabber = StreamGrabber("http://192.168.1.100:8080/snapshot.jpg")
+        self.assertEqual(grabber.camera_url, "http://192.168.1.100:8080/snapshot.jpg")
+
+    def test_webrtc_404_fallback(self):
+        from server.stream_grabber import StreamGrabber
+        grabber = StreamGrabber("http://localhost/webcam2/?action=snapshot")
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        _, encoded = cv2.imencode(".jpg", img)
+
+        def mock_get(url, timeout):
+            resp = unittest.mock.MagicMock()
+            if "action=snapshot" in url:
+                resp.status_code = 404
+            elif url.endswith("/snapshot.jpg"):
+                resp.status_code = 200
+                resp.content = encoded.tobytes()
+            else:
+                resp.status_code = 404
+            return resp
+
+        grabber.session.get = mock_get
+        frame, err = grabber.grab_frame(force_refresh=True)
+        self.assertIsNotNone(frame)
+        self.assertIsNone(err)
+        self.assertTrue(grabber.camera_url.endswith("/snapshot.jpg"))
+
+
 class TestVisualDebugger(unittest.TestCase):
     def test_frame_generation(self):
         debugger = VisualDebugger()
@@ -344,7 +391,8 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertAlmostEqual(data["delta_xy"][0], 0.0303, delta=0.001)
         self.assertAlmostEqual(data["delta_xy"][1], 0.0536, delta=0.001)
         self.assertIn("SET_TOOL_OFFSET TOOL=1", data["gcode_command"])
-        self.assertIn("[tool 1]", data["config_snippet"])
+        self.assertIn("[tool_offsets]", data["config_snippet"])
+        self.assertIn("t1_x: 0.0302", data["config_snippet"])
 
     def test_set_camera_url_endpoint(self):
         """Verify POST /set_camera_url accepts {"url": ...} payload forwarded from Klipper."""

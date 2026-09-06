@@ -29,24 +29,23 @@ class TestConfigManager(unittest.TestCase):
 
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("[tool 0]", content)
-        self.assertIn("gcode_x_offset: 0.000", content)
+        self.assertIn("[tool_offsets]", content)
+        self.assertIn("t0_x: 0.0000", content)
 
         # Save Tool 1
         self.manager.save_tool_offsets(1, {"x": 0.145, "y": -0.082, "z": 0.312})
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("[tool 1]", content)
-        self.assertIn("gcode_x_offset: 0.145", content)
-        self.assertIn("gcode_y_offset: -0.082", content)
-        self.assertIn("gcode_z_offset: 0.312", content)
+        self.assertIn("t1_x: 0.1450", content)
+        self.assertIn("t1_y: -0.0820", content)
+        self.assertIn("t1_z: 0.3120", content)
 
         # Update Tool 1 with new offset
         self.manager.save_tool_offsets(1, {"x": 0.150, "y": -0.080, "z": 0.315})
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("gcode_x_offset: 0.150", content)
-        self.assertNotIn("gcode_x_offset: 0.145", content)
+        self.assertIn("t1_x: 0.1500", content)
+        self.assertNotIn("t1_x: 0.1450", content)
 
     def test_backup_and_rollback(self):
         # Initial version
@@ -56,7 +55,7 @@ class TestConfigManager(unittest.TestCase):
 
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("gcode_x_offset: 0.999", content)
+        self.assertIn("t1_x: 0.9990", content)
 
         # Rollback
         restored_backup = self.manager.rollback()
@@ -64,7 +63,7 @@ class TestConfigManager(unittest.TestCase):
 
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("gcode_x_offset: 0.100", content)
+        self.assertIn("t1_x: 0.1000", content)
 
     def test_rollback_specific_backup(self):
         self.manager.max_backups = 10
@@ -79,7 +78,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(os.path.abspath(restored), os.path.abspath(b1))
         with open(self.cfg_file, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("gcode_x_offset: 0.111", content)
+        self.assertIn("t1_x: 0.1110", content)
 
         # Rollback to non-existent backup should raise ConfigManagerException
         from klippy.extras.config_manager import ConfigManagerException
@@ -172,6 +171,48 @@ class TestToolCalibratorStation(unittest.TestCase):
         self.assertEqual(status["matrix_tx"], 0.123456)
         self.assertEqual(status["matrix_ty"], -0.654321)
         self.assertEqual(status["mpp"], 0.012543)
+
+
+class TestToolOffsetsAndCommands(unittest.TestCase):
+    def test_tool_offsets_module(self):
+        """Verify ToolOffsets loads options and returns in get_status."""
+        from klippy.extras.tool_offsets import ToolOffsets, load_config
+        mock_config = MagicMock()
+        mock_config.get_printer.return_value = MagicMock()
+        mock_config.get_name.return_value = "tool_offsets"
+        mock_config.get_prefix_options.return_value = ["t1_x", "t1_y", "t1_z"]
+        mock_config.getfloat.side_effect = lambda k, default=None: {"t1_x": 0.123, "t1_y": -0.456, "t1_z": 0.045}.get(k, default)
+
+        to = load_config(mock_config)
+        status = to.get_status()
+        self.assertEqual(status["t1_x"], 0.123)
+        self.assertEqual(status["t1_y"], -0.456)
+        self.assertEqual(status["t1_z"], 0.045)
+
+    def test_save_all_tool_offsets_creates_unified_section(self):
+        """Verify save_all_tool_offsets saves into [tool_offsets] without duplicate [tool T*] headers."""
+        temp_dir = tempfile.mkdtemp()
+        cfg_path = os.path.join(temp_dir, "tool_offsets.cfg")
+        manager = ConfigManager(cfg_path)
+
+        results = {
+            1: {"x": 0.1234, "y": -0.5678, "z": 0.045},
+            2: {"x": -0.2222, "y": 0.3333, "z": -0.010}
+        }
+        manager.save_all_tool_offsets(results)
+
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn("[tool_offsets]", content)
+        self.assertNotIn("[tool 1]", content)
+        self.assertNotIn("[tool 2]", content)
+        self.assertNotIn("[tool T1]", content)
+        self.assertIn("t1_x: 0.1234", content)
+        self.assertIn("t1_y: -0.5678", content)
+        self.assertIn("t2_x: -0.2222", content)
+        self.assertIn("t2_z: -0.0100", content)
+        shutil.rmtree(temp_dir)
 
 
 if __name__ == "__main__":

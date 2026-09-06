@@ -18,10 +18,16 @@ import numpy as np
 from flask import Flask, jsonify, request, Response, render_template
 from waitress import serve
 
-from .stream_grabber import StreamGrabber
-from .nozzle_detector import NozzleDetector
-from .affine_transform import TransformationSolver
-from .visual_debugger import VisualDebugger
+try:
+    from .stream_grabber import StreamGrabber
+    from .nozzle_detector import NozzleDetector
+    from .affine_transform import TransformationSolver
+    from .visual_debugger import VisualDebugger
+except (ImportError, ValueError):
+    from stream_grabber import StreamGrabber
+    from nozzle_detector import NozzleDetector
+    from affine_transform import TransformationSolver
+    from visual_debugger import VisualDebugger
 
 # Setup Logging
 logging.basicConfig(
@@ -337,10 +343,12 @@ def calculate_offset():
             return jsonify({"success": False, "error": "Invalid 'center_uv' coordinate"}), 400
 
         damped_xy, raw_error = solver.calculate_offset_detail((float(center_uv[0]), float(center_uv[1])))
+        is_fallback = (solver.transform_matrix is None and solver.mpp is None)
         return jsonify({
             "success": True,
             "offset_xy": list(damped_xy),
-            "raw_error_mm": list(raw_error)
+            "raw_error_mm": list(raw_error),
+            "is_fallback": is_fallback
         }), 200
     except ValueError as ex:
         err_msg = str(ex)
@@ -382,15 +390,18 @@ def calculate_tool_delta():
         dx, dy = delta_xy
 
         delta_uv = (round(tgt_pt[0] - ref_pt[0], 3), round(tgt_pt[1] - ref_pt[1], 3))
+        is_fallback = (solver.transform_matrix is None and solver.mpp is None)
+        active_mpp = solver.mpp if solver.mpp is not None else solver.default_mpp
 
         return jsonify({
             "success": True,
             "tool": tool_idx,
             "delta_uv": delta_uv,
             "delta_xy": [dx, dy],
-            "mpp": solver.mpp,
+            "mpp": active_mpp,
+            "is_fallback": is_fallback,
             "gcode_command": f"SET_TOOL_OFFSET TOOL={tool_idx} X={dx:.4f} Y={dy:.4f}",
-            "config_snippet": f"[tool {tool_idx}]\ngcode_x_offset: {dx:.4f}\ngcode_y_offset: {dy:.4f}"
+            "config_snippet": f"[tool_offsets]\nt{tool_idx}_x: {dx:.4f}\nt{tool_idx}_y: {dy:.4f}"
         }), 200
     except Exception as ex:
         logger.exception("Error in /calculate_tool_delta")

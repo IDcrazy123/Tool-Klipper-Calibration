@@ -8,6 +8,25 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Physical hardware validation and user benchmarking telemetry on multi-tool rig.
 
+## [0.8.16] - 2026-09-06
+### Fixed
+- **Auto-Teach & Staging Alias Registration**:
+  - Registered G-code convenience commands directly in Python in [klippy/extras/tool_calibrator.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_calibrator.py): `AUTO_TEACH_CAMERA`, `AUTO_TEACH_SWITCH`, `CENTER_NOZZLE`, `TEST_NOZZLE_VISION`. Eliminates `Unknown command:"AUTO_TEACH_CAMERA"` error when auxiliary macro files are not explicitly included.
+- **Uncalibrated Centering Fallback ("Chicken-and-Egg" Bug Fix)**:
+  - Added `default_mpp = 0.040` (mm/pixel) in `TransformationSolver` in [server/affine_transform.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/affine_transform.py). Allows coarse visual servoing centering during `AUTO_TEACH_CAMERA` and `CENTER_NOZZLE` on fresh machines before `CALIBRATE_CAMERA_SCALE` is executed, eliminating HTTP 400 Bad Request aborts.
+- **Resolved Section Header Collision (`[tool T*]` -> `[tool_offsets]`)**:
+  - Transferred tool offset persistence in [klippy/extras/config_manager.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/config_manager.py) to unified `[tool_offsets]` section with variables `t{n}_x`, `t{n}_y`, `t{n}_z`, preventing Klipper boot crash caused by duplicate `[tool T*]` headers from tool definition files.
+  - Implemented [klippy/extras/tool_offsets.py](file:///d:/Desktop/Tool-Klipper-Calibration/klippy/extras/tool_offsets.py) to register and validate `[tool_offsets]` in Klipper.
+  - Updated [scripts/install.sh](file:///d:/Desktop/Tool-Klipper-Calibration/scripts/install.sh) and [scripts/uninstall.sh](file:///d:/Desktop/Tool-Klipper-Calibration/scripts/uninstall.sh) to link `tool_offsets.py`.
+- **Command Name Collision Prevention (`CALIBRATION_STATUS`)**:
+  - Renamed status command to `TOOL_CALIBRATOR_STATUS` with short alias `TKC_STATUS`. Legacy `CALIBRATION_STATUS` is registered conditionally only if not pre-registered by other macros/probes, preventing startup crash.
+- **Crowsnest WebRTC / camera-streamer Endpoint Compatibility**:
+  - Preserved image URLs ending with `.jpg`/`.jpeg` in [server/stream_grabber.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/stream_grabber.py).
+  - Added automatic 404 fallback probe to `/snapshot.jpg` with auto-switching when Crowsnest v4 WebRTC camera-streamer is detected.
+- **Daemon Direct Script Execution**:
+  - Added `try...except (ImportError, ValueError)` import wrappers in [server/tool_calibrator_server.py](file:///d:/Desktop/Tool-Klipper-Calibration/server/tool_calibrator_server.py), allowing direct invocation by systemd unit or CLI without package context errors.
+
+
 ## [0.8.15] - 2026-09-06
 ### Fixed
 - **Switch Backend Probe Safety & Kinematics**:

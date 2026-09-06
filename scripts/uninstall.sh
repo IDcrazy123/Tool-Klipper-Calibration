@@ -49,7 +49,7 @@ fi
 echo -e "${BLUE}[2/5] Gỡ bỏ liên kết Klipper extras symlinks...${NC}"
 KLIPPY_EXTRAS="${KLIPPER_DIR}/klippy/extras"
 if [ -d "${KLIPPY_EXTRAS}" ]; then
-    for file in "tool_calibrator.py" "tool_calibrator_station.py" "safe_navigator.py" "config_manager.py"; do
+    for file in "tool_calibrator.py" "tool_calibrator_station.py" "tool_offsets.py" "safe_navigator.py" "config_manager.py"; do
         if [ -L "${KLIPPY_EXTRAS}/${file}" ] || [ -f "${KLIPPY_EXTRAS}/${file}" ]; then
             rm -f "${KLIPPY_EXTRAS}/${file}"
             echo -e "${GREEN}    Đã gỡ ${file}${NC}"
