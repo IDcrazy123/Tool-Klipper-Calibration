@@ -90,13 +90,17 @@ class VisualDebugger:
             return buffer.tobytes()
         return b""
 
-    def mjpeg_generator(self, frame_fetcher: Optional[Any] = None) -> Generator[bytes, None, None]:
+    def mjpeg_generator(
+        self, frame_fetcher: Optional[Any] = None, max_duration_seconds: float = 120.0
+    ) -> Generator[bytes, None, None]:
         """
         Yields multipart HTTP responses for MJPEG browser streams.
         Optionally polls frame_fetcher to continuously update live stream.
+        Terminates after max_duration_seconds to prevent worker thread starvation.
         """
         frame_interval = 1.0 / max(1, self._fps)
-        while True:
+        stream_start = time.time()
+        while time.time() - stream_start < max_duration_seconds:
             start = time.time()
             if frame_fetcher is not None:
                 try:

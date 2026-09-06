@@ -7,6 +7,7 @@ transformation matrix with visual-servoing damping to compensate for optical bar
 
 from typing import List, Tuple, Optional
 import logging
+import math
 import numpy as np
 
 logger = logging.getLogger("tool_calibrator.affine_transform")
@@ -29,40 +30,41 @@ class TransformationSolver:
 
     def calculate_average_mpp(self, calibration_samples: List[Tuple[float, float]]) -> float:
         """
-        Computes robust average millimeters-per-pixel from a list of (distance_mm, distance_px).
-        Filters out statistical outliers exceeding 20% deviation from the median.
-
-        Args:
-            calibration_samples: List of (traveled_mm, measured_pixels).
-
-        Returns:
-            float: Filtered average millimeters per pixel.
+        Calculates average mm-per-pixel from displacement samples:
+        calibration_samples: List of (commanded_distance_mm, measured_displacement_px)
         """
-        raw_mpp = []
+        if not calibration_samples:
+            raise ValueError("No calibration samples provided for MPP calculation")
+
+        mpp_values = []
         for dist_mm, dist_px in calibration_samples:
-            if dist_px > 1.0:
-                raw_mpp.append(dist_mm / dist_px)
+            if dist_px <= 0:
+                continue
+            mpp_values.append(dist_mm / dist_px)
 
-        if not raw_mpp:
-            raise ValueError("No valid calibration displacement samples provided.")
+        if not mpp_values:
+            raise ValueError("Invalid samples: measured pixel displacement must be greater than zero")
 
-        median_mpp = float(np.median(raw_mpp))
-        # Filter outliers with >20% deviation from median
-        filtered = [val for val in raw_mpp if abs(val - median_mpp) <= (0.20 * median_mpp)]
+        if len(mpp_values) >= 3:
+            med = float(np.median(mpp_values))
+            filtered = [v for v in mpp_values if abs(v - med) / med <= 0.35]
+            if filtered:
+                mpp_values = filtered
 
-        if not filtered:
-            filtered = raw_mpp
-
-        self.mpp = float(np.mean(filtered))
-        logger.info(f"Calibrated MPP: {self.mpp:.5f} mm/pixel (from {len(filtered)}/{len(raw_mpp)} samples)")
+        self.mpp = float(np.mean(mpp_values))
+        logger.info(f"Calibrated average MPP: {self.mpp:.5f} mm/pixel from {len(mpp_values)} samples")
         return self.mpp
 
     def set_mpp(self, mpp: float) -> None:
         """Sets the calibrated millimeters-per-pixel scale factor."""
-        if mpp <= 0:
-            raise ValueError(f"MPP must be positive, got {mpp}")
-        self.mpp = float(mpp)
-        logger.info(f"Updated MPP scale to: {self.mpp:.5f} mm/pixel")
+        try:
+            val = float(mpp)
+        except (ValueError, TypeError):
+            raise ValueError(f"MPP must be a valid float, got {mpp}")
+        if not math.isfinite(val) or val <= 0:
+            raise ValueError(f"MPP must be a finite positive number, got {mpp}")
+        self.mpp = val
+        logger.info(f"Updated MPP scale to: {self.mpp:.6f} mm/pixel")
 
     def normalize_coords(self, uv: Tuple[float, float]) -> Tuple[float, float]:
         """
@@ -128,45 +130,66 @@ class TransformationSolver:
 
     def set_matrix(self, matrix_data: List[List[float]]) -> None:
         """Loads a pre-computed transformation matrix from serialized list."""
-        arr = np.array(matrix_data, dtype=np.float64)
-        if arr.ndim != 2 or arr.shape[0] != 2:
+        try:
+            arr = np.array(matrix_data, dtype=np.float64)
+        except Exception as e:
+            raise ValueError(f"Invalid matrix data: {e}")
+        if arr.ndim != 2 or arr.shape[0] != 2 or arr.shape[1] not in (3, 6):
             raise ValueError(f"Invalid transform matrix shape {arr.shape}, expected (2, 3) or (2, 6)")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("Transform matrix contains non-finite values (NaN or Inf)")
         self.transform_matrix = arr
         logger.info(f"Loaded transform matrix with shape: {self.transform_matrix.shape}")
 
-    def calculate_offset(self, detected_uv: Tuple[float, float]) -> Tuple[float, float]:
+    def calculate_offset_detail(
+        self, detected_uv: Tuple[float, float]
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         """
-        Computes physical XY correction move required to align the nozzle with optical center.
-
-        Args:
-            detected_uv: Current nozzle detection coordinates in pixels.
-
+        Computes both the damped visual-servoing step and raw physical error.
         Returns:
-            Tuple[float, float]: (delta_x_mm, delta_y_mm) for printer toolhead move.
+            ((damped_x, damped_y), (raw_error_x, raw_error_y))
         """
         nx, ny = self.normalize_coords(detected_uv)
 
         if self.transform_matrix is not None:
             if self.transform_matrix.shape[1] == 6:
-                # 2nd-order polynomial feature vector
                 v = np.array([nx**2, ny**2, nx * ny, nx, ny, 1.0])
             else:
-                # 1st-order affine feature vector
                 v = np.array([nx, ny, 1.0])
-            # Apply matrix and negative visual-servoing damping factor
-            offset = -1.0 * (self.damping_factor * (self.transform_matrix @ v))
-            return (round(float(offset[0]), 3), round(float(offset[1]), 3))
+            real_displacement = self.transform_matrix @ v
+            raw_x = -1.0 * float(real_displacement[0])
+            raw_y = -1.0 * float(real_displacement[1])
+            damped_x = self.damping_factor * raw_x
+            damped_y = self.damping_factor * raw_y
+            if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
+                raise RuntimeError("Calculated offset resulted in non-finite values")
+            return (
+                (round(damped_x, 4), round(damped_y, 4)),
+                (round(raw_x, 4), round(raw_y, 4))
+            )
 
-        # Fallback linear approximation using MPP if matrix not yet solved
         if self.mpp is not None:
             cx, cy = self.frame_center
             du = detected_uv[0] - cx
             dv = detected_uv[1] - cy
-            offset_x = -1.0 * self.damping_factor * du * self.mpp
-            offset_y = -1.0 * self.damping_factor * dv * self.mpp
-            return (round(float(offset_x), 3), round(float(offset_y), 3))
+            raw_x = -1.0 * du * self.mpp
+            raw_y = -1.0 * dv * self.mpp
+            damped_x = self.damping_factor * raw_x
+            damped_y = self.damping_factor * raw_y
+            if not (math.isfinite(raw_x) and math.isfinite(raw_y)):
+                raise RuntimeError("Calculated offset resulted in non-finite values")
+            return (
+                (round(damped_x, 4), round(damped_y, 4)),
+                (round(raw_x, 4), round(raw_y, 4))
+            )
 
         raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
+
+    def calculate_offset(self, detected_uv: Tuple[float, float]) -> Tuple[float, float]:
+        """
+        Computes physical XY correction move required to align the nozzle with optical center.
+        """
+        return self.calculate_offset_detail(detected_uv)[0]
 
     def calculate_tool_delta(
         self, reference_uv: Tuple[float, float], target_uv: Tuple[float, float]
@@ -197,14 +220,19 @@ class TransformationSolver:
             real_ref = self.transform_matrix @ v_ref
             real_tgt = self.transform_matrix @ v_tgt
             delta_xy = -1.0 * (real_tgt - real_ref)
-            return (round(float(delta_xy[0]), 4), round(float(delta_xy[1]), 4))
+            delta_x, delta_y = float(delta_xy[0]), float(delta_xy[1])
+            if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
+                raise RuntimeError("Calculated tool delta resulted in non-finite values")
+            return (round(delta_x, 4), round(delta_y, 4))
 
         if self.mpp is not None:
             du = target_uv[0] - reference_uv[0]
             dv = target_uv[1] - reference_uv[1]
             delta_x = -1.0 * du * self.mpp
             delta_y = -1.0 * dv * self.mpp
-            return (round(float(delta_x), 4), round(float(delta_y), 4))
+            if not (math.isfinite(delta_x) and math.isfinite(delta_y)):
+                raise RuntimeError("Calculated tool delta resulted in non-finite values")
+            return (round(delta_x, 4), round(delta_y, 4))
 
         raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")
 

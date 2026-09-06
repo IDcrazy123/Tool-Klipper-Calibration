@@ -5,10 +5,12 @@ Coordinates automated Computer Vision XY alignment and multi-backend Z calibrati
 for multi-toolhead 3D printers running Klipper Toolchanger.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 import json
 import logging
 import math
+import re
+import threading
 import urllib.request
 import urllib.error
 import statistics
@@ -40,6 +42,7 @@ class ToolCalibrator:
         self.server_url = srv_url.rstrip("/")
 
         self.reference_tool = config.getint("reference_tool", 0)
+        self.configured_tools_str = config.get("tools", None)
         self.z_backend_type = config.get("z_backend", "cartographer").strip().lower()
         self.max_centering_iterations = config.getint("max_centering_iterations", 5, minval=1, maxval=10)
         self.tolerance_mm = config.getfloat("tolerance_mm", 0.015, above=0.001)
@@ -78,11 +81,16 @@ class ToolCalibrator:
 
         # Hooks (None if not explicitly configured in printer.cfg)
         self.gcode_macro = self.printer.load_object(config, "gcode_macro")
-        self.start_gcode = self.gcode_macro.load_template(config, "start_gcode", None)
-        self.before_pickup_gcode = self.gcode_macro.load_template(config, "before_pickup_gcode", None)
-        self.after_pickup_gcode = self.gcode_macro.load_template(config, "after_pickup_gcode", None)
-        self.clean_nozzle_gcode = self.gcode_macro.load_template(config, "clean_nozzle_gcode", None)
-        self.finish_gcode = self.gcode_macro.load_template(config, "finish_gcode", None)
+        def _load_optional_template(option_name: str):
+            if config.get(option_name, None) is not None:
+                return self.gcode_macro.load_template(config, option_name, "")
+            return None
+
+        self.start_gcode = _load_optional_template("start_gcode")
+        self.before_pickup_gcode = _load_optional_template("before_pickup_gcode")
+        self.after_pickup_gcode = _load_optional_template("after_pickup_gcode")
+        self.clean_nozzle_gcode = _load_optional_template("clean_nozzle_gcode")
+        self.finish_gcode = _load_optional_template("finish_gcode")
 
         # Optical Lighting Configuration
         self.camera_pin = config.get("camera_pin", config.get("camera_led", None))
@@ -125,23 +133,8 @@ class ToolCalibrator:
                 self.navigator.cam_approach_x = float(cam_saved["approach_x"])
             if self.navigator.cam_approach_y is None and "approach_y" in cam_saved and cam_saved["approach_y"] not in ("None", ""):
                 self.navigator.cam_approach_y = float(cam_saved["approach_y"])
-            if "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
-                self.navigator.safe_z = float(cam_saved["safe_z"])
             if "mpp" in cam_saved and cam_saved["mpp"] not in ("None", ""):
                 self.calibrated_mpp = float(cam_saved["mpp"])
-                try:
-                    self._query_vision("set_mpp", {"mpp": self.calibrated_mpp})
-                except Exception:
-                    pass
-            if all(k in cam_saved for k in ("matrix_a", "matrix_b", "matrix_c", "matrix_d")):
-                try:
-                    ma = float(cam_saved["matrix_a"])
-                    mb = float(cam_saved["matrix_b"])
-                    mc = float(cam_saved["matrix_c"])
-                    md = float(cam_saved["matrix_d"])
-                    self._query_vision("set_matrix", {"matrix": [[ma, mb, 0.0], [mc, md, 0.0]]})
-                except Exception:
-                    pass
 
         switch_saved = self.config_manager.load_section("tool_calibrator_station switch")
         if switch_saved:
@@ -155,45 +148,146 @@ class ToolCalibrator:
                 self.navigator.switch_approach_x = float(switch_saved["approach_x"])
             if self.navigator.switch_approach_y is None and "approach_y" in switch_saved and switch_saved["approach_y"] not in ("None", ""):
                 self.navigator.switch_approach_y = float(switch_saved["approach_y"])
-            if "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
-                self.navigator.safe_z = float(switch_saved["safe_z"])
 
-        # Auto-inherit switch position from tools_calibrate if available and not configured
-        if self.navigator.switch_target_x is None or self.navigator.switch_target_y is None:
-            tools_cal = self.printer.lookup_object("tools_calibrate", None)
-            if tools_cal is not None:
-                if hasattr(tools_cal, "pin_loc_x"):
-                    self.navigator.switch_target_x = float(tools_cal.pin_loc_x)
-                if hasattr(tools_cal, "pin_loc_y"):
-                    self.navigator.switch_target_y = float(tools_cal.pin_loc_y)
-                if hasattr(tools_cal, "pin_loc_z"):
-                    self.navigator.switch_target_z = float(tools_cal.pin_loc_z)
-                logger.info(f"Auto-inherited Z-switch coordinates from tools_calibrate: ({self.navigator.switch_target_x}, {self.navigator.switch_target_y}, {self.navigator.switch_target_z})")
+        # Preserve the maximum safe_z taught across camera, switch, and config
+        loaded_safe_zs = []
+        if self.navigator.safe_z is not None:
+            loaded_safe_zs.append(self.navigator.safe_z)
+        if cam_saved and "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
+            loaded_safe_zs.append(float(cam_saved["safe_z"]))
+        if switch_saved and "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
+            loaded_safe_zs.append(float(switch_saved["safe_z"]))
+        if loaded_safe_zs:
+            self.navigator.safe_z = max(loaded_safe_zs)
+
+        self._sync_switch_location_from_tools_calibrate()
+
+    def _sync_switch_location_from_tools_calibrate(self) -> None:
+        """Dynamically queries tools_calibrate object for sensor_location."""
+        tools_cal = self.printer.lookup_object("tools_calibrate", None)
+        if tools_cal is None:
+            return
+        loc = getattr(tools_cal, "sensor_location", None)
+        if loc is None and hasattr(tools_cal, "get_status"):
+            try:
+                st = tools_cal.get_status(self.reactor.monotonic())
+                if isinstance(st, dict):
+                    loc = st.get("sensor_location")
+            except Exception:
+                pass
+
+        if loc is not None and isinstance(loc, (list, tuple)) and len(loc) >= 3:
+            if self.navigator.switch_target_x is None:
+                self.navigator.switch_target_x = float(loc[0])
+            if self.navigator.switch_target_y is None:
+                self.navigator.switch_target_y = float(loc[1])
+            if self.navigator.switch_target_z is None:
+                self.navigator.switch_target_z = float(loc[2])
+            logger.info(f"Auto-inherited switch location from tools_calibrate.sensor_location: ({loc[0]}, {loc[1]}, {loc[2]})")
+            return
+
+        if self.navigator.switch_target_x is None and hasattr(tools_cal, "pin_loc_x") and tools_cal.pin_loc_x is not None:
+            self.navigator.switch_target_x = float(tools_cal.pin_loc_x)
+        if self.navigator.switch_target_y is None and hasattr(tools_cal, "pin_loc_y") and tools_cal.pin_loc_y is not None:
+            self.navigator.switch_target_y = float(tools_cal.pin_loc_y)
+        if self.navigator.switch_target_z is None and hasattr(tools_cal, "pin_loc_z") and tools_cal.pin_loc_z is not None:
+            self.navigator.switch_target_z = float(tools_cal.pin_loc_z)
+
+    def _ensure_vision_sync(self) -> None:
+        """
+        Validates Vision Service connectivity and re-synchronizes camera_stream_url,
+        calibrated MPP, and full 6-element affine matrix if server was started/restarted.
+        """
+        try:
+            health = self._query_vision("health", timeout=2.0)
+        except Exception as ex:
+            logger.warning(f"Could not contact vision service health: {ex}")
+            return
+
+        has_mpp = health.get("calibrated_mpp", False)
+        has_matrix = health.get("has_matrix", False)
+
+        if self.camera_stream_url:
+            try:
+                self._query_vision("set_camera_url", {"url": self.camera_stream_url}, timeout=2.0)
+            except Exception as ex:
+                logger.debug(f"Could not forward camera_stream_url: {ex}")
+
+        if not has_mpp and self.calibrated_mpp is not None:
+            try:
+                self._query_vision("set_mpp", {"mpp": self.calibrated_mpp}, timeout=2.0)
+            except Exception as ex:
+                logger.debug(f"Failed to re-sync MPP: {ex}")
+
+        if not has_matrix:
+            cam_saved = self.config_manager.load_section("tool_calibrator_station camera")
+            if cam_saved and all(k in cam_saved for k in ("matrix_a", "matrix_b", "matrix_c", "matrix_d")):
+                try:
+                    ma = float(cam_saved["matrix_a"])
+                    mb = float(cam_saved["matrix_b"])
+                    mtx = float(cam_saved.get("matrix_tx", 0.0))
+                    mc = float(cam_saved["matrix_c"])
+                    md = float(cam_saved["matrix_d"])
+                    mty = float(cam_saved.get("matrix_ty", 0.0))
+                    self._query_vision("set_matrix", {"matrix": [[ma, mb, mtx], [mc, md, mty]]}, timeout=2.0)
+                except Exception as ex:
+                    logger.debug(f"Failed to re-sync matrix: {ex}")
 
     def _query_vision(self, endpoint: str, payload: Optional[Dict[str, Any]] = None, timeout: float = 2.0) -> Dict[str, Any]:
         """
         Sends a non-blocking JSON query to the Vision Service with strict timeout.
+        Dispatches network I/O to a background thread while pumping reactor.pause()
+        on the Klipper main thread to avoid blocking Klipper's reactor event loop.
         """
         url = f"{self.server_url}/{endpoint.lstrip('/')}"
         data_bytes = json.dumps(payload).encode("utf-8") if payload else None
-        req = urllib.request.Request(
-            url,
-            data=data_bytes,
-            headers={"Content-Type": "application/json", "User-Agent": "ToolCalibrator/1.0"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as ex:
-            raise SafeNavigatorException(f"[ERR_CAM_101] Cannot connect to Vision Service on {url}: {ex}")
-        except Exception as ex:
+        headers = {"Content-Type": "application/json", "User-Agent": "ToolCalibrator/1.0"}
+        if getattr(self, "session_token", None):
+            headers["X-Calibration-Token"] = self.session_token
+
+        req = urllib.request.Request(url, data=data_bytes, headers=headers)
+        result_holder: List[Any] = []
+        error_holder: List[Exception] = []
+        done_flag = threading.Event()
+
+        def _worker():
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    parsed = json.loads(resp.read().decode("utf-8"))
+                    result_holder.append(parsed)
+            except Exception as e:
+                error_holder.append(e)
+            finally:
+                done_flag.set()
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        start_time = self.reactor.monotonic()
+        while not done_flag.is_set():
+            if self.reactor.monotonic() - start_time > timeout + 0.5:
+                break
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
+
+        if not done_flag.is_set():
+            raise SafeNavigatorException(f"[ERR_CAM_101] HTTP request timed out after {timeout}s: {url}")
+
+        if error_holder:
+            ex = error_holder[0]
+            if isinstance(ex, urllib.error.URLError):
+                raise SafeNavigatorException(f"[ERR_CAM_101] Cannot connect to Vision Service on {url}: {ex}")
             raise SafeNavigatorException(f"[ERR_CAM_102] Vision communication error: {ex}")
+
+        if result_holder:
+            return result_holder[0]
+        raise SafeNavigatorException(f"[ERR_CAM_102] Empty response received from {url}")
 
     def _sample_burst(self, toolhead, gcmd=None, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
-        Multi-frame Burst Sampling:
+        Multi-frame Burst Sampling with Consensus Filtering:
         Pulls consecutive frames separated by `sample_delay` to filter mechanical vibrations,
-        streamer buffer lag, and transient sensor noise. Aggregates results using median filtering.
+        streamer buffer lag, and transient sensor noise. Rejects inconsistent bursts where dispersion
+        exceeds 15px and no majority consensus cluster exists.
         """
         n_samples = samples if samples is not None else self.centering_samples
         toolhead.wait_moves()
@@ -218,17 +312,37 @@ class ToolCalibrator:
         v_vals = [float(f["center_uv"][1]) for f in valid_frames]
         r_vals = [float(f.get("radius_px", f.get("radius", 0.0))) for f in valid_frames if f.get("radius_px") or f.get("radius")]
 
-        med_u = float(statistics.median(u_vals))
-        med_v = float(statistics.median(v_vals))
-        med_r = float(statistics.median(r_vals)) if r_vals else 0.0
-
         spread_px = 0.0
         if len(u_vals) > 1:
             u_spread = max(u_vals) - min(u_vals)
             v_spread = max(v_vals) - min(v_vals)
             spread_px = round(max(u_spread, v_spread), 2)
-            if spread_px > 15.0:
-                logger.warning(f"[tool_calibrator] High burst dispersion detected: {spread_px}px across {len(valid_frames)} frames.")
+
+        # Check consensus when dispersion exceeds 15.0 px
+        if len(valid_frames) > 1 and spread_px > 15.0:
+            consensus_cluster = []
+            for f in valid_frames:
+                u0, v0 = float(f["center_uv"][0]), float(f["center_uv"][1])
+                cluster = [
+                    f_other for f_other in valid_frames
+                    if math.hypot(float(f_other["center_uv"][0]) - u0, float(f_other["center_uv"][1]) - v0) <= 15.0
+                ]
+                if len(cluster) > len(consensus_cluster):
+                    consensus_cluster = cluster
+
+            majority_needed = (len(valid_frames) + 1) // 2
+            if len(consensus_cluster) < 2 or len(consensus_cluster) < majority_needed:
+                logger.warning(
+                    f"[tool_calibrator] Inconsistent burst rejected: spread={spread_px}px across {len(valid_frames)} frames with no consensus."
+                )
+                return {
+                    "found": False,
+                    "reason": f"Inconsistent burst dispersion ({spread_px}px) without consensus"
+                }
+
+        med_u = float(statistics.median(u_vals))
+        med_v = float(statistics.median(v_vals))
+        med_r = float(statistics.median(r_vals)) if r_vals else 0.0
 
         best_meta = valid_frames[0]
         return {
@@ -295,6 +409,9 @@ class ToolCalibrator:
         """
         wiggle_enabled = enable_wiggle if enable_wiggle is not None else self.wiggle_on_failure
 
+        self._ensure_vision_sync()
+
+        dx, dy = 0.0, 0.0
         for iteration in range(1, self.max_centering_iterations + 1):
             burst_resp = self._sample_burst(toolhead, gcmd, samples=samples)
 
@@ -310,14 +427,19 @@ class ToolCalibrator:
             center_uv = burst_resp.get("center_uv")
             offset_resp = self._query_vision("calculate_offset", {"center_uv": center_uv})
             dx, dy = offset_resp.get("offset_xy", [0.0, 0.0])
+            raw_err = offset_resp.get("raw_error_mm", [dx / 0.55 if abs(dx) > 1e-6 else 0.0, dy / 0.55 if abs(dy) > 1e-6 else 0.0])
+            raw_dx, raw_dy = float(raw_err[0]), float(raw_err[1])
 
             tier_desc = "Tier 0 Curvature" if burst_resp.get("combo") == 10 else f"Tier {burst_resp.get('tier', 1)}"
             burst_desc = f"Burst {burst_resp.get('burst_count')}/{burst_resp.get('burst_total')} (spread: {burst_resp.get('spread_px')}px)"
             if gcmd:
-                gcmd.respond_info(f"  -> Centering Step {iteration}: Delta X{dx:+.3f}mm Y{dy:+.3f}mm (UV: {center_uv}, {burst_desc}, {tier_desc})")
+                gcmd.respond_info(
+                    f"  -> Centering Step {iteration}: True Error X{raw_dx:+.3f}mm Y{raw_dy:+.3f}mm "
+                    f"(Damped Delta: X{dx:+.3f}mm Y{dy:+.3f}mm, UV: {center_uv}, {burst_desc}, {tier_desc})"
+                )
 
-            # Check if converged within tolerance
-            if abs(dx) <= self.tolerance_mm and abs(dy) <= self.tolerance_mm:
+            # Check convergence against true physical error before damping
+            if abs(raw_dx) <= self.tolerance_mm and abs(raw_dy) <= self.tolerance_mm:
                 if gcmd:
                     gcmd.respond_info(f"  -> Convergence achieved within {self.tolerance_mm}mm tolerance.")
                 return
@@ -330,19 +452,95 @@ class ToolCalibrator:
             toolhead.manual_move([target_x, target_y, None], self.navigator.approach_speed)
             toolhead.wait_moves()
 
+        # Final verification frame after exhausting iterations
+        verify_burst = self._sample_burst(toolhead, gcmd, samples=samples)
+        if verify_burst and verify_burst.get("found"):
+            verify_uv = verify_burst.get("center_uv")
+            verify_resp = self._query_vision("calculate_offset", {"center_uv": verify_uv})
+            v_raw = verify_resp.get("raw_error_mm", verify_resp.get("offset_xy", [0.0, 0.0]))
+            if abs(float(v_raw[0])) <= self.tolerance_mm and abs(float(v_raw[1])) <= self.tolerance_mm:
+                if gcmd:
+                    gcmd.respond_info(
+                        f"  -> Final verification confirmed convergence within {self.tolerance_mm}mm "
+                        f"(True Error: X{float(v_raw[0]):+.3f}mm Y{float(v_raw[1]):+.3f}mm)."
+                    )
+                return
+
         raise SafeNavigatorException(
             f"[ERR_CV_202] Centering failed to converge within {self.tolerance_mm}mm after {self.max_centering_iterations} iterations (last delta: X{dx:+.3f}mm Y{dy:+.3f}mm)."
         )
 
+    def _get_known_printer_tools(self) -> Set[int]:
+        """Discovers all valid toolhead numbers existing in Klipper configuration."""
+        known: Set[int] = {self.reference_tool}
+
+        # 1. Query toolchanger object if present
+        tc = self.printer.lookup_object("toolchanger", None)
+        if tc is not None:
+            tool_nums = getattr(tc, "tool_numbers", None)
+            if tool_nums and isinstance(tool_nums, (list, tuple, set)):
+                for n in tool_nums:
+                    try:
+                        known.add(int(n))
+                    except (ValueError, TypeError):
+                        pass
+            tools_dict = getattr(tc, "tools", None)
+            if tools_dict and isinstance(tools_dict, dict):
+                for k in tools_dict.keys():
+                    try:
+                        known.add(int(str(k).lstrip("tT")))
+                    except (ValueError, TypeError):
+                        pass
+
+        # 2. Inspect registered printer objects
+        names = []
+        if callable(getattr(self.printer, "lookup_objects", None)):
+            try:
+                ret = self.printer.lookup_objects()
+                if isinstance(ret, dict):
+                    names = list(ret.keys())
+                elif isinstance(ret, (list, tuple)):
+                    for item in ret:
+                        if isinstance(item, (tuple, list)) and len(item) > 0:
+                            names.append(str(item[0]))
+                        elif isinstance(item, str):
+                            names.append(item)
+            except Exception:
+                pass
+
+        if not names:
+            objs = getattr(self.printer, "objects", {})
+            if isinstance(objs, dict):
+                names = list(objs.keys())
+
+        for name in names:
+            m_tool = re.match(r"^tool\s+(?:t)?(\d+)$", name, re.IGNORECASE)
+            if m_tool:
+                known.add(int(m_tool.group(1)))
+                continue
+            m_macro = re.match(r"^gcode_macro\s+t(\d+)$", name, re.IGNORECASE)
+            if m_macro:
+                known.add(int(m_macro.group(1)))
+                continue
+            m_ext = re.match(r"^extruder(\d*)$", name)
+            if m_ext:
+                idx = int(m_ext.group(1)) if m_ext.group(1) else 0
+                known.add(idx)
+
+        return known
+
     def _discover_tools(self, tools_param: Optional[str] = None) -> List[int]:
         """
-        Discovers toolhead sequence across ANY Klipper toolchanger setup:
+        Discovers and validates toolhead sequence:
         1. Explicit TOOLS parameter (e.g. TOOLS=1 or TOOLS=0,1,2,3).
         2. Configured tools in [tool_calibrator] (e.g. tools: 0, 1, 2, 3).
         3. [toolchanger] object (toolchanger.tool_numbers or toolchanger.tools).
-        4. Auto-scanned Klipper objects: [tool 0], [tool 1], ... or [gcode_macro T0], [gcode_macro T1], ...
+        4. Auto-scanned Klipper objects: [tool 0], [tool 1], ... or [gcode_macro T0], ...
         5. Fallback to reference_tool.
+        Rejects any requested tool not present on the printer.
         """
+        known_tools = self._get_known_printer_tools()
+
         if tools_param is not None:
             try:
                 selected = [int(p.strip()) for p in str(tools_param).split(",") if p.strip()]
@@ -350,62 +548,48 @@ class ToolCalibrator:
                 raise SafeNavigatorException(f"Invalid TOOLS parameter: '{tools_param}'. Must be comma-separated integers.")
             if not selected:
                 raise SafeNavigatorException("TOOLS parameter cannot be empty.")
+            for t in selected:
+                if t not in known_tools:
+                    raise SafeNavigatorException(
+                        f"[ERR_TOOL_NOT_FOUND] Tool T{t} does not exist in printer configuration. Available tools: {sorted(known_tools)}"
+                    )
             if self.reference_tool not in selected:
                 return [self.reference_tool] + selected
             return [self.reference_tool] + [t for t in selected if t != self.reference_tool]
 
-        # 1. Configured tools in [tool_calibrator]
-        cfg_tools_str = self.config.get("tools", None)
-        if cfg_tools_str:
+        # Configured tools in [tool_calibrator]
+        if self.configured_tools_str:
             try:
-                cfg_tools = [int(p.strip()) for p in str(cfg_tools_str).split(",") if p.strip()]
+                cfg_tools = [int(p.strip()) for p in str(self.configured_tools_str).split(",") if p.strip()]
                 if cfg_tools:
+                    for t in cfg_tools:
+                        if t not in known_tools:
+                            raise SafeNavigatorException(
+                                f"[ERR_TOOL_NOT_FOUND] Configured Tool T{t} does not exist in printer configuration. Available tools: {sorted(known_tools)}"
+                            )
                     return [self.reference_tool] + [t for t in sorted(set(cfg_tools)) if t != self.reference_tool]
             except ValueError:
                 pass
 
-        # 2. Query [toolchanger] object if loaded
-        toolchanger = self.printer.lookup_object("toolchanger", None)
-        if toolchanger is not None:
-            if hasattr(toolchanger, "tool_numbers") and toolchanger.tool_numbers:
-                all_t = list(toolchanger.tool_numbers)
-                return [self.reference_tool] + [t for t in sorted(set(all_t)) if t != self.reference_tool]
-            if hasattr(toolchanger, "tools") and toolchanger.tools:
-                all_t = []
-                for idx, t in enumerate(toolchanger.tools):
-                    tn = getattr(t, "tool_number", None)
-                    all_t.append(int(tn) if tn is not None else idx)
-                return [self.reference_tool] + [t for t in sorted(set(all_t)) if t != self.reference_tool]
-
-        # 3. Dynamic scan across all loaded Klipper objects (e.g. [tool 0], [tool 1], [gcode_macro T0], [gcode_macro T1])
-        discovered = set()
-        try:
-            loaded_objs = self.printer.lookup_objects() if hasattr(self.printer, "lookup_objects") else []
-            import re
-            names = []
-            if isinstance(loaded_objs, dict):
-                names = list(loaded_objs.keys())
-            elif isinstance(loaded_objs, list):
-                for item in loaded_objs:
-                    if isinstance(item, tuple) and len(item) > 0:
-                        names.append(item[0])
-                    elif isinstance(item, str):
-                        names.append(item)
-            for name in names:
-                m_tool = re.match(r"^tool\s+(?:T)?(\d+)$", name, re.IGNORECASE)
-                if m_tool:
-                    discovered.add(int(m_tool.group(1)))
-                    continue
-                m_macro = re.match(r"^gcode_macro\s+T(\d+)$", name, re.IGNORECASE)
-                if m_macro:
-                    discovered.add(int(m_macro.group(1)))
-        except Exception:
-            pass
-
-        if discovered:
-            return [self.reference_tool] + [t for t in sorted(discovered) if t != self.reference_tool]
+        # Discovered tools from printer configuration
+        if known_tools:
+            return [self.reference_tool] + [t for t in sorted(known_tools) if t != self.reference_tool]
 
         return [self.reference_tool]
+
+    def _run_tool_hook(self, hook_template, tool_no: int) -> None:
+        """Executes a Klipper macro hook template providing the full standard printer context."""
+        if hook_template is None:
+            return
+        context: Dict[str, Any] = {}
+        if hasattr(self.gcode_macro, "create_template_context"):
+            try:
+                context = self.gcode_macro.create_template_context()
+            except Exception:
+                context = {}
+        context["TOOL"] = tool_no
+        context["params"] = {"TOOL": str(tool_no)}
+        hook_template.run_gcode_from_command(context)
 
     def _set_inspection_lighting(self, enable: bool, tool_no: int = 0) -> None:
         """
@@ -457,7 +641,7 @@ class ToolCalibrator:
                 return ref_xy
             else:
                 if reference_origin_xy is None:
-                    raise SafeNavigatorException(f"Reference tool T{self.reference_tool} optical origin has not been established.")
+                    raise gcmd.error("[tool_calibrator] Reference origin not established before secondary tool.")
                 dx = round(raw_pos[0] - reference_origin_xy[0], 3)
                 dy = round(raw_pos[1] - reference_origin_xy[1], 3)
                 tool_offsets["x"] = dx
@@ -523,25 +707,40 @@ class ToolCalibrator:
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before calibration.")
 
-        # Pre-flight ping to vision service (only required if optical calibration is requested)
+        session_token = None
+        # Pre-flight ping to vision service & session lock
         if calibrate_xy:
             try:
+                self._ensure_vision_sync()
+                lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "timeout_seconds": 600}, timeout=2.0)
+                session_token = lock_resp.get("session_token")
+                self.session_token = session_token
                 health = self._query_vision("health")
                 gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}")
             except Exception as ex:
                 raise gcmd.error(str(ex))
 
+        # Dynamic inheritance check for switch coordinates
+        if calibrate_z and self.z_backend_type == "switch":
+            self._sync_switch_location_from_tools_calibrate()
+
         # Discover tool sequence across any toolchanger flavor
         try:
             ordered_tools = self._discover_tools(tools_param)
         except SafeNavigatorException as ex:
+            if session_token:
+                try:
+                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                except Exception:
+                    pass
+                self.session_token = None
             raise gcmd.error(str(ex))
 
         gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
 
         # Execute start_gcode hook
         if self.start_gcode is not None:
-            self.start_gcode.run_gcode_from_command()
+            self._run_tool_hook(self.start_gcode, ordered_tools[0])
 
         reference_origin_xy: Optional[List[float]] = None
         reference_z_result: Dict[str, Any] = {}
@@ -553,10 +752,10 @@ class ToolCalibrator:
 
                 # Change tool
                 if self.before_pickup_gcode is not None:
-                    self.before_pickup_gcode.run_gcode_from_command({"TOOL": tool_no})
+                    self._run_tool_hook(self.before_pickup_gcode, tool_no)
                 self.gcode.run_script_from_command(f"T{tool_no}")
                 if self.after_pickup_gcode is not None:
-                    self.after_pickup_gcode.run_gcode_from_command({"TOOL": tool_no})
+                    self._run_tool_hook(self.after_pickup_gcode, tool_no)
 
                 toolhead.wait_moves()
 
@@ -564,7 +763,7 @@ class ToolCalibrator:
                 if clean_nozzle:
                     if self.clean_nozzle_gcode is not None:
                         gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
-                        self.clean_nozzle_gcode.run_gcode_from_command({"TOOL": tool_no})
+                        self._run_tool_hook(self.clean_nozzle_gcode, tool_no)
                         toolhead.wait_moves()
                     else:
                         clean_macro = self.printer.lookup_object("gcode_macro _CLEAN_NOZZLE", None)
@@ -612,7 +811,7 @@ class ToolCalibrator:
 
             # Execute finish_gcode hook
             if self.finish_gcode is not None:
-                self.finish_gcode.run_gcode_from_command()
+                self._run_tool_hook(self.finish_gcode, self.reference_tool)
 
             # Persist Offsets
             if save_config and not dry_run:
@@ -634,6 +833,13 @@ class ToolCalibrator:
             self.navigator.depart_station(toolhead, gcode_move)
             gcmd.respond_info(f"!! [tool_calibrator] Calibration Aborted: {ex}")
             raise gcmd.error(f"[tool_calibrator] Calibration Aborted: {ex}")
+        finally:
+            if session_token:
+                try:
+                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                except Exception:
+                    pass
+                self.session_token = None
 
     def cmd_CALIBRATION_TEACH_STATION(self, gcmd) -> None:
         """
@@ -663,7 +869,7 @@ class ToolCalibrator:
                 try:
                     self._center_nozzle(toolhead, gcmd)
                 except Exception as ex:
-                    gcmd.respond_info(f"Auto-centering note: {ex}. Proceeding with current manual position.")
+                    raise gcmd.error(f"[ERR_TEACH_CAM] Auto-centering failed during teach station: {ex}. Station not saved.")
                 finally:
                     self._set_inspection_lighting(False, self.reference_tool)
 
@@ -674,7 +880,7 @@ class ToolCalibrator:
             self.navigator.set_camera_waypoints(target_x, target_y, target_z, app_x, app_y)
 
             # Auto-persist to tool_offsets.cfg
-            self.config_manager.save_section("tool_calibrator_station camera", {
+            cam_data = {
                 "target_x": target_x,
                 "target_y": target_y,
                 "target_z": target_z,
@@ -682,12 +888,19 @@ class ToolCalibrator:
                 "approach_y": app_y,
                 "approach_z": target_z,
                 "safe_z": self.navigator.safe_z
-            })
+            }
+            self.config_manager.save_section("tool_calibrator_station camera", cam_data)
+            # Synchronize safe_z to switch station if it exists
+            sw_existing = self.config_manager.load_section("tool_calibrator_station switch")
+            if sw_existing:
+                sw_existing["safe_z"] = self.navigator.safe_z
+                self.config_manager.save_section("tool_calibrator_station switch", sw_existing)
 
             gcmd.respond_info(
                 f"✔ [CAMERA Station Configured & Saved Automatically]\n"
                 f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
                 f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
+                f"  Safe Z:   {self.navigator.safe_z} mm\n"
                 f"  Saved to: {self.config_manager.config_path}"
             )
 
@@ -704,13 +917,13 @@ class ToolCalibrator:
                     res = self.z_backend.probe_reference_tool(self.reference_tool, gcmd)
                     target_z = round(res.get("contact_z", res.get("trigger_z", pos[2])), 3)
                 except Exception as ex:
-                    gcmd.respond_info(f"Auto-touch note: {ex}. Using current Z height.")
+                    raise gcmd.error(f"[ERR_TEACH_SWITCH] Auto-touch probe failed during teach station: {ex}. Station not saved.")
 
             app_x, app_y = self.navigator.calculate_auto_approach(target_x, target_y, approach_dist)
             self.navigator.set_switch_waypoints(target_x, target_y, target_z, app_x, app_y)
 
             # Auto-persist to tool_offsets.cfg
-            self.config_manager.save_section("tool_calibrator_station switch", {
+            sw_data = {
                 "target_x": target_x,
                 "target_y": target_y,
                 "target_z": target_z,
@@ -718,12 +931,19 @@ class ToolCalibrator:
                 "approach_y": app_y,
                 "approach_z": target_z,
                 "safe_z": self.navigator.safe_z
-            })
+            }
+            self.config_manager.save_section("tool_calibrator_station switch", sw_data)
+            # Synchronize safe_z to camera station if it exists
+            cam_existing = self.config_manager.load_section("tool_calibrator_station camera")
+            if cam_existing:
+                cam_existing["safe_z"] = self.navigator.safe_z
+                self.config_manager.save_section("tool_calibrator_station camera", cam_existing)
 
             gcmd.respond_info(
                 f"✔ [SWITCH Station Configured & Saved Automatically]\n"
                 f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
                 f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
+                f"  Safe Z:   {self.navigator.safe_z} mm\n"
                 f"  Saved to: {self.config_manager.config_path}"
             )
 
@@ -744,47 +964,56 @@ class ToolCalibrator:
         if not self.navigator.is_homed():
             raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
 
+        session_token = None
+        try:
+            self._ensure_vision_sync()
+            lock_resp = self._query_vision("acquire_lock", {"client_id": "klipper", "timeout_seconds": 600}, timeout=2.0)
+            session_token = lock_resp.get("session_token")
+            self.session_token = session_token
+        except Exception:
+            pass
+
         gcmd.respond_info(f"[tool_calibrator] Starting Star-Pattern Camera Calibration (Displacement: ±{dist:.2f}mm)...")
         self._set_inspection_lighting(True, self.reference_tool)
 
-        # 1. Approach Camera safely
-        self.navigator.approach_camera(toolhead, gcode_move)
-
-        # 2. Initial Center
-        gcmd.respond_info("  -> Performing initial nozzle optical centering...")
         try:
-            self._center_nozzle(toolhead, gcmd)
-        except Exception as ex:
-            gcmd.respond_info(f"Centering note: {ex}")
+            # 1. Approach Camera safely
+            self.navigator.approach_camera(toolhead, gcode_move)
 
-        toolhead.wait_moves()
-        self.reactor.pause(self.reactor.monotonic() + 0.2)
+            # 2. Initial Center
+            gcmd.respond_info("  -> Performing initial nozzle optical centering...")
+            try:
+                self._center_nozzle(toolhead, gcmd)
+            except Exception as ex:
+                gcmd.respond_info(f"Centering note: {ex}")
 
-        # Baseline detection
-        base_resp = self._sample_burst(toolhead, gcmd)
-        if not base_resp or not base_resp.get("found"):
-            self.navigator.depart_station(toolhead, gcode_move)
-            raise gcmd.error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
+            toolhead.wait_moves()
+            self.reactor.pause(self.reactor.monotonic() + 0.2)
 
-        base_uv = base_resp.get("center_uv")
-        center_pos = toolhead.get_position()
-        cx, cy, cz = center_pos[0], center_pos[1], center_pos[2]
-        gcmd.respond_info(f"  -> Baseline established: Pos ({cx:.3f}, {cy:.3f}), UV ({base_uv[0]:.2f}, {base_uv[1]:.2f})")
+            # Baseline detection
+            base_resp = self._sample_burst(toolhead, gcmd)
+            if not base_resp or not base_resp.get("found"):
+                self.navigator.depart_station(toolhead, gcode_move)
+                raise gcmd.error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
 
-        # 3. Displacements in 4 orthogonal directions (+X, -X, +Y, -Y)
-        moves = [
-            ("+X", cx + dist, cy, dist, 0.0),
-            ("-X", cx - dist, cy, -dist, 0.0),
-            ("+Y", cx, cy + dist, 0.0, dist),
-            ("-Y", cx, cy - dist, 0.0, -dist)
-        ]
+            base_uv = base_resp.get("center_uv")
+            center_pos = toolhead.get_position()
+            cx, cy, cz = center_pos[0], center_pos[1], center_pos[2]
+            gcmd.respond_info(f"  -> Baseline established: Pos ({cx:.3f}, {cy:.3f}), UV ({base_uv[0]:.2f}, {base_uv[1]:.2f})")
 
-        mpp_samples = []
-        matrix_points = [
-            [[0.0, 0.0], list(base_uv)]
-        ]
+            # 3. Displacements in 4 orthogonal directions (+X, -X, +Y, -Y)
+            moves = [
+                ("+X", cx + dist, cy, dist, 0.0),
+                ("-X", cx - dist, cy, -dist, 0.0),
+                ("+Y", cx, cy + dist, 0.0, dist),
+                ("-Y", cx, cy - dist, 0.0, -dist)
+            ]
 
-        try:
+            mpp_samples = []
+            matrix_points = [
+                [[0.0, 0.0], list(base_uv)]
+            ]
+
             for label, tx, ty, rdx, rdy in moves:
                 toolhead.manual_move([tx, ty, None], self.navigator.approach_speed)
                 toolhead.wait_moves()
@@ -826,11 +1055,13 @@ class ToolCalibrator:
                 "target_z": round(cz, 3),
                 "safe_z": self.navigator.safe_z
             }
-            if matrix_vals and len(matrix_vals) >= 2 and len(matrix_vals[0]) >= 2 and len(matrix_vals[1]) >= 2:
+            if matrix_vals and len(matrix_vals) >= 2 and len(matrix_vals[0]) >= 2:
                 cam_dict["matrix_a"] = matrix_vals[0][0]
                 cam_dict["matrix_b"] = matrix_vals[0][1]
+                cam_dict["matrix_tx"] = matrix_vals[0][2] if len(matrix_vals[0]) >= 3 else 0.0
                 cam_dict["matrix_c"] = matrix_vals[1][0]
                 cam_dict["matrix_d"] = matrix_vals[1][1]
+                cam_dict["matrix_ty"] = matrix_vals[1][2] if len(matrix_vals[1]) >= 3 else 0.0
 
             # Persist calibrated MPP and matrix into tool_offsets.cfg under [tool_calibrator_station camera]
             self.config_manager.save_section("tool_calibrator_station camera", cam_dict)
@@ -844,6 +1075,12 @@ class ToolCalibrator:
             )
 
         finally:
+            if session_token:
+                try:
+                    self._query_vision("release_lock", {"session_token": session_token}, timeout=2.0)
+                except Exception:
+                    pass
+                self.session_token = None
             self._set_inspection_lighting(False, self.reference_tool)
             self.navigator.depart_station(toolhead, gcode_move)
 
@@ -858,6 +1095,16 @@ class ToolCalibrator:
         pos_type = gcmd.get("TYPE", "").upper()
         save_to_disk = gcmd.get_int("SAVE", 1) == 1
 
+        if pos_type == "SAFE_Z":
+            self.navigator.safe_z = round(pos[2], 3)
+            gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
+            if save_to_disk:
+                for sec in ("tool_calibrator_station camera", "tool_calibrator_station switch"):
+                    existing = self.config_manager.load_section(sec) or {}
+                    existing["safe_z"] = self.navigator.safe_z
+                    self.config_manager.save_section(sec, existing)
+            return
+
         if station == "CAMERA":
             if pos_type == "APPROACH":
                 self.navigator.cam_approach_x = round(pos[0], 3)
@@ -868,9 +1115,6 @@ class ToolCalibrator:
                 self.navigator.cam_target_y = round(pos[1], 3)
                 self.navigator.cam_target_z = round(pos[2], 3)
                 gcmd.respond_info(f"Camera Optical Center set to X:{pos[0]:.3f} Y:{pos[1]:.3f} Z:{pos[2]:.3f}")
-            elif pos_type == "SAFE_Z":
-                self.navigator.safe_z = round(pos[2], 3)
-                gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
 
             if save_to_disk:
                 cam_data = {
@@ -896,9 +1140,6 @@ class ToolCalibrator:
                 self.navigator.switch_target_y = round(pos[1], 3)
                 self.navigator.switch_target_z = round(pos[2], 3)
                 gcmd.respond_info(f"Z-Switch Target Pin set to X:{pos[0]:.3f} Y:{pos[1]:.3f} Z:{pos[2]:.3f}")
-            elif pos_type == "SAFE_Z":
-                self.navigator.safe_z = round(pos[2], 3)
-                gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
 
             if save_to_disk:
                 switch_data = {

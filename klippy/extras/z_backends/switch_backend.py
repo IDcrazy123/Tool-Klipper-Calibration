@@ -19,8 +19,13 @@ class SwitchBackend(BaseZBackend):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self.samples = config.getint("switch_samples", 3, minval=1, maxval=10)
-        self.switch_pin = config.get("pin", None)
+        self.samples = config.getint("switch_samples", None)
+        if self.samples is None:
+            self.samples = config.getint("samples", 3, minval=1, maxval=10)
+        self.switch_pin = config.get("switch_pin", config.get("pin", None))
+        self.probing_speed = config.getfloat("probing_speed", 3.0, above=0.0)
+        self.lift_speed = config.getfloat("lift_speed", 5.0, above=0.0)
+        self.samples_retract_dist = config.getfloat("samples_retract_dist", 2.0, above=0.0)
         self.probe = None
 
         # Anti-conflict: Check if tools_calibrate is already configured
@@ -71,8 +76,8 @@ class SwitchBackend(BaseZBackend):
         # Run multi-axis / single Z probe sequence
         z_result = probe.run_probe("z-", gcmd, speed_ratio=0.5, max_distance=10.0, samples=self.samples)[2]
 
-        # Retract to start altitude
-        toolhead.move(start_pos, 10.0)
+        # Retract to start altitude using configured lift_speed
+        toolhead.move(start_pos, self.lift_speed)
         toolhead.set_position(start_pos)
         toolhead.wait_moves()
 
@@ -93,7 +98,7 @@ class SwitchBackend(BaseZBackend):
 
         z_result = probe.run_probe("z-", gcmd, speed_ratio=0.5, max_distance=10.0, samples=self.samples)[2]
 
-        toolhead.move(start_pos, 10.0)
+        toolhead.move(start_pos, self.lift_speed)
         toolhead.set_position(start_pos)
         toolhead.wait_moves()
 

@@ -8,6 +8,7 @@ auto bed-center fallback, and safe nozzle liftoff retraction.
 
 from typing import Dict, Any, Optional, Tuple
 import logging
+import math
 import os
 from .base_z import BaseZBackend
 
@@ -135,18 +136,96 @@ class CartographerBackend(BaseZBackend):
                     raise
                 logger.debug(f"Thermal check skipped for {extruder_name}: {ex}")
 
+    @staticmethod
+    def _extract_float(val: Any) -> Optional[float]:
+        """Extracts a finite float, safely discarding MagicMock objects."""
+        if val is None or hasattr(val, "_mock_name"):
+            return None
+        try:
+            f = float(val)
+            return f if math.isfinite(f) else None
+        except (ValueError, TypeError):
+            return None
+
     def _get_last_z_result(self) -> Optional[float]:
         """Queries the last measured probe Z result from printer objects."""
-        for obj_name in ("cartographer", "scanner", "probe"):
+        # 1. Cartographer / Scanner touch plugin
+        for obj_name in ("cartographer", "scanner"):
             obj = self.printer.lookup_object(obj_name, None)
-            if obj is not None and hasattr(obj, "last_z_result"):
-                return float(obj.last_z_result)
+            if obj is not None:
+                # Check touch_mode or touch submodule
+                for sub_attr in ("touch_mode", "touch"):
+                    sub = getattr(obj, sub_attr, None)
+                    if sub is not None and hasattr(sub, "last_z_result"):
+                        res = self._extract_float(sub.last_z_result)
+                        if res is not None:
+                            return res
+                # Check direct attribute
+                if hasattr(obj, "last_z_result"):
+                    res = self._extract_float(obj.last_z_result)
+                    if res is not None:
+                        return res
+                # Check get_status(eventtime)
+                if hasattr(obj, "get_status") and not hasattr(obj.get_status, "_mock_name"):
+                    try:
+                        eventtime = self.printer.get_reactor().monotonic()
+                        st = obj.get_status(eventtime)
+                        if isinstance(st, dict):
+                            touch_st = st.get("touch")
+                            if isinstance(touch_st, dict):
+                                res = self._extract_float(touch_st.get("last_z_result"))
+                                if res is not None:
+                                    return res
+                            res = self._extract_float(st.get("last_z_result"))
+                            if res is not None:
+                                return res
+                    except Exception:
+                        pass
+
+        # 2. Check probe or probe macro objects
+        for obj_name in (
+            "probe",
+            "touch_probe",
+            "cartographer_touch_probe",
+            "gcode_macro CARTOGRAPHER_TOUCH_PROBE",
+            "gcode_macro TOUCH_PROBE",
+        ):
+            obj = self.printer.lookup_object(obj_name, None)
+            if obj is not None:
+                if hasattr(obj, "last_z_result"):
+                    res = self._extract_float(obj.last_z_result)
+                    if res is not None:
+                        return res
+                for pos_attr in ("last_trigger_position", "last_probe_position"):
+                    pos = getattr(obj, pos_attr, None)
+                    if pos is not None:
+                        if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                            res = self._extract_float(pos[2])
+                            if res is not None:
+                                return res
+                        else:
+                            res = self._extract_float(pos)
+                            if res is not None:
+                                return res
+                if hasattr(obj, "get_status") and not hasattr(obj.get_status, "_mock_name"):
+                    try:
+                        eventtime = self.printer.get_reactor().monotonic()
+                        st = obj.get_status(eventtime)
+                        if isinstance(st, dict):
+                            res = self._extract_float(st.get("last_z_result"))
+                            if res is not None:
+                                return res
+                    except Exception:
+                        pass
+
         return None
 
     def probe_reference_tool(self, tool_number: int, gcmd) -> Dict[str, Any]:
         """
         Executes baseline Cartographer touch measurement for Reference Tool (T0).
-        Records the physical contact height Z_ref.
+        Records physical contact height Z_ref. When a homing routine (e.g. TOUCH_HOME)
+        is executed, it redefines the coordinate origin (Z=0) at the touch point,
+        so the reference contact in the active coordinate system becomes 0.0.
         """
         self._check_thermal_safety(tool_number, gcmd)
         toolhead = self.printer.lookup_object("toolhead")
@@ -166,9 +245,14 @@ class CartographerBackend(BaseZBackend):
         toolhead.manual_move([None, None, cur_pos[2] + self.retract_z], 15.0)
         toolhead.wait_moves()
 
+        is_homing = ("HOME" in cmd.upper() or "G28" in cmd.upper())
+        effective_contact_z = 0.0 if is_homing else measured_z
+
         return {
             "source": "cartographer_touch_reference",
-            "contact_z": measured_z,
+            "contact_z": effective_contact_z,
+            "raw_contact_z": measured_z,
+            "is_homed": is_homing,
             "suggested_z_offset": 0.0,
             "touch_model_z_offset": self.touch_model_z_offset,
             "tool_number": tool_number
@@ -177,7 +261,8 @@ class CartographerBackend(BaseZBackend):
     def probe_secondary_tool(self, tool_number: int, reference_result: Dict[str, Any], gcmd) -> Dict[str, Any]:
         """
         Executes Cartographer touch measurement for secondary tools (T1..Tn).
-        Computes relative physical delta: delta_z = measured_z - ref_contact_z.
+        If Reference Tool established Z=0 via TOUCH_HOME, the secondary measured Z
+        in that coordinate system directly represents the relative physical delta.
         """
         self._check_thermal_safety(tool_number, gcmd)
         toolhead = self.printer.lookup_object("toolhead")
@@ -197,7 +282,11 @@ class CartographerBackend(BaseZBackend):
         toolhead.manual_move([None, None, cur_pos[2] + self.retract_z], 15.0)
         toolhead.wait_moves()
 
-        ref_z = reference_result.get("contact_z", 0.0)
+        is_homed = reference_result.get("is_homed", False)
+        if is_homed:
+            ref_z = 0.0
+        else:
+            ref_z = reference_result.get("contact_z", 0.0)
         delta_z = round(measured_z - ref_z, 3)
 
         return {

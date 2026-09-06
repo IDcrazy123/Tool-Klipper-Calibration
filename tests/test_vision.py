@@ -289,7 +289,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(data["delta_uv"], [-2.42, -4.29])
         self.assertAlmostEqual(data["delta_xy"][0], 0.0303, delta=0.001)
         self.assertAlmostEqual(data["delta_xy"][1], 0.0536, delta=0.001)
-        self.assertIn("G10 P1", data["gcode_command"])
+        self.assertIn("SET_TOOL_OFFSET TOOL=1", data["gcode_command"])
         self.assertIn("[tool 1]", data["config_snippet"])
 
     def test_picture_screenshot_sweep_dataset(self):

@@ -193,44 +193,68 @@ kinematics: corexy
 
     def test_relative_delta_z_longer_nozzle(self):
         """
-        Reference Tool T0 touches at Z=0.050.
-        Secondary Tool T1 has a longer nozzle, touching earlier at Z=0.130.
+        Reference Tool T0 executes CARTOGRAPHER_TOUCH_HOME, redefining Z=0 at physical touch.
+        Secondary Tool T1 has a longer nozzle, touching earlier at Z=0.080 in the homed coordinate system.
         Relative delta should be +0.080mm.
         """
         backend = CartographerBackend(self.config)
         gcmd = DummyGCodeCommand()
 
-        # 1. Reference Tool T0
+        # 1. Reference Tool T0 touch homes (origin reset to 0.0)
         self.cartographer_obj.last_z_result = 0.050
         ref_result = backend.probe_reference_tool(0, gcmd)
         self.assertEqual(ref_result["source"], "cartographer_touch_reference")
-        self.assertAlmostEqual(ref_result["contact_z"], 0.050, delta=0.001)
+        self.assertTrue(ref_result["is_homed"])
+        self.assertAlmostEqual(ref_result["contact_z"], 0.0, delta=0.001)
+        self.assertAlmostEqual(ref_result["raw_contact_z"], 0.050, delta=0.001)
         self.assertEqual(ref_result["suggested_z_offset"], 0.0)
         # Verify safe liftoff occurred
         self.assertGreater(self.toolhead.pos[2], 0.050)
 
-        # 2. Secondary Tool T1
-        self.cartographer_obj.last_z_result = 0.130
+        # 2. Secondary Tool T1 probes in homed coordinate system
+        self.cartographer_obj.last_z_result = 0.080
         sec_result = backend.probe_secondary_tool(1, ref_result, gcmd)
         self.assertEqual(sec_result["source"], "cartographer_touch")
-        self.assertAlmostEqual(sec_result["contact_z"], 0.130, delta=0.001)
-        # Delta Z = 0.130 - 0.050 = +0.080mm
+        self.assertAlmostEqual(sec_result["contact_z"], 0.080, delta=0.001)
+        # Delta Z = 0.080mm directly in homed frame
         self.assertAlmostEqual(sec_result["suggested_z_offset"], 0.080, delta=0.001)
 
     def test_relative_delta_z_shorter_nozzle(self):
         """
-        Reference Tool T0 touches at Z=0.050.
+        Reference Tool T0 touches at Z=0.050 (non-homing baseline).
         Secondary Tool T2 has a shorter nozzle, touching at Z=0.010.
         Relative delta should be -0.040mm.
         """
         backend = CartographerBackend(self.config)
         gcmd = DummyGCodeCommand()
 
-        ref_result = {"contact_z": 0.050}
+        ref_result = {"contact_z": 0.050, "is_homed": False}
         self.cartographer_obj.last_z_result = 0.010
         sec_result = backend.probe_secondary_tool(2, ref_result, gcmd)
         # Delta Z = 0.010 - 0.050 = -0.040mm
         self.assertAlmostEqual(sec_result["suggested_z_offset"], -0.040, delta=0.001)
+
+    def test_relative_delta_z_non_homing_probe(self):
+        """
+        When touch_home_gcode does not reset origin (e.g. TOUCH_PROBE),
+        relative delta is computed by subtracting reference contact from secondary contact.
+        """
+        cfg = DummyConfig(self.printer, {
+            "touch_home_gcode": "CARTOGRAPHER_TOUCH_PROBE",
+            "touch_probe_gcode": "CARTOGRAPHER_TOUCH_PROBE",
+            "touch_model_config_path": self.printer_cfg_path
+        })
+        backend = CartographerBackend(cfg)
+        gcmd = DummyGCodeCommand()
+
+        self.cartographer_obj.last_z_result = 0.050
+        ref_result = backend.probe_reference_tool(0, gcmd)
+        self.assertFalse(ref_result["is_homed"])
+        self.assertAlmostEqual(ref_result["contact_z"], 0.050, delta=0.001)
+
+        self.cartographer_obj.last_z_result = 0.130
+        sec_result = backend.probe_secondary_tool(1, ref_result, gcmd)
+        self.assertAlmostEqual(sec_result["suggested_z_offset"], 0.080, delta=0.001)
 
     def test_thermal_safety_guard_blocks_hot_nozzle(self):
         """Cartographer touch must abort if nozzle temperature exceeds safety limit (> 150°C)."""

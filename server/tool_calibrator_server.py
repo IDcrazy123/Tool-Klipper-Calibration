@@ -10,6 +10,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
 from typing import Dict, Any
 import numpy as np
@@ -39,6 +40,25 @@ detector = NozzleDetector()
 solver = TransformationSolver(damping_factor=0.55)
 debugger = VisualDebugger()
 
+calibration_lock = {
+    "session_id": None,
+    "locked_at": 0.0,
+    "token": os.environ.get("CALIBRATION_API_TOKEN", None)
+}
+lock_mutex = threading.Lock()
+stream_lock = threading.Lock()
+active_preview_streams = 0
+MAX_PREVIEW_STREAMS = 2
+
+
+def _check_auth(req) -> bool:
+    """Verifies optional API token or active calibration session."""
+    expected = calibration_lock.get("token")
+    if not expected:
+        return True
+    header_token = req.headers.get("X-Calibration-Token") or req.headers.get("Authorization", "").replace("Bearer ", "")
+    return header_token == expected
+
 
 @app.route("/", methods=["GET"])
 def dashboard():
@@ -52,19 +72,57 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "tool_calibrator_server",
-        "version": "0.8.7",
+        "version": "0.8.8",
         "camera_url": grabber.camera_url,
         "matrix_solved": solver.transform_matrix is not None,
-        "calibrated_mpp": solver.mpp
+        "calibrated_mpp": solver.mpp,
+        "session_locked": calibration_lock["session_id"] is not None
     }), 200
+
+
+@app.route("/acquire_lock", methods=["POST"])
+def acquire_lock():
+    """Acquires an exclusive calibration session lock."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    req_session = data.get("session_id", str(time.time()))
+    with lock_mutex:
+        now = time.time()
+        current = calibration_lock["session_id"]
+        if current is None or (now - calibration_lock["locked_at"] > 600):
+            calibration_lock["session_id"] = req_session
+            calibration_lock["locked_at"] = now
+            return jsonify({"success": True, "session_id": req_session}), 200
+        elif current == req_session:
+            calibration_lock["locked_at"] = now
+            return jsonify({"success": True, "session_id": req_session}), 200
+        return jsonify({"success": False, "error": "Session locked by another client"}), 409
+
+
+@app.route("/release_lock", methods=["POST"])
+def release_lock():
+    """Releases the calibration session lock."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    req_session = data.get("session_id")
+    with lock_mutex:
+        if calibration_lock["session_id"] is None or calibration_lock["session_id"] == req_session:
+            calibration_lock["session_id"] = None
+            calibration_lock["locked_at"] = 0.0
+            return jsonify({"success": True}), 200
+        return jsonify({"success": False, "error": "Session ID mismatch"}), 403
 
 
 @app.route("/set_camera", methods=["POST"])
 def set_camera():
     """Updates the snapshot camera URL."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     try:
         data: Dict[str, Any] = request.get_json(force=True)
-        new_url = data.get("camera_url")
+        new_url = data.get("camera_url") or data.get("url")
         if not new_url:
             return jsonify({"success": False, "error": "Missing 'camera_url' parameter"}), 400
 
@@ -78,14 +136,18 @@ def set_camera():
 @app.route("/set_mpp", methods=["POST"])
 def set_mpp():
     """Updates the calibrated mm-per-pixel scale."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     try:
         data: Dict[str, Any] = request.get_json(force=True)
         mpp = data.get("mpp")
-        if not mpp or float(mpp) <= 0:
-            return jsonify({"success": False, "error": "Invalid 'mpp' parameter"}), 400
+        if mpp is None:
+            return jsonify({"success": False, "error": "Missing 'mpp' parameter"}), 400
 
-        solver.set_mpp(float(mpp))
+        solver.set_mpp(mpp)
         return jsonify({"success": True, "mpp": solver.mpp}), 200
+    except (ValueError, TypeError) as ex:
+        return jsonify({"success": False, "error": str(ex)}), 400
     except Exception as ex:
         logger.exception("Error in /set_mpp")
         return jsonify({"success": False, "error": str(ex)}), 500
@@ -207,6 +269,8 @@ def solve_matrix():
     Solves 2nd-order transformation matrix from calibration coordinates:
     Payload: { "calibration_points": [[[real_x, real_y], [u, v]], ...] }
     """
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     try:
         data = request.get_json(force=True)
         points = data.get("calibration_points", [])
@@ -219,6 +283,8 @@ def solve_matrix():
             "matrix_solved": True,
             "matrix": solver.get_matrix()
         }), 200
+    except ValueError as ex:
+        return jsonify({"success": False, "error": str(ex)}), 400
     except Exception as ex:
         logger.exception("Error in /solve_matrix")
         return jsonify({"success": False, "error": str(ex)}), 400
@@ -227,6 +293,8 @@ def solve_matrix():
 @app.route("/set_matrix", methods=["POST"])
 def set_matrix_endpoint():
     """Loads a pre-computed transformation matrix into the solver."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     try:
         data = request.get_json(force=True)
         mat = data.get("matrix")
@@ -234,6 +302,8 @@ def set_matrix_endpoint():
             return jsonify({"success": False, "error": "Missing 'matrix' parameter"}), 400
         solver.set_matrix(mat)
         return jsonify({"success": True, "matrix": solver.get_matrix()}), 200
+    except ValueError as ex:
+        return jsonify({"success": False, "error": str(ex)}), 400
     except Exception as ex:
         logger.exception("Error in /set_matrix")
         return jsonify({"success": False, "error": str(ex)}), 400
@@ -257,10 +327,11 @@ def calculate_offset():
         if not center_uv or len(center_uv) != 2:
             return jsonify({"success": False, "error": "Invalid 'center_uv' coordinate"}), 400
 
-        offset_xy = solver.calculate_offset((float(center_uv[0]), float(center_uv[1])))
+        damped_xy, raw_error = solver.calculate_offset_detail((float(center_uv[0]), float(center_uv[1])))
         return jsonify({
             "success": True,
-            "offset_xy": offset_xy
+            "offset_xy": list(damped_xy),
+            "raw_error_mm": list(raw_error)
         }), 200
     except Exception as ex:
         logger.exception("Error in /calculate_offset")
@@ -303,7 +374,7 @@ def calculate_tool_delta():
             "delta_uv": delta_uv,
             "delta_xy": [dx, dy],
             "mpp": solver.mpp,
-            "gcode_command": f"G10 P{tool_idx} X{dx:.4f} Y{dy:.4f}",
+            "gcode_command": f"SET_TOOL_OFFSET TOOL={tool_idx} X={dx:.4f} Y={dy:.4f}",
             "config_snippet": f"[tool {tool_idx}]\ngcode_x_offset: {dx:.4f}\ngcode_y_offset: {dy:.4f}"
         }), 200
     except Exception as ex:
@@ -367,9 +438,26 @@ def _fetch_live_frame():
 
 @app.route("/preview", methods=["GET"])
 def live_preview():
-    """Serves real-time annotated MJPEG preview stream."""
+    """Serves real-time annotated MJPEG preview stream with concurrency limiting."""
+    global active_preview_streams
+    with stream_lock:
+        if active_preview_streams >= MAX_PREVIEW_STREAMS:
+            return jsonify({
+                "success": False,
+                "error": f"Maximum concurrent preview streams ({MAX_PREVIEW_STREAMS}) reached. Please use /snapshot or close other streams."
+            }), 429
+        active_preview_streams += 1
+
+    def _wrapped_generator():
+        global active_preview_streams
+        try:
+            yield from debugger.mjpeg_generator(frame_fetcher=_fetch_live_frame, max_duration_seconds=120.0)
+        finally:
+            with stream_lock:
+                active_preview_streams = max(0, active_preview_streams - 1)
+
     return Response(
-        debugger.mjpeg_generator(frame_fetcher=_fetch_live_frame),
+        _wrapped_generator(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
 
@@ -383,12 +471,16 @@ def snapshot_jpeg():
 
 def main():
     parser = argparse.ArgumentParser(description="Tool-Klipper-Calibration Vision Daemon")
-    parser.add_argument("--host", default="0.0.0.0", help="Host address to bind (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Host address to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8090, help="Port to listen on (default: 8090)")
     parser.add_argument("--threads", type=int, default=8, help="Waitress worker threads (default: 8)")
     parser.add_argument("--camera-url", default=None, help="Camera snapshot stream URL")
     parser.add_argument("--mpp", type=float, default=None, help="Pre-calibrated mm-per-pixel scale")
+    parser.add_argument("--api-token", default=None, help="Optional API authentication token")
     args = parser.parse_args()
+
+    if args.api_token:
+        calibration_lock["token"] = args.api_token
 
     # Configure camera URL if provided via CLI flag or env var
     cam_url = args.camera_url or os.environ.get("CAMERA_STREAM_URL")

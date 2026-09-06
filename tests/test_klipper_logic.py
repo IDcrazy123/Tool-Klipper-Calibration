@@ -82,5 +82,40 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(float(loaded["approach_y"]), 35.456)
 
 
+    def test_tool_t_prefix_matching(self):
+        """Toolchanger allows [tool T1] or [tool 1]. ConfigManager must update [tool T1] in-place without creating duplicate [tool 1]."""
+        with open(self.cfg_file, "w", encoding="utf-8") as f:
+            f.write("[tool T1]\ngcode_x_offset: 0.050\ngcode_y_offset: 0.050\n")
+
+        self.manager.save_tool_offsets(1, {"x": 0.123, "y": -0.456, "z": 0.789})
+
+        with open(self.cfg_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Must keep [tool T1] and NOT create [tool 1]
+        self.assertIn("[tool T1]", content)
+        self.assertNotIn("[tool 1]", content)
+        self.assertIn("gcode_x_offset: 0.123", content)
+        self.assertIn("gcode_y_offset: -0.456", content)
+        self.assertIn("gcode_z_offset: 0.789", content)
+
+    def test_save_affine_matrix_translation_precision(self):
+        """Affine matrix translations matrix_tx and matrix_ty must be saved with 6-digit precision."""
+        cam_data = {
+            "mpp": 0.012543,
+            "matrix_a": 0.012456,
+            "matrix_b": -0.000123,
+            "matrix_tx": 0.123456,
+            "matrix_c": 0.000145,
+            "matrix_d": 0.012501,
+            "matrix_ty": -0.654321
+        }
+        self.manager.save_section("tool_calibrator_station camera", cam_data)
+        loaded = self.manager.load_section("tool_calibrator_station camera")
+
+        self.assertAlmostEqual(float(loaded["matrix_tx"]), 0.123456, places=6)
+        self.assertAlmostEqual(float(loaded["matrix_ty"]), -0.654321, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

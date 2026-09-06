@@ -256,10 +256,10 @@ def main():
         tu, tv = tool_means[t]
         du = tu - t0_u
         dv = tv - t0_v
-        dx = du * mpp
-        dy = dv * mpp
+        dx = -1.0 * du * mpp
+        dy = -1.0 * dv * mpp
         t_idx = t.replace('T', '')
-        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm** | **{dy:+.4f}mm** | `G10 P{t_idx} X{dx:+.4f} Y{dy:+.4f}` |')
+        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm** | **{dy:+.4f}mm** | `SET_TOOL_OFFSET TOOL={t_idx} X{dx:+.4f} Y{dy:+.4f}` |')
 
     readme_path = os.path.join(out_dir, "README.md")
     with open(readme_path, 'w', encoding='utf-8') as f_md:

@@ -10,6 +10,7 @@ import datetime
 import glob
 import logging
 import os
+import re
 import shutil
 
 logger = logging.getLogger("tool_calibrator.config_manager")
@@ -114,16 +115,20 @@ class ConfigManager:
         section_start = -1
         section_end = len(lines)
 
+        m_tool = re.match(r"^tool\s+(?:t)?(\d+)$", clean_section, re.IGNORECASE)
+        tool_pattern = re.compile(rf"^\[tool\s+(?:t)?{m_tool.group(1)}\]$", re.IGNORECASE) if m_tool else None
+
         for i, raw_line in enumerate(lines):
             line = raw_line.strip()
-            if line == target_header:
+            if (tool_pattern and tool_pattern.match(line)) or line == target_header:
                 section_start = i
+                target_header = line
             elif section_start != -1 and line.startswith("[") and line.endswith("]"):
                 section_end = i
                 break
 
         formatted_values = {}
-        high_precision_keys = {"mpp", "matrix_a", "matrix_b", "matrix_c", "matrix_d"}
+        high_precision_keys = {"mpp", "matrix_a", "matrix_b", "matrix_c", "matrix_d", "matrix_tx", "matrix_ty"}
         for k, v in values.items():
             if v is None:
                 continue
@@ -212,10 +217,13 @@ class ConfigManager:
             section_start = -1
             section_end = len(lines)
 
+            tool_pattern = re.compile(rf"^\[tool\s+(?:t)?{t_num}\]$", re.IGNORECASE)
+
             for i, raw_line in enumerate(lines):
                 line = raw_line.strip()
-                if line == target_header:
+                if tool_pattern.match(line) or line == target_header:
                     section_start = i
+                    target_header = line
                 elif section_start != -1 and line.startswith("[") and line.endswith("]"):
                     section_end = i
                     break

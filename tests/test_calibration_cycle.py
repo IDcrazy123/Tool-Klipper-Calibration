@@ -116,22 +116,22 @@ class DummyPrinter:
         self.toolchanger = toolchanger or DummyToolchanger()
         self.gcode_move = MagicMock()
         self.gcode_macro = DummyGCodeMacro()
+        self.objects = {
+            "toolhead": self.toolhead,
+            "gcode": self.gcode,
+            "toolchanger": self.toolchanger,
+            "gcode_move": self.gcode_move,
+            "gcode_macro": self.gcode_macro,
+        }
 
     def get_reactor(self):
         return self.reactor
 
     def lookup_object(self, name, default=None):
-        if name == "toolhead":
-            return self.toolhead
-        elif name == "gcode":
-            return self.gcode
-        elif name == "toolchanger":
-            return self.toolchanger
-        elif name == "gcode_move":
-            return self.gcode_move
-        elif name == "gcode_macro":
-            return self.gcode_macro
-        return default
+        return self.objects.get(name, default)
+
+    def lookup_objects(self):
+        return self.objects
 
     def load_object(self, config, name):
         if name == "gcode_macro":
@@ -323,16 +323,23 @@ class TestCalibrationCycle(unittest.TestCase):
     def test_generic_tool_discovery(self):
         """Verifies toolhead discovery across diverse Klipper toolchanger architectures."""
         calibrator = ToolCalibrator(self.config)
+        self.printer.objects["tool 2"] = MagicMock()
+        self.printer.objects["tool 3"] = MagicMock()
 
         # Case 1: Explicit TOOLS parameter
         tools = calibrator._discover_tools(tools_param="2,3")
         self.assertEqual(tools, [0, 2, 3])
 
+        # Validation: Rejection of non-existent tool
+        with self.assertRaises(SafeNavigatorException) as ctx:
+            calibrator._discover_tools(tools_param="99")
+        self.assertIn("ERR_TOOL_NOT_FOUND", str(ctx.exception))
+
         # Case 2: Config tools parameter
-        calibrator.config.data["tools"] = "0, 1, 2"
+        calibrator.configured_tools_str = "0, 1, 2"
         tools = calibrator._discover_tools(tools_param=None)
         self.assertEqual(tools, [0, 1, 2])
-        del calibrator.config.data["tools"]
+        calibrator.configured_tools_str = None
 
         # Case 3: Auto-discovered from printer objects (e.g. gcode_macro T0, T1, T2)
         calibrator.printer.lookup_object = lambda name, default=None: None
