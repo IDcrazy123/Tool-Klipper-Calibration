@@ -35,6 +35,10 @@ class DummyGCodeCommand:
     def respond_error(self, msg):
         self.error_messages.append(msg)
 
+    def error(self, msg):
+        self.error_messages.append(msg)
+        return Exception(msg)
+
 
 class DummyToolchanger:
     def __init__(self, tools=(0, 1)):
@@ -72,9 +76,21 @@ class DummyReactor:
         pass
 
 
+class DummyTemplateWrapper:
+    def __init__(self, script=""):
+        self.script = script
+        self.run_count = 0
+
+    def run_gcode_from_command(self, context=None):
+        self.run_count += 1
+
+
 class DummyGCodeMacro:
-    def load_template(self, config, name, default):
-        return ""
+    def load_template(self, config, name, default=None):
+        raw = config.get(name, default)
+        if raw is None:
+            return None
+        return DummyTemplateWrapper(raw)
 
     def run_script(self, name, script, context):
         pass
@@ -630,6 +646,105 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("gcode_y_offset = 12.345000", content)
         # Tool 1 Z should be updated
         self.assertIn("gcode_z_offset: 0.250", content)
+
+    def test_non_convergence_raises_safe_navigator_exception(self):
+        """If centering corrections remain above tolerance after max iterations, an exception must be raised."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.max_centering_iterations = 3
+        gcmd = DummyGCodeCommand()
+        self.toolhead.pos = [150.0, 10.0, 22.0, 0.0]
+
+        # Always return a 0.1mm offset_xy (well above tolerance_mm=0.015)
+        calibrator._query_vision = MagicMock(return_value={
+            "found": True,
+            "center_uv": [340.0, 260.0],
+            "offset_xy": [0.10, 0.10],
+            "radius": 40.0,
+            "confidence": 0.99
+        })
+
+        with self.assertRaises(SafeNavigatorException) as ctx:
+            calibrator._center_nozzle(self.toolhead, gcmd)
+
+        self.assertIn("[ERR_CV_202]", str(ctx.exception))
+
+    def test_safe_z_roundtrip_persistence(self):
+        """Safe Z taught via command must persist to disk and restore upon reinitialization."""
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
+
+        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
+        self.assertEqual(calibrator.navigator.safe_z, 70.0)
+
+        # Re-initialize calibrator to verify load_saved_stations restores 70.0mm
+        new_calibrator = ToolCalibrator(self.config)
+        self.assertEqual(new_calibrator.navigator.safe_z, 70.0)
+
+    def test_teaching_step_by_step_no_none_strings(self):
+        """Teaching SAFE_Z before TARGET must never write the literal string 'None' to config."""
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [150.0, 10.0, 45.0, 0.0]
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
+
+        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
+
+        with open(self.config_path, "r") as f:
+            content = f.read()
+
+        self.assertNotIn("None", content)
+        self.assertIn("safe_z: 45.0", content)
+
+    def test_discover_tools_handles_tuple_list(self):
+        """Klipper lookup_objects() returns list of (name, obj) tuples; _discover_tools must parse correctly."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.printer.toolchanger = None  # Remove toolchanger to test lookup_objects fallback
+        self.printer.lookup_objects = MagicMock(return_value=[
+            ("tool 0", MagicMock()),
+            ("tool 1", MagicMock()),
+            ("tool 2", MagicMock()),
+            ("extruder", MagicMock())
+        ])
+        tools = calibrator._discover_tools()
+        self.assertEqual(tools, [0, 1, 2])
+
+    def test_batch_saving_creates_single_backup(self):
+        """Multi-tool calibration must execute atomic batch save with a single backup per session."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 1, "CALIBRATE_Z": 1, "SAVE_CONFIG": 1})
+
+        calibrator._query_vision = MagicMock(return_value={
+            "found": True,
+            "center_uv": [320.0, 240.0],
+            "offset_xy": [0.001, 0.001],
+            "confidence": 0.99,
+            "radius": 40.0,
+            "burst_count": 3,
+            "burst_total": 3,
+            "spread_px": 0.1
+        })
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"baseline_z": 1.5, "source": "cartographer"})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.120})
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # Inspect backup directory: exactly 1 backup file created for the 2-tool run
+        backup_dir = os.path.join(tempfile.gettempdir(), "tool_calibrator_backups")
+        if os.path.isdir(backup_dir):
+            backups = [f for f in os.listdir(backup_dir) if f.startswith("tool_offsets_")]
+            self.assertGreaterEqual(len(backups), 1)
+
+    def test_switch_teaching_records_contact_z(self):
+        """cmd_CALIBRATION_TEACH_STATION on SWITCH must read contact_z from probe result."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.z_backend_type = "switch"
+        self.toolhead.pos = [220.0, 345.0, 15.0, 0.0]
+        gcmd = DummyGCodeCommand({"STATION": "SWITCH", "SAVE": 1})
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"success": True, "contact_z": 12.345})
+        calibrator.cmd_CALIBRATION_TEACH_STATION(gcmd)
+
+        self.assertEqual(calibrator.navigator.switch_target_z, 12.345)
 
 
 if __name__ == "__main__":

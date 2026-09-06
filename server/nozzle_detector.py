@@ -6,7 +6,7 @@ derived and optimized from TAMV and kTAMV.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import logging
 import math
 import cv2

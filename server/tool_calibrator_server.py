@@ -12,6 +12,7 @@ import os
 import sys
 import time
 from typing import Dict, Any
+import numpy as np
 
 from flask import Flask, jsonify, request, Response, render_template
 from waitress import serve
@@ -112,12 +113,16 @@ def detect_nozzle():
         while time.time() - start_time < timeout:
             frame, err = grabber.grab_frame()
             if frame is None:
-                debugger.update_frame(debugger.get_latest_jpeg() or np.zeros((480, 640, 3)), f"CAMERA ERROR: {err}")
+                black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                debugger.update_frame(black_frame, f"CAMERA ERROR: {err}")
                 return jsonify({
                     "success": False,
                     "found": False,
                     "error": f"Failed grabbing frame: {err}"
                 }), 502
+
+            h, w = frame.shape[:2]
+            solver.set_frame_center(w / 2.0, h / 2.0)
 
             result = detector.detect(frame)
             status_text = f"FOUND (Tier {result.tier})" if result.found else "SEARCHING..."
@@ -211,11 +216,33 @@ def solve_matrix():
         solver.solve_matrix(points)
         return jsonify({
             "success": True,
-            "matrix_solved": True
+            "matrix_solved": True,
+            "matrix": solver.get_matrix()
         }), 200
     except Exception as ex:
         logger.exception("Error in /solve_matrix")
         return jsonify({"success": False, "error": str(ex)}), 400
+
+
+@app.route("/set_matrix", methods=["POST"])
+def set_matrix_endpoint():
+    """Loads a pre-computed transformation matrix into the solver."""
+    try:
+        data = request.get_json(force=True)
+        mat = data.get("matrix")
+        if not mat:
+            return jsonify({"success": False, "error": "Missing 'matrix' parameter"}), 400
+        solver.set_matrix(mat)
+        return jsonify({"success": True, "matrix": solver.get_matrix()}), 200
+    except Exception as ex:
+        logger.exception("Error in /set_matrix")
+        return jsonify({"success": False, "error": str(ex)}), 400
+
+
+@app.route("/get_matrix", methods=["GET"])
+def get_matrix_endpoint():
+    """Retrieves the currently active transformation matrix."""
+    return jsonify({"success": True, "matrix": solver.get_matrix()}), 200
 
 
 @app.route("/calculate_offset", methods=["POST"])
@@ -358,7 +385,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tool-Klipper-Calibration Vision Daemon")
     parser.add_argument("--host", default="0.0.0.0", help="Host address to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8090, help="Port to listen on (default: 8090)")
-    parser.add_argument("--threads", type=int, default=4, help="Waitress worker threads (default: 4)")
+    parser.add_argument("--threads", type=int, default=8, help="Waitress worker threads (default: 8)")
     parser.add_argument("--camera-url", default=None, help="Camera snapshot stream URL")
     parser.add_argument("--mpp", type=float, default=None, help="Pre-calibrated mm-per-pixel scale")
     args = parser.parse_args()

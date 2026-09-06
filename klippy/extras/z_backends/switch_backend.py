@@ -29,7 +29,10 @@ class SwitchBackend(BaseZBackend):
         elif self.switch_pin is not None:
             # Build switch probe wrapper if tools_calibrate is absent
             try:
-                from . import tools_calibrate
+                try:
+                    from .. import tools_calibrate
+                except ImportError:
+                    import tools_calibrate
                 self.probe = tools_calibrate.PrinterProbeMultiAxis(
                     config,
                     tools_calibrate.ProbeEndstopWrapper(config, 'x'),
@@ -49,7 +52,13 @@ class SwitchBackend(BaseZBackend):
         if self.probe is not None:
             return self.probe
         # Fallback to printer tools_calibrate if available
-        return self.printer.lookup_object("tools_calibrate", None)
+        tc = self.printer.lookup_object("tools_calibrate", None)
+        if tc is not None:
+            # In viesturz/klipper-toolchanger, probe_multi_axis holds run_probe
+            if hasattr(tc, "probe_multi_axis"):
+                return tc.probe_multi_axis
+            return tc
+        return None
 
     def probe_reference_tool(self, tool_number: int, gcmd) -> Dict[str, Any]:
         probe = self._get_active_probe()

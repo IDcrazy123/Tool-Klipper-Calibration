@@ -5,7 +5,7 @@ Provides a thread-safe frame buffer and MJPEG multi-part streaming generator
 with real-time HUD annotations for web frontends (Mainsail/Fluidd).
 """
 
-from typing import Optional, Generator
+from typing import Optional, Generator, Any
 import threading
 import time
 import cv2

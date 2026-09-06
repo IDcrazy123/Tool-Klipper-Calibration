@@ -8,6 +8,7 @@ for multi-toolhead 3D printers running Klipper Toolchanger.
 from typing import Dict, Any, List, Optional
 import json
 import logging
+import math
 import urllib.request
 import urllib.error
 import statistics
@@ -65,13 +66,23 @@ class ToolCalibrator:
         else:
             raise config.error(f"[tool_calibrator] Invalid z_backend '{self.z_backend_type}'. Must be 'switch' or 'cartographer'.")
 
-        # Hooks
+        # Optional parameters for Klipper config validation
+        self.camera_stream_url = config.get("camera_stream_url", None)
+        self.switch_approach_z = config.getfloat("switch_approach_z", None)
+        self.probing_speed = config.getfloat("probing_speed", None)
+        self.lift_speed = config.getfloat("lift_speed", None)
+        self.samples = config.getint("samples", None)
+        self.samples_tolerance = config.getfloat("samples_tolerance", None)
+        self.samples_retract_dist = config.getfloat("samples_retract_dist", None)
+        self.switch_pin = config.get("switch_pin", None)
+
+        # Hooks (None if not explicitly configured in printer.cfg)
         self.gcode_macro = self.printer.load_object(config, "gcode_macro")
-        self.start_gcode = self.gcode_macro.load_template(config, "start_gcode", "")
-        self.before_pickup_gcode = self.gcode_macro.load_template(config, "before_pickup_gcode", "")
-        self.after_pickup_gcode = self.gcode_macro.load_template(config, "after_pickup_gcode", "")
-        self.clean_nozzle_gcode = self.gcode_macro.load_template(config, "clean_nozzle_gcode", "")
-        self.finish_gcode = self.gcode_macro.load_template(config, "finish_gcode", "")
+        self.start_gcode = self.gcode_macro.load_template(config, "start_gcode", None)
+        self.before_pickup_gcode = self.gcode_macro.load_template(config, "before_pickup_gcode", None)
+        self.after_pickup_gcode = self.gcode_macro.load_template(config, "after_pickup_gcode", None)
+        self.clean_nozzle_gcode = self.gcode_macro.load_template(config, "clean_nozzle_gcode", None)
+        self.finish_gcode = self.gcode_macro.load_template(config, "finish_gcode", None)
 
         # Optical Lighting Configuration
         self.camera_pin = config.get("camera_pin", config.get("camera_led", None))
@@ -104,35 +115,48 @@ class ToolCalibrator:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
         cam_saved = self.config_manager.load_section("tool_calibrator_station camera")
         if cam_saved:
-            if self.navigator.cam_target_x is None and "target_x" in cam_saved:
+            if self.navigator.cam_target_x is None and "target_x" in cam_saved and cam_saved["target_x"] not in ("None", ""):
                 self.navigator.cam_target_x = float(cam_saved["target_x"])
-            if self.navigator.cam_target_y is None and "target_y" in cam_saved:
+            if self.navigator.cam_target_y is None and "target_y" in cam_saved and cam_saved["target_y"] not in ("None", ""):
                 self.navigator.cam_target_y = float(cam_saved["target_y"])
-            if "target_z" in cam_saved:
+            if "target_z" in cam_saved and cam_saved["target_z"] not in ("None", ""):
                 self.navigator.cam_target_z = float(cam_saved["target_z"])
-            if self.navigator.cam_approach_x is None and "approach_x" in cam_saved:
+            if self.navigator.cam_approach_x is None and "approach_x" in cam_saved and cam_saved["approach_x"] not in ("None", ""):
                 self.navigator.cam_approach_x = float(cam_saved["approach_x"])
-            if self.navigator.cam_approach_y is None and "approach_y" in cam_saved:
+            if self.navigator.cam_approach_y is None and "approach_y" in cam_saved and cam_saved["approach_y"] not in ("None", ""):
                 self.navigator.cam_approach_y = float(cam_saved["approach_y"])
-            if "mpp" in cam_saved:
+            if "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
+                self.navigator.safe_z = float(cam_saved["safe_z"])
+            if "mpp" in cam_saved and cam_saved["mpp"] not in ("None", ""):
                 self.calibrated_mpp = float(cam_saved["mpp"])
                 try:
                     self._query_vision("set_mpp", {"mpp": self.calibrated_mpp})
                 except Exception:
                     pass
+            if all(k in cam_saved for k in ("matrix_a", "matrix_b", "matrix_c", "matrix_d")):
+                try:
+                    ma = float(cam_saved["matrix_a"])
+                    mb = float(cam_saved["matrix_b"])
+                    mc = float(cam_saved["matrix_c"])
+                    md = float(cam_saved["matrix_d"])
+                    self._query_vision("set_matrix", {"matrix": [[ma, mb, 0.0], [mc, md, 0.0]]})
+                except Exception:
+                    pass
 
         switch_saved = self.config_manager.load_section("tool_calibrator_station switch")
         if switch_saved:
-            if self.navigator.switch_target_x is None and "target_x" in switch_saved:
+            if self.navigator.switch_target_x is None and "target_x" in switch_saved and switch_saved["target_x"] not in ("None", ""):
                 self.navigator.switch_target_x = float(switch_saved["target_x"])
-            if self.navigator.switch_target_y is None and "target_y" in switch_saved:
+            if self.navigator.switch_target_y is None and "target_y" in switch_saved and switch_saved["target_y"] not in ("None", ""):
                 self.navigator.switch_target_y = float(switch_saved["target_y"])
-            if "target_z" in switch_saved:
+            if "target_z" in switch_saved and switch_saved["target_z"] not in ("None", ""):
                 self.navigator.switch_target_z = float(switch_saved["target_z"])
-            if self.navigator.switch_approach_x is None and "approach_x" in switch_saved:
+            if self.navigator.switch_approach_x is None and "approach_x" in switch_saved and switch_saved["approach_x"] not in ("None", ""):
                 self.navigator.switch_approach_x = float(switch_saved["approach_x"])
-            if self.navigator.switch_approach_y is None and "approach_y" in switch_saved:
+            if self.navigator.switch_approach_y is None and "approach_y" in switch_saved and switch_saved["approach_y"] not in ("None", ""):
                 self.navigator.switch_approach_y = float(switch_saved["approach_y"])
+            if "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
+                self.navigator.safe_z = float(switch_saved["safe_z"])
 
         # Auto-inherit switch position from tools_calibrate if available and not configured
         if self.navigator.switch_target_x is None or self.navigator.switch_target_y is None:
@@ -180,9 +204,12 @@ class ToolCalibrator:
         for i in range(n_samples):
             if i > 0:
                 self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
-            resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-            if resp.get("found") and resp.get("center_uv") and len(resp.get("center_uv")) >= 2:
-                valid_frames.append(resp)
+            try:
+                resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0}, timeout=5.0)
+                if resp.get("found") and resp.get("center_uv") and len(resp.get("center_uv")) >= 2:
+                    valid_frames.append(resp)
+            except Exception as ex:
+                logger.debug(f"[tool_calibrator] Query vision burst exception: {ex}")
 
         if not valid_frames:
             return None
@@ -195,103 +222,90 @@ class ToolCalibrator:
         med_v = float(statistics.median(v_vals))
         med_r = float(statistics.median(r_vals)) if r_vals else 0.0
 
-        spread_u = max(u_vals) - min(u_vals) if len(u_vals) > 1 else 0.0
-        spread_v = max(v_vals) - min(v_vals) if len(v_vals) > 1 else 0.0
-        max_spread = max(spread_u, spread_v)
+        spread_px = 0.0
+        if len(u_vals) > 1:
+            u_spread = max(u_vals) - min(u_vals)
+            v_spread = max(v_vals) - min(v_vals)
+            spread_px = round(max(u_spread, v_spread), 2)
+            if spread_px > 15.0:
+                logger.warning(f"[tool_calibrator] High burst dispersion detected: {spread_px}px across {len(valid_frames)} frames.")
 
-        if max_spread > 15.0 and gcmd:
-            gcmd.respond_info(f"  -> Note: High burst dispersion ({max_spread:.1f}px), median filtering applied.")
-
-        best_frame = max(valid_frames, key=lambda x: x.get("confidence", 0.5))
-
+        best_meta = valid_frames[0]
         return {
             "found": True,
             "center_uv": [round(med_u, 2), round(med_v, 2)],
             "radius_px": round(med_r, 2),
-            "tier": best_frame.get("tier", 1),
-            "combo": best_frame.get("combo", 0),
-            "confidence": best_frame.get("confidence", 1.0),
+            "confidence": best_meta.get("confidence", 0.0),
+            "tier": best_meta.get("tier", 1),
+            "combo": best_meta.get("combo", 0),
             "burst_count": len(valid_frames),
             "burst_total": n_samples,
-            "spread_px": round(max_spread, 2),
-            "raw_frames": valid_frames
+            "spread_px": spread_px
         }
 
-    def _recover_with_wiggle(self, toolhead, gcmd, iteration: int, samples: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def _recover_with_wiggle(self, toolhead, gcmd=None) -> Optional[Dict[str, Any]]:
         """
         Adaptive Wiggle Recovery:
-        Executes progressive micro-moves around the anchor position to break specular
-        glare / reflection blindspots when nozzle detection temporarily fails.
-        Returns aggregated burst detection if recovered, or None if all attempts fail.
+        Executes 4 orthogonal micro-displacements around anchor position to break specular reflection / flare
+        angles before giving up. Validates movement bounds against printer limits.
         """
-        anchor_pos = list(toolhead.get_position())
+        anchor_pos = toolhead.get_position()
         dist = self.wiggle_distance
-        # Micro-move patterns relative to anchor: +dist X, -dist X, +dist Y, -dist Y
-        wiggle_steps = [
-            ("+X", dist, 0.0),
-            ("-X", -dist, 0.0),
-            ("+Y", 0.0, dist),
-            ("-Y", 0.0, -dist),
+        wiggle_moves = [
+            (+dist, 0.0),
+            (-dist, 0.0),
+            (0.0, +dist),
+            (0.0, -dist)
         ]
 
         if gcmd:
-            gcmd.respond_info(f"  -> [Wiggle Recovery] Nozzle undetected at centering step {iteration}. Attempting adaptive wiggle micro-moves...")
+            gcmd.respond_info(f"  [Wiggle Recovery] Optical lock lost at X{anchor_pos[0]:.3f} Y{anchor_pos[1]:.3f}. Executing micro-moves (±{dist:.2f}mm)...")
 
-        recovered_burst = None
-        for step_idx, (axis_label, dx, dy) in enumerate(wiggle_steps, 1):
-            target_x = anchor_pos[0] + dx
-            target_y = anchor_pos[1] + dy
+        for idx, (dx, dy) in enumerate(wiggle_moves, 1):
+            wx = anchor_pos[0] + dx
+            wy = anchor_pos[1] + dy
             try:
-                self.navigator.validate_coordinate_safety(x=target_x, y=target_y)
-            except SafeNavigatorException as ex:
-                if gcmd:
-                    gcmd.respond_info(f"  -> [Wiggle Recovery] Skipping step {step_idx} ({axis_label}): {ex}")
+                self.navigator.validate_coordinate_safety(x=wx, y=wy)
+            except SafeNavigatorException:
                 continue
 
-            if gcmd:
-                gcmd.respond_info(f"  -> [Wiggle Recovery] Step {step_idx}/4: wiggling {axis_label} (X{target_x:.3f}, Y{target_y:.3f})...")
-
-            toolhead.manual_move([target_x, target_y, None], self.navigator.approach_speed)
+            toolhead.manual_move([wx, wy, None], self.navigator.approach_speed)
             toolhead.wait_moves()
-            self.reactor.pause(self.reactor.monotonic() + self.sample_delay)
+            self.reactor.pause(self.reactor.monotonic() + 0.12)
 
-            # Quick probe
-            probe_resp = self._query_vision("detect_nozzle", {"min_matches": 1, "timeout": 3.0})
-            if probe_resp.get("found"):
+            burst = self._sample_burst(toolhead, gcmd, samples=max(2, self.centering_samples - 1))
+            if burst and burst.get("found"):
                 if gcmd:
-                    gcmd.respond_info(f"  -> [Wiggle Recovery] Regained optical lock at step {step_idx}! Gathering burst consensus...")
-                # Sample burst at this recovered vantage
-                recovered_burst = self._sample_burst(toolhead, gcmd, samples=samples)
-                if recovered_burst and recovered_burst.get("found"):
-                    break
+                    gcmd.respond_info(f"  [Wiggle Recovery] Regained optical lock on attempt {idx}/4 at X{wx:.3f} Y{wy:.3f}!")
+                return burst
 
-        if recovered_burst is None:
-            # Revert to anchor position if recovery failed completely
-            if gcmd:
-                gcmd.respond_info("  -> [Wiggle Recovery] Wiggle recovery sequence exhausted. Returning to anchor position.")
-            toolhead.manual_move([anchor_pos[0], anchor_pos[1], None], self.navigator.approach_speed)
-            toolhead.wait_moves()
-            return None
+        # If all attempts fail, safely revert to anchor position
+        toolhead.manual_move([anchor_pos[0], anchor_pos[1], None], self.navigator.approach_speed)
+        toolhead.wait_moves()
+        if gcmd:
+            gcmd.respond_info("  [Wiggle Recovery] All micro-moves exhausted; optical lock could not be regained.")
+        return None
 
-        return recovered_burst
-
-    def _center_nozzle(self, toolhead, gcmd, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> None:
+    def _center_nozzle(self, toolhead, gcmd=None, samples: Optional[int] = None, enable_wiggle: Optional[bool] = None) -> None:
         """
-        Visual servoing loop: pulls nozzle center from vision service using multi-frame burst sampling
-        and adaptive wiggle recovery, and applies damped moves.
+        Visual Servoing Centering Loop:
+        Iteratively calculates pixel deviation from optical center and commands toolhead moves
+        until nozzle center converges within `tolerance_mm`. Employs Burst Sampling and
+        Adaptive Wiggle Recovery on lost frames.
         """
-        wiggle_enabled = self.wiggle_on_failure if enable_wiggle is None else enable_wiggle
+        wiggle_enabled = enable_wiggle if enable_wiggle is not None else self.wiggle_on_failure
 
         for iteration in range(1, self.max_centering_iterations + 1):
-            toolhead.wait_moves()
-
             burst_resp = self._sample_burst(toolhead, gcmd, samples=samples)
+
             if not burst_resp or not burst_resp.get("found"):
                 if wiggle_enabled:
-                    burst_resp = self._recover_with_wiggle(toolhead, gcmd, iteration, samples=samples)
+                    burst_resp = self._recover_with_wiggle(toolhead, gcmd)
 
                 if not burst_resp or not burst_resp.get("found"):
-                    raise SafeNavigatorException(f"[ERR_CV_201] Nozzle orifice not found during centering attempt {iteration} (Multi-frame burst and wiggle recovery exhausted).")
+                    raise SafeNavigatorException(
+                        f"[ERR_CV_201] Could not reliably detect nozzle center (Burst sampling and Wiggle recovery exhausted at iteration {iteration})."
+                    )
 
             center_uv = burst_resp.get("center_uv")
             offset_resp = self._query_vision("calculate_offset", {"center_uv": center_uv})
@@ -316,8 +330,9 @@ class ToolCalibrator:
             toolhead.manual_move([target_x, target_y, None], self.navigator.approach_speed)
             toolhead.wait_moves()
 
-        if gcmd:
-            gcmd.respond_info(f"  -> Warning: Centering reached max iterations ({self.max_centering_iterations}).")
+        raise SafeNavigatorException(
+            f"[ERR_CV_202] Centering failed to converge within {self.tolerance_mm}mm after {self.max_centering_iterations} iterations (last delta: X{dx:+.3f}mm Y{dy:+.3f}mm)."
+        )
 
     def _discover_tools(self, tools_param: Optional[str] = None) -> List[int]:
         """
@@ -365,9 +380,18 @@ class ToolCalibrator:
         # 3. Dynamic scan across all loaded Klipper objects (e.g. [tool 0], [tool 1], [gcode_macro T0], [gcode_macro T1])
         discovered = set()
         try:
-            loaded_objs = self.printer.lookup_objects() if hasattr(self.printer, "lookup_objects") else {}
+            loaded_objs = self.printer.lookup_objects() if hasattr(self.printer, "lookup_objects") else []
             import re
-            for name in loaded_objs.keys():
+            names = []
+            if isinstance(loaded_objs, dict):
+                names = list(loaded_objs.keys())
+            elif isinstance(loaded_objs, list):
+                for item in loaded_objs:
+                    if isinstance(item, tuple) and len(item) > 0:
+                        names.append(item[0])
+                    elif isinstance(item, str):
+                        names.append(item)
+            for name in names:
                 m_tool = re.match(r"^tool\s+(?:T)?(\d+)$", name, re.IGNORECASE)
                 if m_tool:
                     discovered.add(int(m_tool.group(1)))
@@ -497,8 +521,7 @@ class ToolCalibrator:
         gcode_move = self.printer.lookup_object("gcode_move")
 
         if not self.navigator.is_homed():
-            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before calibration.")
-            return
+            raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before calibration.")
 
         # Pre-flight ping to vision service (only required if optical calibration is requested)
         if calibrate_xy:
@@ -506,21 +529,19 @@ class ToolCalibrator:
                 health = self._query_vision("health")
                 gcmd.respond_info(f"[tool_calibrator] Vision Service connected: {health.get('service')} v{health.get('version')}")
             except Exception as ex:
-                gcmd.respond_error(str(ex))
-                return
+                raise gcmd.error(str(ex))
 
         # Discover tool sequence across any toolchanger flavor
         try:
             ordered_tools = self._discover_tools(tools_param)
         except SafeNavigatorException as ex:
-            gcmd.respond_error(str(ex))
-            return
+            raise gcmd.error(str(ex))
 
         gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
 
         # Execute start_gcode hook
-        if self.start_gcode:
-            self.gcode_macro.run_script("start_gcode", self.start_gcode, {})
+        if self.start_gcode is not None:
+            self.start_gcode.run_gcode_from_command()
 
         reference_origin_xy: Optional[List[float]] = None
         reference_z_result: Dict[str, Any] = {}
@@ -531,19 +552,19 @@ class ToolCalibrator:
                 gcmd.respond_info(f"\n--- Calibrating Toolhead T{tool_no} ---")
 
                 # Change tool
-                if self.before_pickup_gcode:
-                    self.gcode_macro.run_script("before_pickup_gcode", self.before_pickup_gcode, {"TOOL": tool_no})
+                if self.before_pickup_gcode is not None:
+                    self.before_pickup_gcode.run_gcode_from_command({"TOOL": tool_no})
                 self.gcode.run_script_from_command(f"T{tool_no}")
-                if self.after_pickup_gcode:
-                    self.gcode_macro.run_script("after_pickup_gcode", self.after_pickup_gcode, {"TOOL": tool_no})
+                if self.after_pickup_gcode is not None:
+                    self.after_pickup_gcode.run_gcode_from_command({"TOOL": tool_no})
 
                 toolhead.wait_moves()
 
                 # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
                 if clean_nozzle:
-                    if self.clean_nozzle_gcode:
+                    if self.clean_nozzle_gcode is not None:
                         gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
-                        self.gcode_macro.run_script("clean_nozzle_gcode", self.clean_nozzle_gcode, {"TOOL": tool_no})
+                        self.clean_nozzle_gcode.run_gcode_from_command({"TOOL": tool_no})
                         toolhead.wait_moves()
                     else:
                         clean_macro = self.printer.lookup_object("gcode_macro _CLEAN_NOZZLE", None)
@@ -590,13 +611,12 @@ class ToolCalibrator:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
 
             # Execute finish_gcode hook
-            if self.finish_gcode:
-                self.gcode_macro.run_script("finish_gcode", self.finish_gcode, {})
+            if self.finish_gcode is not None:
+                self.finish_gcode.run_gcode_from_command()
 
             # Persist Offsets
             if save_config and not dry_run:
-                for t_num, offs in results.items():
-                    self.config_manager.save_tool_offsets(t_num, offs)
+                self.config_manager.save_all_tool_offsets(results)
                 gcmd.respond_info(f"[tool_calibrator] Successfully saved offsets to {self.config_manager.config_path}")
 
             # Telemetry Summary
@@ -612,7 +632,8 @@ class ToolCalibrator:
         except Exception as ex:
             self.last_run_status = f"FAILED: {ex}"
             self.navigator.depart_station(toolhead, gcode_move)
-            gcmd.respond_error(f"[tool_calibrator] Calibration Aborted: {ex}")
+            gcmd.respond_info(f"!! [tool_calibrator] Calibration Aborted: {ex}")
+            raise gcmd.error(f"[tool_calibrator] Calibration Aborted: {ex}")
 
     def cmd_CALIBRATION_TEACH_STATION(self, gcmd) -> None:
         """
@@ -626,13 +647,11 @@ class ToolCalibrator:
         """
         station = gcmd.get("STATION", "").upper()
         if station not in ("CAMERA", "SWITCH", "Z_SWITCH"):
-            gcmd.respond_error("STATION must be CAMERA or SWITCH.")
-            return
+            raise gcmd.error("STATION must be CAMERA or SWITCH.")
 
         toolhead = self.printer.lookup_object("toolhead")
         if not self.navigator.is_homed():
-            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before teaching station.")
-            return
+            raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before teaching station.")
 
         if station == "CAMERA":
             auto_center = gcmd.get_int("AUTO_CENTER", 1) == 1
@@ -683,7 +702,7 @@ class ToolCalibrator:
                 gcmd.respond_info("[tool_calibrator] Auto-touching switch pin to determine contact height...")
                 try:
                     res = self.z_backend.probe_reference_tool(self.reference_tool, gcmd)
-                    target_z = round(res.get("trigger_z", pos[2]), 3)
+                    target_z = round(res.get("contact_z", res.get("trigger_z", pos[2])), 3)
                 except Exception as ex:
                     gcmd.respond_info(f"Auto-touch note: {ex}. Using current Z height.")
 
@@ -717,15 +736,13 @@ class ToolCalibrator:
         """
         dist = gcmd.get_float("DISTANCE", 1.0)
         if dist < 0.2 or dist > 5.0:
-            gcmd.respond_error("DISTANCE must be between 0.2mm and 5.0mm.")
-            return
+            raise gcmd.error("DISTANCE must be between 0.2mm and 5.0mm.")
 
         toolhead = self.printer.lookup_object("toolhead")
         gcode_move = self.printer.lookup_object("gcode_move")
 
         if not self.navigator.is_homed():
-            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
-            return
+            raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before camera calibration.")
 
         gcmd.respond_info(f"[tool_calibrator] Starting Star-Pattern Camera Calibration (Displacement: ±{dist:.2f}mm)...")
         self._set_inspection_lighting(True, self.reference_tool)
@@ -747,8 +764,7 @@ class ToolCalibrator:
         base_resp = self._sample_burst(toolhead, gcmd)
         if not base_resp or not base_resp.get("found"):
             self.navigator.depart_station(toolhead, gcode_move)
-            gcmd.respond_error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
-            return
+            raise gcmd.error("[ERR_CV_201] Could not detect nozzle center at baseline position.")
 
         base_uv = base_resp.get("center_uv")
         center_pos = toolhead.get_position()
@@ -775,7 +791,7 @@ class ToolCalibrator:
 
                 det = self._sample_burst(toolhead, gcmd)
                 if not det or not det.get("found"):
-                    gcmd.respond_error(f"Failed to detect nozzle during displacement {label}.")
+                    gcmd.respond_info(f"!! Failed to detect nozzle during displacement {label}.")
                     continue
 
                 curr_uv = det.get("center_uv")
@@ -791,9 +807,8 @@ class ToolCalibrator:
             toolhead.wait_moves()
 
             if len(mpp_samples) < 3:
-                gcmd.respond_error("Insufficient valid points acquired for camera scale calibration.")
                 self.navigator.depart_station(toolhead, gcode_move)
-                return
+                raise gcmd.error("Insufficient valid points acquired for camera scale calibration.")
 
             # Query server to calculate average MPP and solve affine matrix
             mpp_resp = self._query_vision("calibrate_mpp", {"samples": mpp_samples})
@@ -801,20 +816,28 @@ class ToolCalibrator:
 
             matrix_resp = self._query_vision("solve_matrix", {"calibration_points": matrix_points})
             matrix_ok = matrix_resp.get("success", False)
+            matrix_vals = matrix_resp.get("matrix", [])
             self.calibrated_mpp = solved_mpp
 
-            # Persist calibrated MPP into tool_offsets.cfg under [tool_calibrator_station camera]
-            self.config_manager.save_section("tool_calibrator_station camera", {
+            cam_dict: Dict[str, Any] = {
                 "mpp": solved_mpp,
                 "target_x": round(cx, 3),
                 "target_y": round(cy, 3),
                 "target_z": round(cz, 3),
                 "safe_z": self.navigator.safe_z
-            })
+            }
+            if matrix_vals and len(matrix_vals) >= 2 and len(matrix_vals[0]) >= 2 and len(matrix_vals[1]) >= 2:
+                cam_dict["matrix_a"] = matrix_vals[0][0]
+                cam_dict["matrix_b"] = matrix_vals[0][1]
+                cam_dict["matrix_c"] = matrix_vals[1][0]
+                cam_dict["matrix_d"] = matrix_vals[1][1]
+
+            # Persist calibrated MPP and matrix into tool_offsets.cfg under [tool_calibrator_station camera]
+            self.config_manager.save_section("tool_calibrator_station camera", cam_dict)
 
             gcmd.respond_info(
                 f"\n✔ ================= CAMERA CALIBRATION SUCCESS ================\n"
-                f"  Calculated Scale (MPP): {solved_mpp:.5f} mm/pixel\n"
+                f"  Calculated Scale (MPP): {solved_mpp:.6f} mm/pixel\n"
                 f"  Affine Matrix Solved:   {matrix_ok}\n"
                 f"  Saved to Configuration: {self.config_manager.config_path}\n"
                 f"================================================================"
@@ -850,14 +873,19 @@ class ToolCalibrator:
                 gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
 
             if save_to_disk:
-                self.config_manager.save_section("tool_calibrator_station camera", {
+                cam_data = {
                     "target_x": self.navigator.cam_target_x,
                     "target_y": self.navigator.cam_target_y,
                     "target_z": self.navigator.cam_target_z,
                     "approach_x": self.navigator.cam_approach_x,
                     "approach_y": self.navigator.cam_approach_y,
                     "safe_z": self.navigator.safe_z
-                })
+                }
+                existing_cam = self.config_manager.load_section("tool_calibrator_station camera") or {}
+                for k, v in cam_data.items():
+                    if v is not None:
+                        existing_cam[k] = v
+                self.config_manager.save_section("tool_calibrator_station camera", existing_cam)
         elif station in ("SWITCH", "Z_SWITCH"):
             if pos_type == "APPROACH":
                 self.navigator.switch_approach_x = round(pos[0], 3)
@@ -868,18 +896,26 @@ class ToolCalibrator:
                 self.navigator.switch_target_y = round(pos[1], 3)
                 self.navigator.switch_target_z = round(pos[2], 3)
                 gcmd.respond_info(f"Z-Switch Target Pin set to X:{pos[0]:.3f} Y:{pos[1]:.3f} Z:{pos[2]:.3f}")
+            elif pos_type == "SAFE_Z":
+                self.navigator.safe_z = round(pos[2], 3)
+                gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
 
             if save_to_disk:
-                self.config_manager.save_section("tool_calibrator_station switch", {
+                switch_data = {
                     "target_x": self.navigator.switch_target_x,
                     "target_y": self.navigator.switch_target_y,
                     "target_z": self.navigator.switch_target_z,
                     "approach_x": self.navigator.switch_approach_x,
                     "approach_y": self.navigator.switch_approach_y,
                     "safe_z": self.navigator.safe_z
-                })
+                }
+                existing_sw = self.config_manager.load_section("tool_calibrator_station switch") or {}
+                for k, v in switch_data.items():
+                    if v is not None:
+                        existing_sw[k] = v
+                self.config_manager.save_section("tool_calibrator_station switch", existing_sw)
         else:
-            gcmd.respond_error("Invalid STATION. Must be CAMERA or SWITCH.")
+            raise gcmd.error("Invalid STATION. Must be CAMERA or SWITCH.")
 
     def cmd_CALIBRATION_ROLLBACK_OFFSETS(self, gcmd) -> None:
         """Emergency rollback command restoring previous configuration backup."""
@@ -887,7 +923,7 @@ class ToolCalibrator:
             restored_file = self.config_manager.rollback()
             gcmd.respond_info(f"[tool_calibrator] Restored configuration from {restored_file}. Please issue FIRMWARE_RESTART.")
         except Exception as ex:
-            gcmd.respond_error(f"[tool_calibrator] Rollback failed: {ex}")
+            raise gcmd.error(f"[tool_calibrator] Rollback failed: {ex}")
 
     def cmd_CALIBRATION_NAVIGATE(self, gcmd) -> None:
         """
@@ -899,8 +935,7 @@ class ToolCalibrator:
         station = gcmd.get("STATION", "CAMERA").upper()
 
         if not self.navigator.is_homed():
-            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28) before navigation.")
-            return
+            raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28) before navigation.")
 
         if station in ("CAMERA", "CAM"):
             gcmd.respond_info("[tool_calibrator] Approaching Camera Station via safe 3-tier waypoints...")
@@ -911,7 +946,7 @@ class ToolCalibrator:
                 gcmd.respond_info(f"✔ Reached Camera Station: X{pos[0]:.3f} Y{pos[1]:.3f} Z{pos[2]:.3f}")
             except Exception as ex:
                 self._set_inspection_lighting(False, self.reference_tool)
-                gcmd.respond_error(f"Navigation error: {ex}")
+                raise gcmd.error(f"Navigation error: {ex}")
         elif station in ("SWITCH", "Z_SWITCH"):
             gcmd.respond_info("[tool_calibrator] Approaching Z Switch Station via safe 3-tier waypoints...")
             try:
@@ -919,7 +954,7 @@ class ToolCalibrator:
                 pos = toolhead.get_position()
                 gcmd.respond_info(f"✔ Reached Switch Station: X{pos[0]:.3f} Y{pos[1]:.3f} Z{pos[2]:.3f}")
             except Exception as ex:
-                gcmd.respond_error(f"Navigation error: {ex}")
+                raise gcmd.error(f"Navigation error: {ex}")
         elif station in ("DEPART", "LEAVE", "SAFE_Z"):
             gcmd.respond_info("[tool_calibrator] Departing station to safe Z altitude...")
             self._set_inspection_lighting(False, self.reference_tool)
@@ -927,7 +962,7 @@ class ToolCalibrator:
             pos = toolhead.get_position()
             gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
         else:
-            gcmd.respond_error(f"Invalid STATION '{station}'. Must be CAMERA, SWITCH, or DEPART.")
+            raise gcmd.error(f"Invalid STATION '{station}'. Must be CAMERA, SWITCH, or DEPART.")
 
     def cmd_CALIBRATION_CENTER_NOZZLE(self, gcmd) -> None:
         """
@@ -941,8 +976,7 @@ class ToolCalibrator:
         wiggle = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
 
         if not self.navigator.is_homed():
-            gcmd.respond_error("[ERR_PRE_001] Printer must be fully homed (G28).")
-            return
+            raise gcmd.error("[ERR_PRE_001] Printer must be fully homed (G28).")
 
         gcmd.respond_info("[tool_calibrator] Centering active nozzle over camera...")
         self._set_inspection_lighting(True, self.reference_tool)
@@ -951,7 +985,7 @@ class ToolCalibrator:
             pos = toolhead.get_position()
             gcmd.respond_info(f"✔ Nozzle centered successfully at X{pos[0]:.3f} Y{pos[1]:.3f}")
         except Exception as ex:
-            gcmd.respond_error(f"Centering failed: {ex}")
+            raise gcmd.error(f"Centering failed: {ex}")
         finally:
             self._set_inspection_lighting(False, self.reference_tool)
 
@@ -968,8 +1002,7 @@ class ToolCalibrator:
         try:
             burst = self._sample_burst(toolhead, gcmd, samples=samples)
             if not burst or not burst.get("found"):
-                gcmd.respond_error("❌ Nozzle NOT detected at current position. Check lighting, focal distance, or nozzle alignment.")
-                return
+                raise gcmd.error("❌ Nozzle NOT detected at current position. Check lighting, focal distance, or nozzle alignment.")
 
             uv = burst.get("center_uv")
             radius = burst.get("radius_px", 0.0)
@@ -989,7 +1022,7 @@ class ToolCalibrator:
                 f"  Algorithm:   {tier_desc}"
             )
         except Exception as ex:
-            gcmd.respond_error(f"Vision test error: {ex}")
+            raise gcmd.error(f"Vision test error: {ex}")
         finally:
             self._set_inspection_lighting(False, self.reference_tool)
 

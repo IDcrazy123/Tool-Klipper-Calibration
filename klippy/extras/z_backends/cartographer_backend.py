@@ -36,16 +36,23 @@ class CartographerBackend(BaseZBackend):
             config.get("touch_model_config_path", "~/printer_data/config/printer.cfg")
         )
         self.touch_model_z_offset = self._load_touch_model_offset()
+        self.cartographer_touch_model = config.get("cartographer_touch_model", None)
+        self.cartographer_touch_threshold = config.getfloat("cartographer_touch_threshold", None)
 
     def _resolve_touch_cmd(self, configured: Optional[str], primary: str, fallbacks: Tuple[str, ...]) -> str:
         """Finds the active command registered in Klipper gcode command registry."""
         if configured:
             return configured
-        if hasattr(self.gcode, "commands") and self.gcode.commands:
-            if primary in self.gcode.commands:
+        registered = set()
+        for attr in ("ready_gcode_handlers", "base_gcode_handlers", "gcode_handlers", "commands"):
+            handlers = getattr(self.gcode, attr, None)
+            if handlers and isinstance(handlers, dict):
+                registered.update(handlers.keys())
+        if registered:
+            if primary in registered:
                 return primary
             for fb in fallbacks:
-                if fb in self.gcode.commands:
+                if fb in registered:
                     return fb
         return primary
 
@@ -73,8 +80,8 @@ class CartographerBackend(BaseZBackend):
     def touch_probe_gcode(self) -> str:
         raw = self._resolve_touch_cmd(
             self.configured_touch_probe_gcode,
-            "CARTOGRAPHER_TOUCH",
-            ("SCANNER_TOUCH", "CARTOGRAPHER_TOUCH_HOME")
+            "CARTOGRAPHER_TOUCH_PROBE",
+            ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH_PROBE", "SCANNER_TOUCH", "CARTOGRAPHER_TOUCH_HOME")
         )
         return self._build_command_str(raw)
 
@@ -152,7 +159,7 @@ class CartographerBackend(BaseZBackend):
 
         measured_z = self._get_last_z_result()
         if measured_z is None:
-            measured_z = float(toolhead.get_position()[2])
+            raise gcmd.error(f"[tool_calibrator] Failed to read contact Z result from Cartographer touch on Reference Tool T{tool_number}")
 
         # Immediate safe liftoff from the bed surface
         cur_pos = toolhead.get_position()
@@ -183,7 +190,7 @@ class CartographerBackend(BaseZBackend):
 
         measured_z = self._get_last_z_result()
         if measured_z is None:
-            measured_z = float(toolhead.get_position()[2])
+            raise gcmd.error(f"[tool_calibrator] Failed to read contact Z result from Cartographer touch on Secondary Tool T{tool_number}")
 
         # Immediate safe liftoff from the bed surface
         cur_pos = toolhead.get_position()

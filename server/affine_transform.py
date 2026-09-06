@@ -107,10 +107,32 @@ class TransformationSolver:
 
         # Solve least squares: A * M = real_coords
         solution, residuals, rank, s = np.linalg.lstsq(A, real_coords, rcond=None)
+        required_rank = 6 if n >= 6 else 3
+        if rank < required_rank:
+            raise ValueError(f"Degenerate calibration points: rank {rank} < required {required_rank}")
+        if s is not None and len(s) > 0 and s[-1] > 0:
+            cond = float(s[0] / s[-1])
+            if cond > 1e4:
+                raise ValueError(f"Ill-conditioned calibration points (condition number: {cond:.1f})")
+
         self.transform_matrix = solution.T
         order_desc = "2nd-order polynomial" if n >= 6 else "1st-order affine"
         logger.info(f"Solved {order_desc} transform matrix (rank={rank}). Shape: {self.transform_matrix.shape}")
         return True
+
+    def get_matrix(self) -> Optional[List[List[float]]]:
+        """Returns the serialized transformation matrix as nested list."""
+        if self.transform_matrix is None:
+            return None
+        return self.transform_matrix.tolist()
+
+    def set_matrix(self, matrix_data: List[List[float]]) -> None:
+        """Loads a pre-computed transformation matrix from serialized list."""
+        arr = np.array(matrix_data, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[0] != 2:
+            raise ValueError(f"Invalid transform matrix shape {arr.shape}, expected (2, 3) or (2, 6)")
+        self.transform_matrix = arr
+        logger.info(f"Loaded transform matrix with shape: {self.transform_matrix.shape}")
 
     def calculate_offset(self, detected_uv: Tuple[float, float]) -> Tuple[float, float]:
         """
@@ -151,14 +173,15 @@ class TransformationSolver:
     ) -> Tuple[float, float]:
         """
         Calculates the physical machine XY offset of a target toolhead relative to a reference toolhead.
-        Used for configuring tool offsets (e.g. G10 P<tool> X<dx> Y<dy> or [tool n] gcode_x_offset).
+        Klipper requires opposite sign of physical nozzle carriage displacement so carriage shifts appropriately:
+            gcode_offset = -1.0 * (physical_target - physical_ref)
 
         Args:
             reference_uv: Detected center of reference tool (e.g. T0) in pixels (u, v).
             target_uv: Detected center of target tool (e.g. T1) in pixels (u, v).
 
         Returns:
-            Tuple[float, float]: (delta_x_mm, delta_y_mm) physical offset.
+            Tuple[float, float]: (delta_x_mm, delta_y_mm) physical offset for Klipper gcode_offset.
         """
         nx_ref, ny_ref = self.normalize_coords(reference_uv)
         nx_tgt, ny_tgt = self.normalize_coords(target_uv)
@@ -173,14 +196,14 @@ class TransformationSolver:
 
             real_ref = self.transform_matrix @ v_ref
             real_tgt = self.transform_matrix @ v_tgt
-            delta_xy = real_tgt - real_ref
+            delta_xy = -1.0 * (real_tgt - real_ref)
             return (round(float(delta_xy[0]), 4), round(float(delta_xy[1]), 4))
 
         if self.mpp is not None:
             du = target_uv[0] - reference_uv[0]
             dv = target_uv[1] - reference_uv[1]
-            delta_x = du * self.mpp
-            delta_y = dv * self.mpp
+            delta_x = -1.0 * du * self.mpp
+            delta_y = -1.0 * dv * self.mpp
             return (round(float(delta_x), 4), round(float(delta_y), 4))
 
         raise RuntimeError("Neither transformation matrix nor MPP scale factor has been calibrated.")

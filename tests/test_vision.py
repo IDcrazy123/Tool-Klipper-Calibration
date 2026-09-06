@@ -100,10 +100,10 @@ class TestAffineTransform(unittest.TestCase):
         self.solver.set_mpp(0.0125)
         # T0 at (737.42, 328.79), T1 at (735.00, 324.50)
         # du = -2.42, dv = -4.29
-        # dx = -2.42 * 0.0125 = -0.03025, dy = -4.29 * 0.0125 = -0.053625
+        # dx = -1.0 * du * mpp = +0.03025, dy = -1.0 * dv * mpp = +0.053625
         dx, dy = self.solver.calculate_tool_delta((737.42, 328.79), (735.00, 324.50))
-        self.assertAlmostEqual(dx, -0.0303, delta=0.001)
-        self.assertAlmostEqual(dy, -0.0536, delta=0.001)
+        self.assertAlmostEqual(dx, 0.0303, delta=0.001)
+        self.assertAlmostEqual(dy, 0.0536, delta=0.001)
 
         # Test with affine transformation matrix
         star_points = [
@@ -115,9 +115,41 @@ class TestAffineTransform(unittest.TestCase):
         ]
         self.solver.solve_matrix(star_points)
         # Shift target by +50px in U (+0.5mm in X) and -20px in V (-0.2mm in Y)
+        # Carriage must shift opposite direction to bring nozzle to optical center
         dx_aff, dy_aff = self.solver.calculate_tool_delta((320.0, 240.0), (370.0, 220.0))
-        self.assertAlmostEqual(dx_aff, 0.50, delta=0.01)
-        self.assertAlmostEqual(dy_aff, -0.20, delta=0.01)
+        self.assertAlmostEqual(dx_aff, -0.50, delta=0.01)
+        self.assertAlmostEqual(dy_aff, 0.20, delta=0.01)
+
+    def test_solve_matrix_rejects_degenerate_points(self):
+        """Verify solve_matrix raises ValueError when points are collinear or identical."""
+        identical_points = [
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[0.0, 0.0], [320.0, 240.0]]
+        ]
+        with self.assertRaises(ValueError):
+            self.solver.solve_matrix(identical_points)
+
+    def test_matrix_serialization_and_restore(self):
+        """Verify get_matrix and set_matrix can roundtrip solved affine coefficients."""
+        star_points = [
+            [[0.0, 0.0], [320.0, 240.0]],
+            [[1.0, 0.0], [420.0, 240.0]],
+            [[-1.0, 0.0], [220.0, 240.0]],
+            [[0.0, 1.0], [320.0, 340.0]],
+            [[0.0, -1.0], [320.0, 140.0]]
+        ]
+        self.solver.solve_matrix(star_points)
+        mat = self.solver.get_matrix()
+        self.assertIsNotNone(mat)
+
+        new_solver = TransformationSolver(damping_factor=0.55)
+        new_solver.set_matrix(mat)
+        dx, dy = new_solver.calculate_tool_delta((320.0, 240.0), (370.0, 220.0))
+        self.assertAlmostEqual(dx, -0.50, delta=0.01)
+        self.assertAlmostEqual(dy, 0.20, delta=0.01)
 
 
 class TestNozzleDetector(unittest.TestCase):
@@ -255,8 +287,8 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertTrue(data["success"])
         self.assertEqual(data["tool"], 1)
         self.assertEqual(data["delta_uv"], [-2.42, -4.29])
-        self.assertAlmostEqual(data["delta_xy"][0], -0.0303, delta=0.001)
-        self.assertAlmostEqual(data["delta_xy"][1], -0.0536, delta=0.001)
+        self.assertAlmostEqual(data["delta_xy"][0], 0.0303, delta=0.001)
+        self.assertAlmostEqual(data["delta_xy"][1], 0.0536, delta=0.001)
         self.assertIn("G10 P1", data["gcode_command"])
         self.assertIn("[tool 1]", data["config_snippet"])
 
