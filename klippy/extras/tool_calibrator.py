@@ -159,6 +159,17 @@ class ToolCalibrator:
             except Exception as ex:
                 logger.warning(f"[tool_calibrator] Failed to register webhooks: {ex}")
 
+        # Register klippy:ready event handler to synchronize vision service at startup
+        if hasattr(self.printer, "register_event_handler"):
+            self.printer.register_event_handler("klippy:ready", self._handle_klippy_ready)
+
+    def _handle_klippy_ready(self) -> None:
+        """Called when Klipper is fully initialized; synchronizes camera URL and station data."""
+        try:
+            self._ensure_vision_sync()
+        except Exception as ex:
+            logger.debug(f"[tool_calibrator] Background vision sync on ready: {ex}")
+
     def _load_saved_stations(self) -> None:
         """Loads saved camera and switch station waypoints and auto-inherits from tools_calibrate."""
         cam_saved = self.config_manager.load_section("tool_calibrator_station camera")
@@ -1594,6 +1605,7 @@ class ToolCalibrator:
         Test vision detection at current toolhead position without moving.
         Reports detected center UV, radius, confidence, and burst dispersion.
         """
+        self._ensure_vision_sync()
         toolhead = self.printer.lookup_object("toolhead")
         samples = gcmd.get_int("SAMPLES", self.centering_samples)
 

@@ -43,6 +43,13 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
   - **Timestamped Non-Overwriting Backups**: Backups of `moonraker.conf` in `install.sh` and `uninstall.sh` now use non-overwriting timestamps (`.bak_YYYYMMDD_HHMMSS`).
   - **Config Schema Modernization**: Replaced obsolete options (`default_station`, `lift_z_safe`, `[tool_calibrator_station]`) across `HUONG_DAN_CAI_DAT_VA_CAP_NHAT.md` and `sample_tool_calibrator.cfg` with canonical `[tool_calibrator]` schema.
   - **Daemon Concurrency & Service Binding**: Updated `tool_calibrator.service` to specify `--host 127.0.0.1 --port 8090 --threads 2` matching real hardware deployments.
+  - **Git Executable Mode**: Marked `scripts/install.sh` and `scripts/uninstall.sh` with file mode `100755` directly in Git, removing the need for `chmod +x` which dirtied tracked files in Moonraker.
+  - **Transactional Rollback & Manifest**: Added `.install_manifest.txt` tracking and an error trap rollback mechanism in `install.sh`.
+  - **Dual Service Modes**: Added `--system-service` (default) and `--user-service` (rootless) flags to `install.sh` and `uninstall.sh`.
+  - **Safe Extras & Shared Directory Management**: `uninstall.sh` only unlinks TKC-owned files and uses `rmdir` on `z_backends` only if empty, preventing third-party file loss.
+  - **Auto-Initialization of `tool_offsets.cfg`**: Initialized placeholder file upon installation to eliminate missing-file Klipper include errors.
+  - **Pre-Test Vision Synchronization**: `cmd_CALIBRATION_TEST_VISION` now invokes `_ensure_vision_sync()` prior to sampling, preventing HTTP 502 camera errors on fresh starts.
+  - **Dependency Upper Bounds**: Added tested upper bounds in `requirements.txt` (`opencv-python-headless <6.0.0`, `numpy <3.0.0`, `requests <3.0.0`).
 
 ## [0.8.18] - 2026-09-06
 ### Fixed

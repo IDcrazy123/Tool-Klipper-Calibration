@@ -69,4 +69,5 @@ This checklist tracks execution progress across all phases of the **Tool-Klipper
 - [x] **Task 6.2:** Create uninstaller script `scripts/uninstall.sh` with custom $KLIPPER_DIR support.
 - [x] **Task 6.3:** Verify Moonraker Update Manager integration snippet with accurate repo/venv paths.
 - [x] **Task 6.4:** Address 2026-09-06 Installation & Report Audit findings (Klipper macro include compatibility, bootstrap auto-teach handling, timestamped backups, robust /health validation, and schema modernization).
+- [x] **Task 6.5:** Address 2026-09-06 Reinstall & Deployment Audit findings (Git executable bit 100755, transactional rollback manifest, user/system service modes, bounded dependencies, and tool_offsets placeholder).
 

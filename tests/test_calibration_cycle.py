@@ -1142,6 +1142,38 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("target_x: 170.91", cfg_content)
         self.assertIn("target_y: 18.917", cfg_content)
 
+    def test_cmd_test_vision_synchronizes_camera_url_and_mpp(self):
+        """cmd_CALIBRATION_TEST_VISION must invoke _ensure_vision_sync to configure camera before sampling."""
+        calibrator = ToolCalibrator(self.config)
+        calibrator.camera_stream_url = "http://127.0.0.1:8080/snapshot.jpg"
+
+        sync_called = []
+        original_sync = calibrator._ensure_vision_sync
+        def mock_sync():
+            sync_called.append(True)
+            original_sync()
+        calibrator._ensure_vision_sync = mock_sync
+
+        def mock_sample(toolhead, gcmd, samples=3):
+            return {
+                "found": True,
+                "center_uv": [640.0, 360.0],
+                "radius_px": 22.0,
+                "confidence": 0.99,
+                "spread_px": 0.1,
+                "burst_count": 3,
+                "burst_total": 3,
+                "tier": 0,
+                "combo": 10
+            }
+        calibrator._sample_burst = mock_sample
+        calibrator._query_vision = MagicMock(return_value={"status": "ok"})
+
+        gcmd = DummyGCodeCommand({})
+        calibrator.cmd_CALIBRATION_TEST_VISION(gcmd)
+
+        self.assertTrue(len(sync_called) > 0, "_ensure_vision_sync was not called during cmd_CALIBRATION_TEST_VISION")
+
 
 if __name__ == "__main__":
     unittest.main()
