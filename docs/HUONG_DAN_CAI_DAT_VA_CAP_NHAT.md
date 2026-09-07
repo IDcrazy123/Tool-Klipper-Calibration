@@ -110,47 +110,50 @@ systemctl --user restart tool_calibrator.service
 
 ---
 
-## 3. Cấu Hình Klipper (`printer.cfg`)
+## 3. Cấu Hình Klipper (`printer.cfg`) - Phong Cách 1-File kTAMV
+Hệ thống hỗ trợ cơ chế nạp hợp nhất qua **đúng 1 file cấu hình duy nhất** (tương tự như kTAMV quản lý qua `ktamv.cfg`):
 
-### Bước 3.1: Nạp bộ Macros
-> **Lưu ý quan trọng về đường dẫn Include trong Klipper:**
-> Klipper phân giải đường dẫn `[include ...]` tương đối so với thư mục chứa file cấu hình (`~/printer_data/config/`) và **không hỗ trợ dấu ngã `~`**.
-> Vì script cài đặt đã tự động tạo symlink vào `printer_data/config/tool_calibrator/`, bạn chỉ cần khai báo đường dẫn tương đối sau trong `printer.cfg`:
+### Bước 3.1: Thêm dòng nạp duy nhất vào `printer.cfg`
+Bạn chỉ cần thêm **đúng 1 dòng duy nhất** vào file `printer.cfg`:
 
 ```ini
-[include tool_calibrator/tool_calibrator_macros.cfg]
-[include tool_calibrator/safe_staging_macros.cfg]
-[include tool_offsets.cfg]
+[include tool_calibrator.cfg]
 ```
-*(Hoặc dùng đường dẫn tuyệt đối đầy đủ: `[include /home/pi/Tool-Klipper-Calibration/macros/tool_calibrator_macros.cfg]`)*
+*(Hoặc `[include tool_calibrator/tool_calibrator.cfg]` nếu hệ thống máy in quản lý theo thư mục riêng).*
 
-### Bước 3.2: Khai báo cấu hình Trạm Căn Chỉnh
-Thêm khối cấu hình `[tool_calibrator]` chuẩn vào `printer.cfg`:
+> **Khả năng tương thích ngược:**
+> Nếu `printer.cfg` cũ của bạn vẫn còn chứa các dòng `[include ...tool_calibrator_macros.cfg]` hoặc `[include ...safe_staging_macros.cfg]`, hệ thống đã cấu hình các file này dưới dạng empty stub an toàn nên Klipper sẽ không bao giờ bị báo lỗi trùng lặp macro (`duplicate section error`).
+
+### Bước 3.2: Tùy chỉnh thông số trong file `tool_calibrator.cfg`
+Toàn bộ thông số và macros nằm trong file `tool_calibrator.cfg`:
 
 ```ini
+[include tool_offsets.cfg]
+
 [tool_calibrator]
 service_url: http://127.0.0.1:8090
 camera_stream_url: http://127.0.0.1:8080/?action=snapshot
 offsets_config_path: ~/printer_data/config/tool_offsets.cfg
-safe_z: 35.0
+safe_z: 35.0                 # Độ cao an toàn vượt qua trạm/dock (mm)
+force_safe_z: False          # Đặt True nếu muốn ép giá trị safe_z này ghi đè toạ độ đã lưu
 travel_speed: 12000
 approach_speed: 3000
-z_backend: switch    # Chọn 'switch' (công tắc cơ) hoặc 'cartographer' (chạm dò điện từ/quang)
+z_backend: cartographer      # 'cartographer' (Cartographer Touch) hoặc 'switch' (công tắc cơ)
 
 # ----------------------------------------------------------------------------
-# Tùy chọn nâng cao khi z_backend là switch (tự động kế thừa nếu dùng tools_calibrate):
+# Tùy chọn nâng cao khi z_backend là switch:
 # ----------------------------------------------------------------------------
 # probing_speed: 3.0
 # lift_speed: 5.0
 # samples: 3
 # samples_tolerance: 0.010
 # samples_retract_dist: 2.0
-# switch_pin: ^PG12  # Để trống nếu tools_calibrate đã khai báo pin này
+# switch_pin: ^PG12
 ```
 
-> **Ghi chú về camera_stream_url:**
-> Hệ thống hỗ trợ cả dạng Snapshot (`?action=snapshot`, `/snapshot`, `/snapshot.jpg`) và Stream. Bộ giải mã sẽ tự động chuẩn hóa URL để lấy ảnh tức thời mà không gây trễ hình.
-> Tọa độ trạm camera và trạm switch sẽ được tự động học và lưu vĩnh viễn vào `tool_offsets.cfg` thông qua các lệnh 1-Click `AUTO_TEACH_CAMERA` và `AUTO_TEACH_SWITCH`.
+> **Ghi chú về độ cao Safe Z:**
+> - Bạn có thể dạy độ cao an toàn bằng lệnh `TEACH_CAMERA_SAFE_Z` (lấy toạ độ Z hiện tại) hoặc `TEACH_CAMERA_SAFE_Z Z=30` (đặt số cụ thể). Giá trị này sẽ được lưu vào `tool_offsets.cfg`.
+> - Nếu bạn muốn giá trị `safe_z` trong file `tool_calibrator.cfg` luôn luôn có quyền ưu tiên cao nhất, chỉ cần đặt `force_safe_z: True`.
 
 Sau khi sửa xong, nhấn **Save & Restart** Klipper.
 

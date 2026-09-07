@@ -8,6 +8,20 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.22] - 2026-09-07
+### Added
+- **1. Single-File kTAMV-Style Configuration (`tool_calibrator.cfg`)**:
+  - Unified all macros, staging commands, lifecycle hooks, and `[tool_calibrator]` parameters into a single master file: `tool_calibrator.cfg`.
+  - Reduced `printer.cfg` integration to exactly 1 include line: `[include tool_calibrator.cfg]`.
+  - Converted legacy `tool_calibrator_macros.cfg`, `safe_staging_macros.cfg`, and `macros.cfg` into empty backward-compatible stubs to guarantee zero `duplicate section` errors on existing installations.
+- **2. Safe Z Priority & Override Logic (`force_safe_z` & `Z` parameter)**:
+  - Eliminated the historical `max(loaded_safe_zs)` lockup where old saved coordinates prevented lower `safe_z` values from taking effect.
+  - Added `force_safe_z: True/False` configuration toggle: when True, `safe_z` in `tool_calibrator.cfg` strictly overrides any station data on disk.
+  - Added optional `Z` parameter to `TEACH_CAMERA_SAFE_Z` and `CALIBRATION_SET_SAFE_POS TYPE=SAFE_Z` (e.g., `TEACH_CAMERA_SAFE_Z Z=25`), allowing operators to define safe transit altitudes instantly without jogging.
+- **3. Unified Installer & Uninstaller Synchronization**:
+  - Updated `install.sh` to generate the 1-file master configuration and auto-link into target directories.
+  - Updated `uninstall.sh` to cleanly purge or preserve the single entrypoint and macros without leaving dangling symlinks.
+
 ## [0.8.21] - 2026-09-07
 ### Fixed
 - **1. Modern Klipper Bed-Mesh Zero Reference Discovery & Same-Point Guarantee**:

@@ -65,7 +65,17 @@ class ToolCalibrator:
         self.navigator = SafeNavigator(config)
         cfg_path = config.get("offset_config_path", None)
         if cfg_path is None:
-            cfg_path = config.get("offsets_config_path", "~/printer_data/config/tool_offsets.cfg")
+            cfg_path = config.get("offsets_config_path", None)
+        if cfg_path is None:
+            candidate_paths = [
+                os.path.expanduser("~/printer_data/config/tool_calibrator/tool_offsets.cfg"),
+                os.path.expanduser("~/printer_data/config/tool_offsets.cfg"),
+            ]
+            cfg_path = candidate_paths[1]
+            for cp in candidate_paths:
+                if os.path.exists(cp):
+                    cfg_path = cp
+                    break
         self.config_manager = ConfigManager(cfg_path)
 
         # Initialize Z Backend
@@ -83,6 +93,7 @@ class ToolCalibrator:
         self.lift_speed = config.getfloat("lift_speed", None)
         self.samples = config.getint("samples", None)
         self.samples_tolerance = config.getfloat("samples_tolerance", None)
+        self.force_safe_z = config.getboolean("force_safe_z", False)
         self.samples_retract_dist = config.getfloat("samples_retract_dist", None)
         self.switch_pin = config.get("switch_pin", None)
 
@@ -219,16 +230,27 @@ class ToolCalibrator:
             if self.navigator.switch_approach_y is None and "approach_y" in switch_saved and switch_saved["approach_y"] not in ("None", ""):
                 self.navigator.switch_approach_y = float(switch_saved["approach_y"])
 
-        # Preserve the maximum safe_z taught across camera, switch, and config
+        # Priority Logic for safe_z:
+        # 1. If force_safe_z=True and safe_z is configured in [tool_calibrator], it overrides disk-saved stations.
+        # 2. Otherwise, restore the taught safe_z from saved station data in tool_offsets.cfg.
+        # 3. If no station data exists, use configured_safe_z or fallback to 35.0mm.
         loaded_safe_zs = []
-        if self.navigator.safe_z is not None:
-            loaded_safe_zs.append(self.navigator.safe_z)
         if cam_saved and "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
             loaded_safe_zs.append(float(cam_saved["safe_z"]))
         if switch_saved and "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
             loaded_safe_zs.append(float(switch_saved["safe_z"]))
-        if loaded_safe_zs:
+
+        if getattr(self, "force_safe_z", False) and getattr(self.navigator, "configured_safe_z", None) is not None:
+            self.navigator.safe_z = self.navigator.configured_safe_z
+            logger.info(f"[tool_calibrator] force_safe_z active: configuration takes priority: Z{self.navigator.safe_z:.3f}")
+        elif loaded_safe_zs:
             self.navigator.safe_z = max(loaded_safe_zs)
+            logger.info(f"[tool_calibrator] Loaded safe_z from saved stations: Z{self.navigator.safe_z:.3f}")
+        elif getattr(self.navigator, "configured_safe_z", None) is not None:
+            self.navigator.safe_z = self.navigator.configured_safe_z
+            logger.info(f"[tool_calibrator] Loaded safe_z from configuration: Z{self.navigator.safe_z:.3f}")
+        else:
+            self.navigator.safe_z = 35.0
 
         self._sync_switch_location_from_tools_calibrate()
 
@@ -1777,8 +1799,10 @@ class ToolCalibrator:
         save_to_disk = gcmd.get_int("SAVE", 1) == 1
 
         if pos_type == "SAFE_Z":
-            self.navigator.safe_z = round(pos[2], 3)
-            gcmd.respond_info(f"Global Safe_Z set to Z:{pos[2]:.3f}")
+            target_z = gcmd.get_float("Z", pos[2])
+            self.navigator.safe_z = round(target_z, 3)
+            self.navigator.configured_safe_z = self.navigator.safe_z
+            gcmd.respond_info(f"Global Safe_Z set to Z:{self.navigator.safe_z:.3f}")
             if save_to_disk:
                 for sec in ("tool_calibrator_station camera", "tool_calibrator_station switch"):
                     existing = self.config_manager.load_section(sec) or {}

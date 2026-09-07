@@ -39,19 +39,26 @@ flowchart TD
 
 ---
 
-### Bước 2: Cài đặt Cấu hình trong `printer.cfg`
-Thêm các dòng include sau vào file `printer.cfg`:
+### Bước 2: Cài đặt Cấu hình trong `printer.cfg` (Quản lý 1 File Duy Nhất Kiểu kTAMV)
+Tương tự như cách kTAMV hoạt động, bạn chỉ cần thêm **DUY NHẤT 1 DÒNG** vào file `printer.cfg`:
 
 ```ini
-[include macros/tool_calibrator_macros.cfg]
-[include macros/safe_staging_macros.cfg]
-[include ~/printer_data/config/tool_offsets.cfg]
+[include tool_calibrator.cfg]
+```
+*(Hoặc `[include tool_calibrator/tool_calibrator.cfg]` nếu máy bạn dùng thư mục con).*
+
+Toàn bộ cấu hình trạm, thông số kết nối, độ cao `safe_z`, các macro căn chỉnh (`CALIBRATE_ALL_TOOLS`, `CALIBRATE_TOOL_XY`, `CALIBRATE_TOOL_Z`...) và hook khởi động đều được gom trọn vẹn trong file duy nhất `tool_calibrator.cfg`. Bạn không cần phải include nhiều file macro rời rạc hay chỉnh sửa thủ công file `tool_offsets.cfg`!
+
+Nội dung cấu hình chính trong `tool_calibrator.cfg`:
+```ini
+[include tool_offsets.cfg]   # Tự động nạp toạ độ trạm & offsets đã học
 
 [tool_calibrator]
 service_url: http://127.0.0.1:8090
 camera_stream_url: http://127.0.0.1:8080/?action=snapshot
 offsets_config_path: ~/printer_data/config/tool_offsets.cfg
 safe_z: 35.0                 # Độ cao an toàn vượt qua mọi giá đỡ dock (mm)
+force_safe_z: False          # Đặt True nếu muốn giá trị safe_z tại đây luôn ép buộc ghi đè toạ độ đã lưu
 travel_speed: 12000          # Tốc độ di chuyển nhanh giữa các trạm (mm/min)
 approach_speed: 1500         # Tốc độ tiếp cận chậm chính xác (mm/min)
 z_speed: 600                 # Tốc độ trục Z (mm/min)

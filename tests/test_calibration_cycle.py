@@ -706,6 +706,38 @@ class TestCalibrationCycle(unittest.TestCase):
         new_calibrator = ToolCalibrator(self.config)
         self.assertEqual(new_calibrator.navigator.safe_z, 70.0)
 
+    def test_force_safe_z_overrides_saved_stations(self):
+        """When force_safe_z: True is set in config, configured safe_z must override saved stations."""
+        # 1. Pre-seed tool_offsets.cfg with safe_z = 70.0
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
+        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
+        self.assertEqual(calibrator.navigator.safe_z, 70.0)
+
+        # 2. Re-initialize with force_safe_z=True and safe_z=25.0
+        forced_config_data = dict(self.config_data)
+        forced_config_data["safe_z"] = 25.0
+        forced_config_data["force_safe_z"] = True
+        forced_config = DummyConfig(self.printer, forced_config_data)
+
+        self.gcode.commands.clear()
+        forced_calibrator = ToolCalibrator(forced_config)
+        self.assertEqual(forced_calibrator.navigator.safe_z, 25.0)
+
+    def test_safe_z_explicit_z_param(self):
+        """CALIBRATION_SET_SAFE_POS TYPE=SAFE_Z with explicit Z param sets and persists without jogging."""
+        calibrator = ToolCalibrator(self.config)
+        self.toolhead.pos = [150.0, 10.0, 10.0, 0.0]  # Toolhead is at Z=10
+        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "Z": 28.5, "SAVE": 1})
+
+        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
+        self.assertEqual(calibrator.navigator.safe_z, 28.5)
+
+        with open(self.config_path, "r") as f:
+            content = f.read()
+        self.assertIn("safe_z: 28.5", content)
+
 
     def test_teaching_step_by_step_no_none_strings(self):
         """Teaching SAFE_Z before TARGET must never write the literal string 'None' to config."""

@@ -37,8 +37,10 @@ class SafeNavigator:
         if self.z_speed > 500.0:
             self.z_speed /= 60.0
 
-        # Global Safe Z Clearance Altitude
-        self.safe_z = config.getfloat("safe_z", 35.0, above=0.0)
+        # Global Safe Z Clearance Altitude (configured_safe_z is None if omitted/commented out)
+        configured_sz = config.getfloat("safe_z", None, above=0.0)
+        self.configured_safe_z = configured_sz
+        self.safe_z = configured_sz if configured_sz is not None else 35.0
 
         # Camera Station Waypoints (supports camera_target_x and camera_x aliases)
         self.cam_approach_x = config.getfloat("camera_approach_x", None)

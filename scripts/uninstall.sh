@@ -186,7 +186,7 @@ fi
 clean_macro_dir() {
     local dir="$1"
     if [ -d "${dir}" ]; then
-        for mf in "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+        for mf in "tool_calibrator.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
             if [ -L "${dir}/${mf}" ] || [ -f "${dir}/${mf}" ]; then
                 rm -f "${dir}/${mf}"
                 echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
@@ -201,6 +201,14 @@ clean_macro_dir "${MACRO_DIR}"
 if [ "${MACRO_DIR}" != "${ROOT_MACRO_DIR}" ]; then
     clean_macro_dir "${ROOT_MACRO_DIR}"
 fi
+
+# Clean root tool_calibrator.cfg symlink if it exists
+for root_sym in "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" "${CONFIG_DIR}/tool_calibrator.cfg"; do
+    if [ -L "${root_sym}" ]; then
+        rm -f "${root_sym}"
+        echo -e "${GREEN}    Đã gỡ symlink ${root_sym}${NC}"
+    fi
+done
 
 # 3. Safely comment out TKC includes in printer.cfg to prevent Klipper startup crash
 echo -e "\n${BLUE}[3/5] Bảo vệ cấu hình Klipper (printer.cfg)...${NC}"
