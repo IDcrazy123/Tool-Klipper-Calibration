@@ -791,7 +791,11 @@ class TestCalibrationCycle(unittest.TestCase):
         calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
 
         # Inspect backup directory: exactly 1 backup file created for the 2-tool run
-        backups = [f for f in os.listdir(self.test_dir) if f.startswith("tool_offsets.cfg.calib_backup_")]
+        backup_dir = calibrator.config_manager.backup_dir
+        if os.path.exists(backup_dir):
+            backups = [f for f in os.listdir(backup_dir) if f.startswith("tool_offsets.cfg.calib_backup_")]
+        else:
+            backups = [f for f in os.listdir(self.test_dir) if f.startswith("tool_offsets.cfg.calib_backup_")]
         self.assertEqual(len(backups), 1)
 
 

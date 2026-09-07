@@ -65,6 +65,35 @@ CURRENT_USER="$(id -un)"
 VENV_DIR="${REPO_DIR}/env"
 JOURNAL_FILE="${REPO_DIR}/.install_manifest.txt"
 
+# Check if running in git repo and verify if local is up-to-date
+if [ -d "${REPO_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
+    echo -e "${CYAN}[+] Kiểm tra phiên bản mã nguồn git...${NC}"
+    CURRENT_BRANCH="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")"
+    CURRENT_COMMIT="$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    echo -e "${CYAN}    Nhánh: ${CURRENT_BRANCH} | Commit hiện tại: ${CURRENT_COMMIT}${NC}"
+
+    if git -C "${REPO_DIR}" fetch origin "${CURRENT_BRANCH}" --quiet 2>/dev/null; then
+        LOCAL_REV="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || echo "")"
+        REMOTE_REV="$(git -C "${REPO_DIR}" rev-parse "origin/${CURRENT_BRANCH}" 2>/dev/null || echo "")"
+        if [ -n "${LOCAL_REV}" ] && [ -n "${REMOTE_REV}" ] && [ "${LOCAL_REV}" != "${REMOTE_REV}" ]; then
+            echo -e "\n${YELLOW}[!] PHÁT HIỆN BẢN CẬP NHẬT MỚI TRÊN GITHUB!${NC}"
+            echo -e "${YELLOW}    Bản cục bộ: ${CURRENT_COMMIT} -> Bản mới nhất trên origin/${CURRENT_BRANCH}: ${REMOTE_REV:0:7}${NC}"
+            if [ -t 0 ]; then
+                read -rp "Bạn có muốn tự động kéo (git pull) bản mới nhất về trước khi cài đặt? [Y/n]: " ans_pull
+                if [[ ! "${ans_pull}" =~ ^[Nn] ]]; then
+                    echo -e "${GREEN}[+] Đang cập nhật mã nguồn qua git pull...${NC}"
+                    git -C "${REPO_DIR}" pull origin "${CURRENT_BRANCH}" || echo -e "${YELLOW}[!] Không thể git pull tự động. Tiếp tục với phiên bản hiện tại.${NC}"
+                fi
+            else
+                echo -e "${GREEN}[+] Tự động cập nhật mã nguồn qua git pull...${NC}"
+                git -C "${REPO_DIR}" pull origin "${CURRENT_BRANCH}" || true
+            fi
+        else
+            echo -e "${GREEN}[✔] Mã nguồn đang ở phiên bản mới nhất (${CURRENT_COMMIT}).${NC}"
+        fi
+    fi
+fi
+
 KLIPPER_DIR="${HOME}/klipper"
 if [ ! -d "${KLIPPER_DIR}" ]; then
     echo -e "${YELLOW}[!] Thư mục Klipper mặc định (${KLIPPER_DIR}) không tồn tại.${NC}"
@@ -274,8 +303,31 @@ echo -e "${GREEN}    Linked tool_calibrator.cfg -> ${MACRO_DIR}/${NC}"
 
 # Remove any obsolete legacy macro files if they exist in config
 for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
-    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" 2>/dev/null || true
+    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" "${CONFIG_DIR}/${stale}" 2>/dev/null || true
 done
+
+# Clean up obsolete include lines from printer.cfg to prevent missing-file startup crashes
+PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
+if [ -f "${PRINTER_CFG}" ]; then
+    python3 -c "
+import re
+try:
+    with open('${PRINTER_CFG}', 'r') as f:
+        content = f.read()
+    pattern = r'(?m)^([ \t]*\[include [^]]*(?:safe[-_]staging[^\n]*\.cfg|tool[-_]calibrator[-_]macros\.cfg|sample[-_]tool[^\n]*\.cfg|tool[-_]calibrator/macros\.cfg)\])'
+    updated, count = re.subn(pattern, r'# \1 # disabled by TKC installer (consolidated into tool_calibrator.cfg)', content)
+    if count > 0:
+        with open('${PRINTER_CFG}', 'w') as f:
+            f.write(updated)
+        print(f'MIGRATED {count}')
+except Exception as ex:
+    pass
+" 2>/dev/null | while read -r line; do
+        if [[ "${line}" =~ ^MIGRATED ]]; then
+            echo -e "${GREEN}[✔] Đã tự động vô hiệu hóa các include macro cũ trong printer.cfg (chuyển sang cấu trúc 1 file duy nhất).${NC}"
+        fi
+    done
+fi
 
 # Provide 1-file master entrypoint in root target config directory
 if [ ! -f "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" ] && [ ! -L "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" ]; then
@@ -299,8 +351,8 @@ EOF
     fi
 done
 
-# 5. Moonraker Allowed Services (ASVC) & Update Manager
-echo -e "\n${BLUE}[4/6] Cấu hình Moonraker (ASVC & Update Manager)...${NC}"
+# 5. Moonraker Allowed Services (ASVC)
+echo -e "\n${BLUE}[4/6] Cấu hình Moonraker Allowed Services (ASVC)...${NC}"
 
 if [ "${SERVICE_MODE}" = "system" ]; then
     ASVC_FILE="${HOME}/printer_data/moonraker.asvc"
@@ -311,56 +363,6 @@ if [ "${SERVICE_MODE}" = "system" ]; then
             echo "tool_calibrator" >> "${ASVC_FILE}"
             echo -e "${GREEN}[✔] Đã thêm 'tool_calibrator' vào ${ASVC_FILE}${NC}"
         fi
-    fi
-fi
-
-MOONRAKER_CONF="${CONFIG_DIR}/moonraker.conf"
-if [ -f "${MOONRAKER_CONF}" ]; then
-    if ! grep -q "\[update_manager tool_calibrator\]" "${MOONRAKER_CONF}"; then
-        echo -e "${CYAN}[+] Tự động cấu hình [update_manager tool_calibrator] trong ${MOONRAKER_CONF}...${NC}"
-        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-        BACKUP_CONF="${MOONRAKER_CONF}.bak_${TIMESTAMP}"
-        cp "${MOONRAKER_CONF}" "${BACKUP_CONF}"
-        echo "BACKUP=${BACKUP_CONF}:${MOONRAKER_CONF}" >> "${JOURNAL_FILE}"
-
-        if [ "${SERVICE_MODE}" = "system" ]; then
-            cat >> "${MOONRAKER_CONF}" << EOF
-
-[update_manager tool_calibrator]
-type: git_repo
-path: ${REPO_DIR}
-origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
-primary_branch: main
-virtualenv: ${VENV_DIR}
-requirements: server/requirements.txt
-is_system_service: True
-managed_services:
-    tool_calibrator
-    klipper
-info_tags:
-    desc=Tool-Klipper-Calibration Automated Vision & Z Alignment
-EOF
-        else
-            cat >> "${MOONRAKER_CONF}" << EOF
-
-[update_manager tool_calibrator]
-type: git_repo
-path: ${REPO_DIR}
-origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
-primary_branch: main
-virtualenv: ${VENV_DIR}
-requirements: server/requirements.txt
-install_script: scripts/update_hook.sh
-is_system_service: False
-managed_services:
-    klipper
-info_tags:
-    desc=Tool-Klipper-Calibration Automated Vision & Z Alignment (User Service)
-EOF
-        fi
-        echo -e "${GREEN}[✔] Đã cấu hình Update Manager trong moonraker.conf (Sao lưu: ${BACKUP_CONF})${NC}"
-    else
-        echo -e "${GREEN}[✔] Khối [update_manager tool_calibrator] đã tồn tại trong moonraker.conf.${NC}"
     fi
 fi
 
@@ -518,16 +520,51 @@ fi
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}    CÀI ĐẶT HOÀN TẤT THÀNH CÔNG!                     ${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "${CYAN}Thêm DUY NHẤT 1 DÒNG vào printer.cfg (Quản lý kiểu kTAMV):${NC}"
+echo -e "${CYAN}Bước 1: Thêm DUY NHẤT 1 DÒNG vào printer.cfg (Quản lý kiểu kTAMV):${NC}"
 if [ -n "${CONFIG_SUBDIR}" ]; then
     echo -e "   ${YELLOW}[include ${CONFIG_SUBDIR}/tool_calibrator.cfg]${NC}"
-    echo -e "   (Hoặc: ${YELLOW}[include ${CONFIG_SUBDIR}/tool_calibrator/tool_calibrator.cfg]${NC})"
 else
     echo -e "   ${YELLOW}[include tool_calibrator.cfg]${NC}"
-    echo -e "   (Hoặc: ${YELLOW}[include tool_calibrator/tool_calibrator.cfg]${NC})"
+fi
+echo ""
+echo -e "${CYAN}Bước 2 (Tùy chọn): Cấu hình Update Manager trong moonraker.conf thủ công:${NC}"
+echo -e "   Để cập nhật TKC trực tiếp trên web Mainsail/Fluidd mà không làm phát sinh backup tự động,"
+echo -e "   hãy dán khối sau vào cuối tệp ${YELLOW}${CONFIG_DIR}/moonraker.conf${NC}:"
+echo ""
+if [ "${SERVICE_MODE}" = "system" ]; then
+cat << EOF
+[update_manager tool_calibrator]
+type: git_repo
+path: ${REPO_DIR}
+origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
+primary_branch: main
+virtualenv: ${VENV_DIR}
+requirements: server/requirements.txt
+is_system_service: True
+managed_services:
+    tool_calibrator
+    klipper
+info_tags:
+    desc=Tool-Klipper-Calibration Automated Vision & Z Alignment
+EOF
+else
+cat << EOF
+[update_manager tool_calibrator]
+type: git_repo
+path: ${REPO_DIR}
+origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
+primary_branch: main
+virtualenv: ${VENV_DIR}
+requirements: server/requirements.txt
+install_script: scripts/update_hook.sh
+is_system_service: False
+managed_services:
+    klipper
+info_tags:
+    desc=Tool-Klipper-Calibration Automated Vision & Z Alignment (User Service)
+EOF
 fi
 echo ""
 echo -e "${CYAN}Toàn bộ cấu hình [tool_calibrator], macros và toạ độ an toàn${NC}"
 echo -e "${CYAN}được quản lý tập trung trong file duy nhất này!${NC}"
-echo -e "Vào Mainsail/Fluidd -> Settings -> Update Manager để kiểm tra trạng thái cập nhật!"
 echo ""

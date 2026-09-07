@@ -8,6 +8,26 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.23] - 2026-09-07
+### Added
+- **1. Consolidated Dedicated Backup Architecture (`tool_calibrator_backups/`)**:
+  - Replaced loose, scattered backup files (`.calib_backup_*`, `.archived_*`, `.uninstall.bak_*`, `.bak_*`) with a single organized top-level backup directory: `printer_data/config/tool_calibrator_backups/`.
+  - Subdirectories include:
+    - `calibration_offsets/`: Automated timestamped backups of `tool_offsets.cfg` created and rotated during calibration runs.
+    - `system_configs/`: Pre-modification safety backups of `printer.cfg` and `moonraker.conf`.
+    - `archived_configs/`: Archived configs upon uninstallation.
+  - Updated `ConfigManager.create_backup`, `_rotate_backups`, and `rollback` to store and discover backups inside `tool_calibrator_backups/calibration_offsets/` while maintaining backward compatibility with legacy locations.
+- **2. Clean Uninstallation with Git Clone & Backup Purge (`--purge-all`, `--clean`, `-a`)**:
+  - `uninstall.sh` in interactive mode now prompts with `[Y]` default to purge the git repository clone (`REPO_DIR`), all old backup folders (`tool_calibrator_backups/`, `config_backups/tkc_*`), and configuration files.
+  - Safely deletes `REPO_DIR` at the end of uninstallation via `cd "${HOME}" && rm -rf "${REPO_DIR}"`, eliminating the `fatal: destination path already exists` error when performing fresh `git clone`.
+  - Broadened `printer.cfg` comment-out regex to safely disable legacy macro includes (`safe_staging_macros.cfg`, `tool_calibrator_macros.cfg`, `sample_tool_calibrator.cfg`) so Klipper boots without missing-include crashes.
+- **3. Manual Moonraker Configuration & Zero Backup Pollution**:
+  - Removed automatic modification of `moonraker.conf` from `install.sh` to prevent unsolicited `.bak` file clutter.
+  - Added clean copy-paste `[update_manager tool_calibrator]` snippet with interpolated paths in installer completion output for manual user configuration.
+- **4. Preflight Git Remote Sync Check in Installer**:
+  - `install.sh` checks if the local clone is behind `origin/main` and offers/auto-executes `git pull` before installing, preventing operators from accidentally reinstalling stale commits.
+  - Automatically migrates and disables obsolete legacy include lines in `printer.cfg`.
+
 ## [0.8.22] - 2026-09-07
 ### Added
 - **1. Single-File kTAMV-Style Configuration (`tool_calibrator.cfg`)**:

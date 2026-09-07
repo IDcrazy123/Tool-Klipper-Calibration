@@ -29,17 +29,23 @@ class ConfigManager:
     def __init__(self, config_file_path: str = "~/printer_data/config/tool_offsets.cfg") -> None:
         self.config_path = os.path.expanduser(config_file_path)
         self.max_backups = 10
+        self.config_dir = os.path.dirname(self.config_path)
+        # Dedicated consolidated backup directory: <config_dir>/tool_calibrator_backups/calibration_offsets
+        self.backup_dir = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets")
 
     def create_backup(self) -> Optional[str]:
         """
-        Creates a timestamped backup copy of tool_offsets.cfg if it exists.
+        Creates a timestamped backup copy of tool_offsets.cfg inside the consolidated
+        backup directory (tool_calibrator_backups/calibration_offsets).
         Automatically rotates and purges backups older than max_backups.
         """
         if not os.path.exists(self.config_path):
             return None
 
+        os.makedirs(self.backup_dir, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        backup_filename = f"{self.config_path}.calib_backup_{timestamp}"
+        filename = os.path.basename(self.config_path)
+        backup_filename = os.path.join(self.backup_dir, f"{filename}.calib_backup_{timestamp}")
         try:
             shutil.copy2(self.config_path, backup_filename)
             logger.info(f"Created configuration backup: {backup_filename}")
@@ -50,9 +56,10 @@ class ConfigManager:
             raise ConfigManagerException(f"Backup creation failed: {ex}")
 
     def _rotate_backups(self) -> None:
-        """Keeps the most recent N backups and deletes older ones."""
-        pattern = f"{self.config_path}.calib_backup_*"
-        backups = sorted(glob.glob(pattern))
+        """Keeps the most recent N backups in consolidated backup dir and deletes older ones."""
+        pattern_new = os.path.join(self.backup_dir, f"{os.path.basename(self.config_path)}.calib_backup_*")
+        pattern_legacy = f"{self.config_path}.calib_backup_*"
+        backups = sorted(glob.glob(pattern_new) + glob.glob(pattern_legacy))
         if len(backups) > self.max_backups:
             to_remove = backups[:-self.max_backups]
             for old_backup in to_remove:
@@ -247,14 +254,17 @@ class ConfigManager:
         Returns:
             str: Name of the restored backup file.
         """
-        pattern = f"{self.config_path}.calib_backup_*"
-        backups = sorted(glob.glob(pattern))
+        pattern_new = os.path.join(self.backup_dir, f"{os.path.basename(self.config_path)}.calib_backup_*")
+        pattern_legacy = f"{self.config_path}.calib_backup_*"
+        backups = sorted(glob.glob(pattern_new) + glob.glob(pattern_legacy))
 
         if target_backup:
-            # Check direct path or relative to config dir
+            # Check direct path, inside consolidated backup dir, or relative to config dir
             candidate = os.path.expanduser(target_backup)
             if not os.path.exists(candidate):
-                candidate = os.path.join(os.path.dirname(self.config_path), os.path.basename(target_backup))
+                candidate = os.path.join(self.backup_dir, os.path.basename(target_backup))
+            if not os.path.exists(candidate):
+                candidate = os.path.join(self.config_dir, os.path.basename(target_backup))
 
             if not os.path.exists(candidate):
                 raise ConfigManagerException(f"Specified backup file not found: {target_backup}")

@@ -228,44 +228,68 @@ cd ~/Tool-Klipper-Calibration && git pull && sudo systemctl restart tool_calibra
 
 ---
 
-## 5. Quy Trình Gỡ Bỏ Sạch Sẽ (Clean Uninstallation)
+## 5. Quy Trình Gỡ Bỏ Sạch Sẽ (Clean Uninstallation & Reinstallation)
 
-Nếu bạn không còn nhu cầu sử dụng và muốn đưa máy in về trạng thái ban đầu:
+Do Tool-Klipper-Calibration đã chuyển đổi hoàn toàn sang **cấu trúc 1 file cấu hình duy nhất** (`tool_calibrator.cfg`), việc gỡ sạch sẽ toàn bộ thư mục git clone cũ và các thư mục backup cũ là rất quan trọng để tránh tình trạng cài lại nhưng vẫn ăn vào bản cũ hoặc lỗi `destination path already exists`.
 
-### Bước 5.1: Chạy script gỡ cài đặt
+### Bước 5.1: Chạy script gỡ cài đặt sạch sẽ
+
 ```bash
 cd ~/Tool-Klipper-Calibration
-./scripts/uninstall.sh
-# Hoặc nếu muốn giữ lại file cấu hình tool_offsets.cfg:
-# ./scripts/uninstall.sh --keep-data
 
-# Hoặc nếu máy in sử dụng thư mục con cấu hình:
-# ./scripts/uninstall.sh --config-subdir Printer-Setup
+# Cách 1: Chạy chế độ tương tác (mặc định nhấn Enter chọn [Y] để gỡ sạch sẽ cả repo và backup):
+./scripts/uninstall.sh
+
+# Cách 2: Gỡ sạch toàn bộ tự động trong 1 lệnh (khuyên dùng khi muốn cài lại mới hoàn toàn):
+./scripts/uninstall.sh --purge-all
+# (Hoặc: ./scripts/uninstall.sh --clean hoặc ./scripts/uninstall.sh -a)
+
+# Nếu máy in sử dụng thư mục con cấu hình (ví dụ Printer-Setup):
+./scripts/uninstall.sh --purge-all --config-subdir Printer-Setup
+
+# Nếu muốn giữ lại file toạ độ tool_offsets.cfg:
+./scripts/uninstall.sh --keep-data
 ```
 
-**Script sẽ tự động:**
-1. Dừng và vô hiệu hóa `tool_calibrator.service` (tự động phát hiện cả chế độ system và user).
-2. Xóa file service unit (`/etc/systemd/system/tool_calibrator.service` hoặc `~/.config/systemd/user/...`).
-3. Gỡ bỏ an toàn các symlinks do TKC tạo trong `~/klipper/klippy/extras/` (tuyệt đối không xóa nhầm tệp của bên thứ ba).
-4. Gỡ bỏ symlink macros mà không dùng `rm -rf` (chỉ xóa symlink macros của TKC và dọn thư mục rỗng).
-5. Tự động tìm và comment an toàn các dòng `[include ...tool_offsets.cfg]` trong `printer.cfg` (có lưu bản sao lưu timestamp) để ngăn lỗi Klipper không thể khởi động do thiếu tệp include.
-6. Lưu trữ tệp cấu hình `tool_offsets.cfg` thành bản sao lưu timestamp `.archived_YYYYMMDD_HHMMSS` (trừ khi bật `--keep-data`).
-7. Xóa `tool_calibrator` khỏi `~/printer_data/moonraker.asvc`.
-8. Gỡ bỏ khối `[update_manager tool_calibrator]` khỏi `moonraker.conf` (có lưu bản backup timestamp).
-9. Xóa môi trường ảo `~/Tool-Klipper-Calibration/env`.
-10. Tự động gửi lệnh khởi động lại Klipper và Moonraker qua API hoặc systemd.
+**Script gỡ cài đặt sẽ thực hiện:**
+1. Dừng và vô hiệu hóa `tool_calibrator.service` (hỗ trợ cả system và user mode).
+2. Gỡ bỏ an toàn các symlinks của TKC trong `~/klipper/klippy/extras/` (tuyệt đối không đụng chạm module khác).
+3. Gỡ bỏ toàn bộ macro cũ (`macros.cfg`, `safe_staging_macros.cfg`, `tool_calibrator_macros.cfg`).
+4. Tự động vô hiệu hóa (thêm comment `#`) các dòng `[include ...]` cũ trong `printer.cfg` (kèm sao lưu an toàn) để Klipper không bị lỗi startup do thiếu file macro cũ.
+5. Xóa sạch các thư mục và file backup cũ (`printer_data/config/config_backups/tkc_*`, `*.calib_backup_*`, `*.archived_*`, `*.uninstall.bak_*`).
+6. Dọn dẹp cấu hình trong `moonraker.conf` và `moonraker.asvc`.
+7. Khởi động lại dịch vụ Klipper và Moonraker để nạp trạng thái sạch.
+8. Xóa sạch hoàn toàn thư mục clone git (`~/Tool-Klipper-Calibration`) khi chọn gỡ repo, giải phóng đường dẫn để sẵn sàng `git clone` mới.
 
-### Bước 5.2: Bảng kiểm tra tàn dư sau gỡ cài đặt (Residue Checklist)
+### Bước 5.2: Cài đặt lại phiên bản mới nhất từ đầu
 
-| Mục kiểm tra | Chế độ System Service | Chế độ User Service | Trạng thái sau gỡ |
-|---|---|---|---|
-| Dịch vụ chạy nền | `/etc/systemd/system/tool_calibrator.service` | `~/.config/systemd/user/tool_calibrator.service` | Đã xóa, cổng 8090 đóng |
-| Klipper Extras | `~/klipper/klippy/extras/tool_calibrator*.py` | `~/klipper/klippy/extras/tool_calibrator*.py` | Đã gỡ symlinks |
-| Macros | `[config_dir]/tool_calibrator/` | `[config_dir]/tool_calibrator/` | Đã xóa symlinks |
-| Moonraker ASVC | `~/printer_data/moonraker.asvc` | N/A | Đã xóa dòng `tool_calibrator` |
-| Update Manager | Khối `[update_manager tool_calibrator]` | Khối `[update_manager tool_calibrator]` | Đã dọn sạch |
-| Includes trong `printer.cfg` | Dòng `[include ...tool_offsets.cfg]` | Dòng `[include ...tool_offsets.cfg]` | Đã tự động comment `#` |
-| Dữ liệu đã lưu | `tool_offsets.cfg` | `tool_offsets.cfg` | Đã chuyển thành `.archived_*` |
+Sau khi gỡ sạch, tiến hành cài đặt lại theo quy trình chuẩn:
+
+```bash
+# 1. Chuyển về thư mục người dùng
+cd ~
+
+# 2. Clone mã nguồn mới nhất từ GitHub
+git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
+
+# 3. Chạy script cài đặt
+cd Tool-Klipper-Calibration
+./scripts/install.sh
+# Hoặc với thư mục con: ./scripts/install.sh --config-subdir Printer-Setup
+```
+
+> **Tính năng tự động đồng bộ (Auto Git Sync):** Ngay cả khi bạn chạy `./scripts/install.sh` trong thư mục cũ, script sẽ tự động kiểm tra trên GitHub, nếu phát hiện commit mới hơn trên `origin/main`, script sẽ tự động hỏi và `git pull` bản mới nhất về trước khi cài đặt.
+
+### Bước 5.3: Cấu hình Klipper (Chỉ 1 dòng duy nhất!)
+
+Sau khi cài đặt xong, bạn chỉ cần khai báo **DUY NHẤT 1 DÒNG** trong `printer.cfg`:
+
+```ini
+[include tool_calibrator.cfg]
+# Hoặc nếu dùng thư mục con:
+# [include Printer-Setup/tool_calibrator.cfg]
+```
+*(Toàn bộ macros, safe Z, cấu hình camera và Z-probing đã được tích hợp tập trung vào file này)*.
 
 ---
 

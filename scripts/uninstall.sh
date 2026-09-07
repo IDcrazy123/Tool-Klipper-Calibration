@@ -20,9 +20,19 @@ KEEP_DATA=false
 CONFIG_SUBDIR=""
 PURGE_REPO=false
 PURGE_CONFIG=false
+PURGE_BACKUPS=false
+PURGE_ALL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --purge-all|--clean-all|--clean|-a)
+            PURGE_ALL=true
+            PURGE_REPO=true
+            PURGE_CONFIG=true
+            PURGE_BACKUPS=true
+            KEEP_DATA=false
+            shift
+            ;;
         --keep-data)
             KEEP_DATA=true
             shift
@@ -35,6 +45,10 @@ while [[ $# -gt 0 ]]; do
             PURGE_CONFIG=true
             shift
             ;;
+        --purge-backups)
+            PURGE_BACKUPS=true
+            shift
+            ;;
         --config-subdir)
             CONFIG_SUBDIR="$2"
             shift 2
@@ -44,11 +58,13 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: ./scripts/uninstall.sh [--keep-data] [--purge-repo] [--purge-config] [--config-subdir <subdir>]"
-            echo "  --keep-data              : Preserves tool_offsets.cfg without archiving or removing"
-            echo "  --purge-repo             : Removes cloned repository directory after uninstallation"
-            echo "  --purge-config           : Safely creates a timestamped backup before purging TKC config files and archives"
-            echo "  --config-subdir <subdir> : Machine-specific configuration subdirectory (e.g. Printer-Setup)"
+            echo "Usage: ./scripts/uninstall.sh [--purge-all] [--clean] [--purge-repo] [--purge-config] [--purge-backups] [--keep-data] [--config-subdir <subdir>]"
+            echo "  --purge-all, --clean, -a : Xóa sạch toàn bộ (repo git clone, file config, thư mục backup cũ để cài mới)"
+            echo "  --purge-repo             : Xóa hoàn toàn thư mục clone git sau khi gỡ để sẵn sàng git clone lại"
+            echo "  --purge-config           : Gỡ bỏ toàn bộ file cấu hình TKC khỏi thư mục config máy in"
+            echo "  --purge-backups          : Xóa sạch các file và thư mục backup cũ (tkc_*, calib_backup_*, archived_*)"
+            echo "  --keep-data              : Bảo tồn tool_offsets.cfg mà không lưu trữ hay xóa"
+            echo "  --config-subdir <subdir> : Thư mục con cấu hình máy in (ví dụ: Printer-Setup)"
             exit 0
             ;;
         *)
@@ -57,6 +73,31 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Interactive mode: if run in terminal without explicit flags, prompt user for clean uninstallation
+if [ -t 0 ] && [ "${PURGE_ALL}" = false ] && [ "${KEEP_DATA}" = false ] && [ "${PURGE_REPO}" = false ] && [ "${PURGE_CONFIG}" = false ] && [ "${PURGE_BACKUPS}" = false ]; then
+    echo -e "\n${CYAN}====================================================${NC}"
+    echo -e "${CYAN}    TÙY CHỌN DỌN DẸP SẠCH SẼ (CLEAN UNINSTALL)      ${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "Do cấu trúc khai báo đã được tinh gọn (gom vào 1 file duy nhất),"
+    echo -e "khuyến nghị gỡ sạch sẽ các bản backup và repo cũ để cài lại bản mới nhất.\n"
+
+    read -rp "1. Bạn có muốn xóa sạch thư mục sao lưu (backup & archive) cũ (config_backups/tkc_*, *.calib_backup_*)? [Y/n]: " ans_bk
+    if [[ ! "${ans_bk}" =~ ^[Nn] ]]; then
+        PURGE_BACKUPS=true
+    fi
+
+    read -rp "2. Bạn có muốn gỡ bỏ hoàn toàn file cấu hình TKC cũ trong thư mục config máy in? [Y/n]: " ans_cfg
+    if [[ ! "${ans_cfg}" =~ ^[Nn] ]]; then
+        PURGE_CONFIG=true
+    fi
+
+    read -rp "3. Bạn có muốn xóa sạch thư mục mã nguồn git clone sau khi gỡ để sẵn sàng 'git clone' mới? [Y/n]: " ans_repo
+    if [[ ! "${ans_repo}" =~ ^[Nn] ]]; then
+        PURGE_REPO=true
+    fi
+    echo ""
+fi
 
 # 0. Check user permissions (Do NOT run as root/sudo directly)
 if [ "${EUID}" -eq 0 ]; then
@@ -210,19 +251,25 @@ for root_sym in "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" "${CONFIG_DIR}/tool_c
     fi
 done
 
+TKC_BACKUP_DIR="${CONFIG_DIR}/tool_calibrator_backups"
+
 # 3. Safely comment out TKC includes in printer.cfg to prevent Klipper startup crash
 echo -e "\n${BLUE}[3/5] Bảo vệ cấu hình Klipper (printer.cfg)...${NC}"
 if [ -f "${PRINTER_CFG}" ]; then
-    TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-    BACKUP_PRINTER="${PRINTER_CFG}.uninstall.bak_${TIMESTAMP}"
-    cp "${PRINTER_CFG}" "${BACKUP_PRINTER}"
+    if [ "${PURGE_BACKUPS}" = false ]; then
+        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+        SYSTEM_BK_DIR="${TKC_BACKUP_DIR}/system_configs"
+        mkdir -p "${SYSTEM_BK_DIR}"
+        BACKUP_PRINTER="${SYSTEM_BK_DIR}/printer.cfg.uninstall.bak_${TIMESTAMP}"
+        cp "${PRINTER_CFG}" "${BACKUP_PRINTER}"
+    fi
     python3 -c "
 import re
 try:
     with open('${PRINTER_CFG}', 'r') as f:
         content = f.read()
-    # Safely comment out any include lines pointing to tool_offsets.cfg or tool_calibrator macros (supports hyphens and underscores)
-    pattern = r'(?m)^([ \t]*\[include [^]]*(?:tool[-_]offsets\.cfg|tool[-_]calibrator[^\n]*\.cfg)\])'
+    # Safely comment out any include lines pointing to tool_offsets.cfg, tool_calibrator macros, safe_staging, sample_tool, etc.
+    pattern = r'(?m)^([ \t]*\[include [^]]*(?:tool[-_]offsets\.cfg|tool[-_]calibrator[^\n]*\.cfg|safe[-_]staging[^\n]*\.cfg|sample[-_]tool[^\n]*\.cfg|tool[-_]calibrator/macros\.cfg)\])'
     updated, count = re.subn(pattern, r'# \1 # disabled by TKC uninstaller', content)
     if count > 0:
         with open('${PRINTER_CFG}', 'w') as f:
@@ -232,7 +279,7 @@ except Exception as ex:
     print(f'ERR {ex}')
 " | while read -r line; do
         if [[ "${line}" =~ ^OK ]]; then
-            echo -e "${GREEN}[✔] Đã tự động vô hiệu hóa các dòng include TKC trong printer.cfg (Sao lưu: ${BACKUP_PRINTER})${NC}"
+            echo -e "${GREEN}[✔] Đã tự động vô hiệu hóa các dòng include TKC trong printer.cfg.${NC}"
         fi
     done
 fi
@@ -246,9 +293,13 @@ fi
 
 if [ -f "${MOONRAKER_CONF}" ]; then
     if grep -q "\[update_manager tool_calibrator\]" "${MOONRAKER_CONF}"; then
-        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-        BACKUP_FILE="${MOONRAKER_CONF}.uninstall.bak_${TIMESTAMP}"
-        cp "${MOONRAKER_CONF}" "${BACKUP_FILE}"
+        if [ "${PURGE_BACKUPS}" = false ]; then
+            TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+            SYSTEM_BK_DIR="${TKC_BACKUP_DIR}/system_configs"
+            mkdir -p "${SYSTEM_BK_DIR}"
+            BACKUP_FILE="${SYSTEM_BK_DIR}/moonraker.conf.uninstall.bak_${TIMESTAMP}"
+            cp "${MOONRAKER_CONF}" "${BACKUP_FILE}"
+        fi
         python3 -c "
 with open('${MOONRAKER_CONF}', 'r') as f:
     lines = f.readlines()
@@ -269,36 +320,44 @@ for line in lines:
 with open('${MOONRAKER_CONF}', 'w') as f:
     f.writelines(out)
 "
-        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] và chú thích liên quan trong moonraker.conf (Sao lưu: ${BACKUP_FILE}).${NC}"
+        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] và chú thích liên quan trong moonraker.conf.${NC}"
     fi
 fi
 
 if [ "${PURGE_CONFIG}" = true ]; then
-    TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-    PURGE_BACKUP_DIR="${CONFIG_DIR}/config_backups/tkc_purge_${TIMESTAMP}"
-    mkdir -p "${PURGE_BACKUP_DIR}"
-    echo -e "\n${YELLOW}[!] Đang thực hiện dọn dẹp triệt để config (--purge-config)...${NC}"
-    echo -e "${GREEN}[+] Tự động tạo bản sao lưu toàn bộ trước khi dọn tại: ${PURGE_BACKUP_DIR}${NC}"
+    echo -e "\n${YELLOW}[!] Đang thực hiện gỡ bỏ hoàn toàn cấu hình TKC (--purge-config)...${NC}"
+    if [ "${PURGE_BACKUPS}" = false ]; then
+        TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+        PURGE_BACKUP_DIR="${TKC_BACKUP_DIR}/archived_configs/purge_${TIMESTAMP}"
+        mkdir -p "${PURGE_BACKUP_DIR}"
+        echo -e "${GREEN}[+] Tự động tạo bản sao lưu trước khi dọn tại: ${PURGE_BACKUP_DIR}${NC}"
+    fi
+
     for dir in "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}"; do
         [ -d "${dir}" ] || continue
-        for pattern in "tool_offsets.cfg*" "tool_calibrator.cfg*" "tool-calibrator.cfg*" "sample_tool_calibrator.cfg*"; do
+        for pattern in "tool_offsets.cfg*" "tool_calibrator.cfg*" "tool-calibrator.cfg*" "sample_tool_calibrator.cfg*" "safe_staging_macros.cfg*" "tool_calibrator_macros.cfg*"; do
             for f in "${dir}"/${pattern}; do
-                if [ -f "${f}" ]; then
-                    cp -a "${f}" "${PURGE_BACKUP_DIR}/"
+                if [ -f "${f}" ] || [ -L "${f}" ]; then
+                    if [ "${PURGE_BACKUPS}" = false ] && [ -f "${f}" ] && [ ! -L "${f}" ]; then
+                        cp -a "${f}" "${PURGE_BACKUP_DIR}/"
+                    fi
                     rm -f "${f}"
-                    echo -e "${GREEN}    Đã sao lưu và gỡ bỏ: ${f}${NC}"
+                    echo -e "${GREEN}    Đã gỡ bỏ: ${f}${NC}"
                 fi
             done
         done
     done
+    rm -rf "${MACRO_DIR}" "${ROOT_MACRO_DIR}" 2>/dev/null || true
 else
-    # Archive tool_offsets.cfg safely
+    # Archive tool_offsets.cfg safely in unified backup directory
     archive_offsets() {
         local target="$1"
-        if [ -f "${target}" ]; then
+        if [ -f "${target}" ] && [ ! -L "${target}" ]; then
             if [ "${KEEP_DATA}" = false ]; then
                 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-                ARCHIVE_CFG="${target}.archived_${TIMESTAMP}"
+                ARCHIVE_BK_DIR="${TKC_BACKUP_DIR}/archived_configs"
+                mkdir -p "${ARCHIVE_BK_DIR}"
+                ARCHIVE_CFG="${ARCHIVE_BK_DIR}/tool_offsets.cfg.archived_${TIMESTAMP}"
                 mv "${target}" "${ARCHIVE_CFG}"
                 echo -e "${GREEN}[✔] Đã di chuyển và lưu trữ ${target} -> ${ARCHIVE_CFG}${NC}"
             else
@@ -315,6 +374,41 @@ fi
 
 # Remove persistent manifest
 [ -f "${PERSISTENT_MANIFEST}" ] && rm -f "${PERSISTENT_MANIFEST}"
+[ -f "${CONFIG_DIR}/.tool_calibrator_manifest.json" ] && rm -f "${CONFIG_DIR}/.tool_calibrator_manifest.json"
+
+# Clean backups if requested
+if [ "${PURGE_BACKUPS}" = true ]; then
+    echo -e "\n${BLUE}[+] Xóa sạch toàn bộ thư mục và file backup cũ (--purge-backups)...${NC}"
+    # 1. Remove unified backup folder
+    rm -rf "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/tool_calibrator_backups" 2>/dev/null || true
+
+    # 2. Remove legacy backup folders: config_backups/tkc_* and config_backups/pre-tkc-*
+    for bk_parent in "${CONFIG_DIR}/config_backups" "${TARGET_CONFIG_DIR}/config_backups"; do
+        if [ -d "${bk_parent}" ]; then
+            for bk_dir in "${bk_parent}"/tkc* "${bk_parent}"/pre-tkc-*; do
+                if [ -d "${bk_dir}" ]; then
+                    rm -rf "${bk_dir}"
+                    echo -e "${GREEN}    Đã xóa thư mục sao lưu cũ: ${bk_dir}${NC}"
+                fi
+            done
+            rmdir "${bk_parent}" 2>/dev/null || true
+        fi
+    done
+
+    # 3. Remove loose legacy backup files
+    for dir in "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}"; do
+        [ -d "${dir}" ] || continue
+        for bk_pat in "tool_offsets.cfg.calib_backup_*" "tool_offsets.cfg.archived_*" "tool_offsets.cfg.bak_*" "*.uninstall.bak_*" "*.bak_[0-9]*"; do
+            for f in "${dir}"/${bk_pat}; do
+                if [ -f "${f}" ]; then
+                    rm -f "${f}"
+                    echo -e "${GREEN}    Đã xóa file sao lưu cũ: ${f}${NC}"
+                fi
+            done
+        done
+    done
+    echo -e "${GREEN}[✔] Toàn bộ file và thư mục backup cũ đã được dọn sạch.${NC}"
+fi
 
 # 5. Clean virtualenv & restart services
 echo -e "\n${BLUE}[5/5] Xóa môi trường ảo Python virtualenv (env/)...${NC}"
@@ -363,25 +457,40 @@ if [ -n "${RETAINED_ITEMS}" ]; then
         [ -n "${arc}" ] && echo -e "      - ${arc}"
     done
     if [ "${PURGE_CONFIG}" = false ]; then
-        echo -e "${YELLOW}    (Lưu ý: TKC mặc định bảo tồn các file cấu hình máy in. Để gỡ bỏ hoàn toàn kèm backup tự động, sử dụng --purge-config)${NC}"
+        echo -e "${YELLOW}    (Lưu ý: TKC mặc định bảo tồn các file cấu hình máy in. Để gỡ bỏ hoàn toàn, sử dụng --purge-config hoặc --purge-all)${NC}"
     fi
 else
     echo -e "${GREEN}    Không còn file cấu hình hoặc archive TKC nào trong thư mục config.${NC}"
 fi
 
 if [ "${PURGE_REPO}" = true ]; then
-    echo -e "\n${YELLOW}[!] Yêu cầu gỡ bỏ toàn bộ thư mục repository (--purge-repo)...${NC}"
-    if [ -d "${REPO_DIR}" ]; then
-        rm -rf "${REPO_DIR}"
-        echo -e "${GREEN}[✔] Đã xóa repository: ${REPO_DIR}${NC}"
-    fi
+    echo -e "\n${YELLOW}[!] Đang xóa sạch hoàn toàn thư mục repository clone từ git (--purge-repo)...${NC}"
+    TARGET_REPO="${REPO_DIR}"
+    cd "${HOME}"
+    rm -rf "${TARGET_REPO}"
+    echo -e "${GREEN}[✔] Đã xóa hoàn toàn thư mục git clone: ${TARGET_REPO}${NC}"
+    echo -e "${GREEN}    Bây giờ bạn có thể thực hiện 'git clone' mới mà không bị lỗi 'already exists'!${NC}"
 fi
 
 echo -e "\n${GREEN}====================================================${NC}"
-echo -e "${GREEN}    GỠ CÀI ĐẶT THÀNH CÔNG VÀ AN TOÀN!              ${NC}"
+echo -e "${GREEN}    GỠ CÀI ĐẶT HOÀN TẤT THÀNH CÔNG VÀ SẠCH SẼ!      ${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "Lưu ý cuối cùng:"
-echo -e "1. Các dòng include TKC trong printer.cfg đã được comment an toàn với bản sao lưu."
-echo -e "2. Khối [tool_calibrator] (nếu có) có thể được comment hoặc xóa khỏi printer.cfg."
-echo -e "3. Giao diện Klipper sẽ hoạt động bình thường sau khi khởi động lại."
+echo -e "Lưu ý quan trọng:"
+echo -e "1. Các dòng include TKC trong printer.cfg đã được vô hiệu hóa an toàn."
+echo -e "2. Giao diện Klipper/Moonraker đã được nạp lại trạng thái sạch."
+echo ""
+echo -e "${CYAN}====================================================${NC}"
+echo -e "${CYAN}    HƯỚNG DẪN CÀI ĐẶT LẠI MỚI (CẤU TRÚC 1 FILE)     ${NC}"
+echo -e "${CYAN}====================================================${NC}"
+echo -e "Để cài đặt lại phiên bản mới nhất từ đầu:"
+echo -e "  1. Chuyển về thư mục người dùng:  ${YELLOW}cd ~${NC}"
+echo -e "  2. Clone mã nguồn mới nhất:       ${YELLOW}git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git${NC}"
+echo -e "  3. Chạy script cài đặt:           ${YELLOW}cd Tool-Klipper-Calibration && ./scripts/install.sh${NC}"
+echo ""
+echo -e "Sau khi cài đặt xong, thêm duy nhất 1 dòng sau vào printer.cfg:"
+if [ -n "${CONFIG_SUBDIR}" ]; then
+    echo -e "  ${GREEN}[include ${CONFIG_SUBDIR}/tool_calibrator.cfg]${NC}"
+else
+    echo -e "  ${GREEN}[include tool_calibrator.cfg]${NC}"
+fi
 echo ""
