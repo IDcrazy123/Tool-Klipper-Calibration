@@ -227,7 +227,7 @@ fi
 clean_macro_dir() {
     local dir="$1"
     if [ -d "${dir}" ]; then
-        for mf in "tool_calibrator.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "sample_tool_calibrator.cfg"; do
+        for mf in "tool_calibrator.cfg" "tool_offsets.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "sample_tool_calibrator.cfg"; do
             if [ -L "${dir}/${mf}" ] || [ -f "${dir}/${mf}" ]; then
                 rm -f "${dir}/${mf}"
                 echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
@@ -243,8 +243,8 @@ if [ "${MACRO_DIR}" != "${ROOT_MACRO_DIR}" ]; then
     clean_macro_dir "${ROOT_MACRO_DIR}"
 fi
 
-# Clean root tool_calibrator.cfg symlink if it exists
-for root_sym in "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" "${CONFIG_DIR}/tool_calibrator.cfg"; do
+# Clean root tool_calibrator.cfg and tool_offsets.cfg symlinks if they exist
+for root_sym in "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" "${CONFIG_DIR}/tool_calibrator.cfg" "${TARGET_CONFIG_DIR}/tool_offsets.cfg" "${CONFIG_DIR}/tool_offsets.cfg"; do
     if [ -L "${root_sym}" ]; then
         rm -f "${root_sym}"
         echo -e "${GREEN}    Đã gỡ symlink ${root_sym}${NC}"
@@ -489,8 +489,8 @@ echo -e "  3. Chạy script cài đặt:           ${YELLOW}cd Tool-Klipper-Cali
 echo ""
 echo -e "Sau khi cài đặt xong, thêm duy nhất 1 dòng sau vào printer.cfg:"
 if [ -n "${CONFIG_SUBDIR}" ]; then
-    echo -e "  ${GREEN}[include ${CONFIG_SUBDIR}/tool_calibrator.cfg]${NC}"
+    echo -e "  ${GREEN}[include ${CONFIG_SUBDIR}/tool_calibrator/tool_calibrator.cfg]${NC}"
 else
-    echo -e "  ${GREEN}[include tool_calibrator.cfg]${NC}"
+    echo -e "  ${GREEN}[include tool_calibrator/tool_calibrator.cfg]${NC}"
 fi
 echo ""

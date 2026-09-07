@@ -68,6 +68,7 @@ class ToolCalibrator:
             cfg_path = config.get("offsets_config_path", None)
         if cfg_path is None:
             candidate_paths = [
+                os.path.expanduser("~/printer_data/config/Printer-Setup/tool_calibrator/tool_offsets.cfg"),
                 os.path.expanduser("~/printer_data/config/tool_calibrator/tool_offsets.cfg"),
                 os.path.expanduser("~/printer_data/config/tool_offsets.cfg"),
             ]

@@ -285,11 +285,11 @@ cd Tool-Klipper-Calibration
 Sau khi cài đặt xong, bạn chỉ cần khai báo **DUY NHẤT 1 DÒNG** trong `printer.cfg`:
 
 ```ini
-[include tool_calibrator.cfg]
+[include tool_calibrator/tool_calibrator.cfg]
 # Hoặc nếu dùng thư mục con:
-# [include Printer-Setup/tool_calibrator.cfg]
+# [include Printer-Setup/tool_calibrator/tool_calibrator.cfg]
 ```
-*(Toàn bộ macros, safe Z, cấu hình camera và Z-probing đã được tích hợp tập trung vào file này)*.
+*(Toàn bộ macros, safe Z, cấu hình camera và Z-probing đã được tích hợp tập trung vào file này, gom gọn gàng trong thư mục `tool_calibrator/` mà không để file thừa bên ngoài)*.
 
 ---
 
