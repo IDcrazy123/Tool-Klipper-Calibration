@@ -246,7 +246,7 @@ class CartographerBackend(BaseZBackend):
         toolhead.wait_moves()
 
         cmd = self.touch_home_gcode
-        gcmd.respond_info(f"[tool_calibrator] Running {cmd} on Reference Tool T{tool_number}")
+        gcmd.respond_info(f"[T{tool_number}] Running {cmd}...")
         self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
 
@@ -288,7 +288,7 @@ class CartographerBackend(BaseZBackend):
         toolhead.wait_moves()
 
         cmd = self.touch_probe_gcode
-        gcmd.respond_info(f"[tool_calibrator] Running {cmd} on Tool T{tool_number}")
+        gcmd.respond_info(f"[T{tool_number}] Running {cmd}...")
         self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
 

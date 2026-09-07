@@ -1066,8 +1066,6 @@ class ToolCalibrator:
                 "Use a nozzle-contact switch backend (e.g. PF2 switch/Axiscope) or pass ALLOW_SHUTTLE_Z=1 if experimenting."
             )
 
-        gcmd.respond_info(f"[T{tool_no}] Entering Z Probe Station...")
-
         # Derive XY compensation for secondary tool so nozzle hits exact center
         offset_x = tool_offsets.get("x", 0.0)
         offset_y = tool_offsets.get("y", 0.0)
@@ -1093,7 +1091,7 @@ class ToolCalibrator:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
             if tool_no == self.reference_tool:
                 probe_x, probe_y = self.z_backend.get_probe_xy()
-                gcmd.respond_info(f"[T{tool_no}] Moving to designated Z-probe coordinates: X{probe_x:.3f} Y{probe_y:.3f}")
+                gcmd.respond_info(f"[T{tool_no}] Moving to Z-probe coordinates: X{probe_x:.3f} Y{probe_y:.3f}")
                 self.navigator.validate_coordinate_safety(x=probe_x, y=probe_y)
                 toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
                 toolhead.wait_moves()
@@ -1107,10 +1105,13 @@ class ToolCalibrator:
 
                 target_x = base_x + (offset_x if offset_xy else 0.0)
                 target_y = base_y + (offset_y if offset_xy else 0.0)
-                gcmd.respond_info(
-                    f"[T{tool_no}] Moving to same-point Z probe coordinates: X{target_x:.3f} Y{target_y:.3f} "
-                    f"(Reference baseline was X{base_x:.3f} Y{base_y:.3f})"
-                )
+                if offset_xy:
+                    gcmd.respond_info(
+                        f"[T{tool_no}] Moving to Z-probe coordinates: X{target_x:.3f} Y{target_y:.3f} "
+                        f"(Compensated from baseline X{base_x:.3f} Y{base_y:.3f})"
+                    )
+                else:
+                    gcmd.respond_info(f"[T{tool_no}] Moving to Z-probe coordinates: X{target_x:.3f} Y{target_y:.3f}")
                 self.navigator.validate_coordinate_safety(x=target_x, y=target_y)
                 toolhead.manual_move([target_x, target_y, None], self.navigator.travel_speed)
                 toolhead.wait_moves()
@@ -1283,7 +1284,23 @@ class ToolCalibrator:
             # Discover tool sequence across any toolchanger flavor
             ordered_tools = self._discover_tools(tools_param)
 
-            gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run}, Continue-on-Error: {continue_on_error})")
+            if calibrate_xy and calibrate_z:
+                mode_desc = f"Full Calibration (XY & Z) [Order: {order}]"
+            elif calibrate_z:
+                mode_desc = "Z-Offset Calibration"
+            elif calibrate_xy:
+                mode_desc = "Optical XY Calibration"
+            else:
+                mode_desc = "Calibration"
+
+            flags = []
+            if dry_run:
+                flags.append("DRY-RUN")
+            if continue_on_error:
+                flags.append("CONTINUE-ON-ERROR")
+            flags_str = f" ({', '.join(flags)})" if flags else ""
+
+            gcmd.respond_info(f"[tool_calibrator] Starting {mode_desc} across tools: {ordered_tools}{flags_str}")
 
             # Execute start_gcode hook
             if self.start_gcode is not None:
@@ -1906,12 +1923,15 @@ class ToolCalibrator:
             except Exception as ex:
                 raise gcmd.error(f"Navigation error: {ex}")
         elif station in ("DEPART", "LEAVE", "SAFE_Z"):
-            gcmd.respond_info("[tool_calibrator] Departing station to safe Z altitude...")
             active_t = self._get_active_tool_no()
             self._set_inspection_lighting(False, active_t)
+            prev_z = toolhead.get_position()[2]
             self.navigator.depart_station(toolhead, gcode_move)
             pos = toolhead.get_position()
-            gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
+            if self.navigator.safe_z > 0.0 and pos[2] > prev_z + 0.01:
+                gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
+            else:
+                gcmd.respond_info("✔ Departed station.")
         else:
             raise gcmd.error(f"Invalid STATION '{station}'. Must be CAMERA, SWITCH, or DEPART.")
 
