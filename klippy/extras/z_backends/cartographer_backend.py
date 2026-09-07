@@ -256,6 +256,8 @@ class CartographerBackend(BaseZBackend):
 
         is_homing = ("HOME" in cmd.upper() or "G28" in cmd.upper())
         effective_contact_z = 0.0 if is_homing else measured_z
+        ref_x = round(float(cur_pos[0]), 3)
+        ref_y = round(float(cur_pos[1]), 3)
 
         return {
             "source": "cartographer_touch_reference",
@@ -264,7 +266,10 @@ class CartographerBackend(BaseZBackend):
             "is_homed": is_homing,
             "suggested_z_offset": 0.0,
             "touch_model_z_offset": self.touch_model_z_offset,
-            "tool_number": tool_number
+            "tool_number": tool_number,
+            "probe_x": ref_x,
+            "probe_y": ref_y,
+            "probe_xy": (ref_x, ref_y)
         }
 
     def probe_secondary_tool(self, tool_number: int, reference_result: Dict[str, Any], gcmd) -> Dict[str, Any]:
@@ -291,6 +296,9 @@ class CartographerBackend(BaseZBackend):
         toolhead.manual_move([None, None, cur_pos[2] + self.retract_z], 15.0)
         toolhead.wait_moves()
 
+        sec_x = round(float(cur_pos[0]), 3)
+        sec_y = round(float(cur_pos[1]), 3)
+
         is_homed = reference_result.get("is_homed", False)
         if is_homed:
             ref_z = 0.0
@@ -303,5 +311,8 @@ class CartographerBackend(BaseZBackend):
             "contact_z": measured_z,
             "suggested_z_offset": delta_z,
             "touch_model_z_offset": self.touch_model_z_offset,
-            "tool_number": tool_number
+            "tool_number": tool_number,
+            "probe_x": sec_x,
+            "probe_y": sec_y,
+            "probe_xy": (sec_x, sec_y)
         }

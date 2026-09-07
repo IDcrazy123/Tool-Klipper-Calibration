@@ -436,12 +436,12 @@ try:
     data = json.loads('''${HEALTH_RESP}''')
     if data.get('status') == 'ok' and data.get('service') == 'tool_calibrator_server':
         ver = data.get('version', 'unknown')
-        cmt = data.get('commit', 'unknown')
-        proc = data.get('process_ready', True)
-        cam = 'YES' if data.get('camera_ready') else 'PENDING/OFFLINE'
+        cmt = data.get('commit', 'unknown')[:7]
+        proc = 'READY' if data.get('process_ready', True) else 'NOT_READY'
+        cam = 'CONNECTED' if data.get('camera_ready') else 'PENDING/OFFLINE'
         scale = 'SOLVED' if data.get('scale_ready') else 'NOT_SET'
         mat = 'LOADED' if data.get('matrix_ready') else 'NOT_SET'
-        print(f'{ver} (Commit: {cmt}) | Process: READY | Camera: {cam} | Scale: {scale} | Matrix: {mat}')
+        print(f'VER={ver}\nCMT={cmt}\nPROC={proc}\nCAM={cam}\nSCALE={scale}\nMAT={mat}')
         sys.exit(0)
 except Exception as ex:
     pass
@@ -456,8 +456,13 @@ sys.exit(1)
 done
 
 if [ "${HEALTH_SUCCESS}" = true ]; then
+    eval "${HEALTH_OUTPUT}"
     echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090${NC}"
-    echo -e "${CYAN}    Chi tiết: ${HEALTH_OUTPUT}${NC}"
+    echo -e "${GREEN}    [Layer 1: Dịch vụ lõi] Phiên bản: ${VER} (Commit: ${CMT}) | Daemon: ${PROC} | Port 8090: LISTENING${NC}"
+    echo -e "${CYAN}    [Layer 2: Dữ liệu quang học] Camera: ${CAM} | Scale MPP: ${SCALE} | Affine Matrix: ${MAT}${NC}"
+    if [ "${SCALE}" = "NOT_SET" ] || [ "${MAT}" = "NOT_SET" ]; then
+        echo -e "${YELLOW}    (Lưu ý: Camera/Scale/Matrix sẽ sẵn sàng sau khi cấu hình camera và chạy CALIBRATE_CAMERA_SCALE)${NC}"
+    fi
 else
     echo -e "${RED}[ERR] Service không khởi động được hoặc phản hồi /health không hợp lệ!${NC}"
     echo -e "${YELLOW}Log chi tiết từ journalctl:${NC}"

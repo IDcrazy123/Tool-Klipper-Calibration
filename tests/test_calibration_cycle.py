@@ -209,7 +209,7 @@ class TestCalibrationCycle(unittest.TestCase):
             "camera_y": 10.0,
             "camera_focal_z": 22.0,
             "offset_config_path": self.config_path,
-            "allow_shuttle_z": True,
+            "measurement_reference": "nozzle",
         }
         self.config = DummyConfig(self.printer, self.config_data)
 

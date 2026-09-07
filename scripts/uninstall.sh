@@ -19,6 +19,7 @@ echo -e "${YELLOW}====================================================${NC}"
 KEEP_DATA=false
 CONFIG_SUBDIR=""
 PURGE_REPO=false
+PURGE_CONFIG=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,6 +31,10 @@ while [[ $# -gt 0 ]]; do
             PURGE_REPO=true
             shift
             ;;
+        --purge-config)
+            PURGE_CONFIG=true
+            shift
+            ;;
         --config-subdir)
             CONFIG_SUBDIR="$2"
             shift 2
@@ -39,9 +44,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: ./scripts/uninstall.sh [--keep-data] [--purge-repo] [--config-subdir <subdir>]"
+            echo "Usage: ./scripts/uninstall.sh [--keep-data] [--purge-repo] [--purge-config] [--config-subdir <subdir>]"
             echo "  --keep-data              : Preserves tool_offsets.cfg without archiving or removing"
             echo "  --purge-repo             : Removes cloned repository directory after uninstallation"
+            echo "  --purge-config           : Safely creates a timestamped backup before purging TKC config files and archives"
             echo "  --config-subdir <subdir> : Machine-specific configuration subdirectory (e.g. Printer-Setup)"
             exit 0
             ;;
@@ -242,6 +248,10 @@ out = []
 skip = False
 for line in lines:
     if line.strip() == '[update_manager tool_calibrator]':
+        while out and (out[-1].strip().startswith('#') and any(k in out[-1].lower() for k in ['tool_calibrator', 'tool-calibrator', 'tkc', 'calibrator'])):
+            out.pop()
+        if out and not out[-1].strip():
+            out.pop()
         skip = True
         continue
     if skip and line.startswith('['):
@@ -251,28 +261,48 @@ for line in lines:
 with open('${MOONRAKER_CONF}', 'w') as f:
     f.writelines(out)
 "
-        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] trong moonraker.conf (Sao lưu: ${BACKUP_FILE}).${NC}"
+        echo -e "${GREEN}[✔] Đã dọn khối [update_manager tool_calibrator] và chú thích liên quan trong moonraker.conf (Sao lưu: ${BACKUP_FILE}).${NC}"
     fi
 fi
 
-# Archive tool_offsets.cfg safely
-archive_offsets() {
-    local target="$1"
-    if [ -f "${target}" ]; then
-        if [ "${KEEP_DATA}" = false ]; then
-            TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-            ARCHIVE_CFG="${target}.archived_${TIMESTAMP}"
-            mv "${target}" "${ARCHIVE_CFG}"
-            echo -e "${GREEN}[✔] Đã di chuyển và lưu trữ ${target} -> ${ARCHIVE_CFG}${NC}"
-        else
-            echo -e "${YELLOW}[+] Bảo tồn ${target} (--keep-data enabled).${NC}"
+if [ "${PURGE_CONFIG}" = true ]; then
+    TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+    PURGE_BACKUP_DIR="${CONFIG_DIR}/config_backups/tkc_purge_${TIMESTAMP}"
+    mkdir -p "${PURGE_BACKUP_DIR}"
+    echo -e "\n${YELLOW}[!] Đang thực hiện dọn dẹp triệt để config (--purge-config)...${NC}"
+    echo -e "${GREEN}[+] Tự động tạo bản sao lưu toàn bộ trước khi dọn tại: ${PURGE_BACKUP_DIR}${NC}"
+    for dir in "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}"; do
+        [ -d "${dir}" ] || continue
+        for pattern in "tool_offsets.cfg*" "tool_calibrator.cfg*" "tool-calibrator.cfg*" "sample_tool_calibrator.cfg*"; do
+            for f in "${dir}"/${pattern}; do
+                if [ -f "${f}" ]; then
+                    cp -a "${f}" "${PURGE_BACKUP_DIR}/"
+                    rm -f "${f}"
+                    echo -e "${GREEN}    Đã sao lưu và gỡ bỏ: ${f}${NC}"
+                fi
+            done
+        done
+    done
+else
+    # Archive tool_offsets.cfg safely
+    archive_offsets() {
+        local target="$1"
+        if [ -f "${target}" ]; then
+            if [ "${KEEP_DATA}" = false ]; then
+                TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+                ARCHIVE_CFG="${target}.archived_${TIMESTAMP}"
+                mv "${target}" "${ARCHIVE_CFG}"
+                echo -e "${GREEN}[✔] Đã di chuyển và lưu trữ ${target} -> ${ARCHIVE_CFG}${NC}"
+            else
+                echo -e "${YELLOW}[+] Bảo tồn ${target} (--keep-data enabled).${NC}"
+            fi
         fi
-    fi
-}
+    }
 
-archive_offsets "${OFFSETS_CFG}"
-if [ "${OFFSETS_CFG}" != "${ROOT_OFFSETS_CFG}" ]; then
-    archive_offsets "${ROOT_OFFSETS_CFG}"
+    archive_offsets "${OFFSETS_CFG}"
+    if [ "${OFFSETS_CFG}" != "${ROOT_OFFSETS_CFG}" ]; then
+        archive_offsets "${ROOT_OFFSETS_CFG}"
+    fi
 fi
 
 # Remove persistent manifest
@@ -299,13 +329,36 @@ elif sudo -n true 2>/dev/null; then
     sudo systemctl restart moonraker.service || true
 fi
 
-# Report remaining backups/archives if any
-REMAINING_ARCHIVES=$(find "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}" -maxdepth 1 -name "tool_offsets.cfg.archived_*" -o -name "printer.cfg.bak_tkc_*" 2>/dev/null | sort -u || true)
-if [ -n "${REMAINING_ARCHIVES}" ]; then
-    echo -e "${CYAN}[i] Các file sao lưu an toàn được bảo tồn:${NC}"
-    echo "${REMAINING_ARCHIVES}" | while read -r arc; do
-        [ -n "${arc}" ] && echo -e "    - ${arc}"
+# Report remaining backups/archives and retained configs
+echo -e "\n${CYAN}[i] Báo cáo chi tiết các file cấu hình và dữ liệu bảo tồn:${NC}"
+RETAINED_ITEMS=$(python3 -c "
+import os, glob
+dirs = list(dict.fromkeys(['${TARGET_CONFIG_DIR}', '${CONFIG_DIR}']))
+patterns = [
+    'tool_calibrator.cfg*', 'tool-calibrator.cfg*', 'tool_offsets.cfg*',
+    'printer.cfg.uninstall.bak_*', 'moonraker.conf.uninstall.bak_*'
+]
+found = []
+for d in dirs:
+    if os.path.isdir(d):
+        for p in patterns:
+            for f in glob.glob(os.path.join(d, p)):
+                if os.path.isfile(f):
+                    found.append(f)
+for f in sorted(set(found)):
+    print(f)
+" 2>/dev/null || true)
+
+if [ -n "${RETAINED_ITEMS}" ]; then
+    echo -e "${CYAN}    Các file cấu hình/dữ liệu máy in được bảo tồn an toàn:${NC}"
+    echo "${RETAINED_ITEMS}" | while read -r arc; do
+        [ -n "${arc}" ] && echo -e "      - ${arc}"
     done
+    if [ "${PURGE_CONFIG}" = false ]; then
+        echo -e "${YELLOW}    (Lưu ý: TKC mặc định bảo tồn các file cấu hình máy in. Để gỡ bỏ hoàn toàn kèm backup tự động, sử dụng --purge-config)${NC}"
+    fi
+else
+    echo -e "${GREEN}    Không còn file cấu hình hoặc archive TKC nào trong thư mục config.${NC}"
 fi
 
 if [ "${PURGE_REPO}" = true ]; then

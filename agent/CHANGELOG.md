@@ -8,6 +8,32 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.21] - 2026-09-07
+### Fixed
+- **1. Modern Klipper Bed-Mesh Zero Reference Discovery & Same-Point Guarantee**:
+  - `BaseZBackend.get_probe_xy()` now supports modern Klipper object paths: traverses `bed_mesh.zero_ref_pos`, `bed_mesh.bmc.zero_ref_pos`, `bed_mesh.bmc.probe_mgr.zero_ref_pos`, `bed_mesh.probe_mgr.zero_ref_pos`, and fallback to `configfile.settings.get("bed_mesh", {}).get("zero_reference_position")`.
+  - Stored reference tool touch coordinates `(probe_x, probe_y)` directly from `toolhead.get_position()`.
+  - Secondary tool probe targets are locked to the exact reference coordinate, with safety check rejecting coordinate deviation $> 0.5\text{ mm}$ via error code `ERR_Z_004`.
+- **2. Fixed-Shuttle Probe Safety Enforced (Mandatory `SAVE_CONFIG=0`)**:
+  - Fixed-shuttle probes (e.g. Cartographer mounted on the toolchanger carriage) cannot determine individual nozzle tip lengths.
+  - When `measurement_reference != "nozzle"` and `ALLOW_SHUTTLE_Z=1` is used, TKC strictly enforces `save_config = False` with a high-visibility warning message, tagging all computed Z offsets as `[EXPERIMENTAL - NOT SAVED]`.
+- **3. Automatic Toolchanger State Reconciliation in Error / Abort Paths**:
+  - Added `_reconcile_toolchanger_state(initial_tool, gcmd)` invoked in `finally` blocks across `cmd_CALIBRATE_TOOL_OFFSETS`, `cmd_CALIBRATION_CENTER_NOZZLE`, etc.
+  - Inspects physical sensor / tool status (`tc.detect_tool()`, `toollock`, `run_record["physical_tool"]`) and synchronizes logical Klipper state using `INITIALIZE_TOOLCHANGER TOOL={t}` or direct object assignment, preventing the toolchanger from remaining in an `uninitialized` (`tool_number=-1`) state after probe failures.
+- **4. Telemetry Clock Synchronization & Negative `elapsed_sec` Fix**:
+  - Recorded reactor monotonic time `start_monotonic = self.reactor.monotonic()` upon calibration start.
+  - Updated `get_status(eventtime)` and `cmd_CALIBRATION_STATUS` to calculate elapsed time strictly against Klipper's reactor monotonic clock, preventing massive negative numbers (e.g., `-1.78e9` seconds) resulting from mixing Unix wall time and reactor monotonic timestamps.
+- **5. Diagnostic Multi-Tool Continuity Mode (`CONTINUE_ON_ERROR=1`)**:
+  - Added `CONTINUE_ON_ERROR` parameter to `cmd_CALIBRATE_TOOL_OFFSETS`.
+  - When set to 1, hardware probe repeatability exceptions (such as Cartographer sample variance on T2) are logged as per-tool errors without terminating remaining tools in the batch.
+- **6. Layered Health Reporting in Installer**:
+  - Split installation health telemetry in `install.sh` into Layer 1 (Core daemon, git commit, port 8090) and Layer 2 (Vision assets: camera endpoint, scale MPP, affine matrix).
+  - Clear reporting prevents operators from confusing uncalibrated vision matrices with daemon service failures.
+- **7. Clean Uninstallation & Safe Config Purge**:
+  - Enhanced `uninstall.sh` to remove preceding orphan comments in `moonraker.conf`.
+  - Added `--purge-config` flag which creates an automated timestamped backup in `config_backups/tkc_purge_${TIMESTAMP}/` before purging configuration artifacts.
+  - Prints a complete manifest of retained user configuration and backup directories upon exit.
+
 ## [0.8.20] - 2026-09-06
 ### Fixed
 - **1. User-Mode Non-Sudo Service & API Reloads**:

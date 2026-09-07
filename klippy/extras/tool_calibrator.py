@@ -123,12 +123,14 @@ class ToolCalibrator:
             "calibrating_tool": None,
             "physical_tool": None,
             "start_time": None,
+            "start_monotonic": None,
             "end_time": None,
             "duration_sec": 0.0,
             "error": None,
             "completed_tools": [],
             "offsets": {},
-            "valid": False
+            "valid": False,
+            "tool_errors": {}
         }
 
         # Auto-load saved station waypoints from tool_offsets.cfg if not explicitly set in printer.cfg
@@ -850,6 +852,114 @@ class ToolCalibrator:
 
         return self.reference_tool
 
+    def _reconcile_toolchanger_state(self, initial_tool: int, gcmd=None) -> None:
+        """
+        Reconciles toolchanger logical state to the physically active/detected tool
+        upon failure or aborted runs to prevent uninitialized toolchanger state (-1).
+        """
+        try:
+            tc = self.printer.lookup_object("toolchanger", None)
+            if tc is None:
+                return
+
+            target_tool = None
+
+            # 1. Query physical sensor detection if available on toolchanger
+            for det_method in ("detect_tool", "get_detected_tool"):
+                meth = getattr(tc, det_method, None)
+                if callable(meth):
+                    try:
+                        detected = meth()
+                        if detected is not None and detected != -1:
+                            if isinstance(detected, int):
+                                target_tool = detected
+                            elif hasattr(detected, "tool_number"):
+                                target_tool = int(detected.tool_number)
+                            break
+                    except Exception:
+                        pass
+
+            # 2. Check sensor attributes on tc
+            if target_tool is None:
+                for attr in ("detected_tool", "physical_tool", "current_tool"):
+                    val = getattr(tc, attr, None)
+                    if val is not None and val != -1:
+                        try:
+                            target_tool = int(val)
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+            # 3. Check toollock object if present
+            if target_tool is None:
+                toollock = self.printer.lookup_object("toollock", None)
+                if toollock is not None:
+                    for attr in ("detected_tool", "current_tool", "tool_current"):
+                        val = getattr(toollock, attr, None)
+                        if val is not None and val != -1:
+                            try:
+                                target_tool = int(val)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+            # 4. Fallback to run_record or initial_tool
+            if target_tool is None:
+                rec_tool = self.run_record.get("physical_tool") or self.run_record.get("calibrating_tool")
+                if rec_tool is not None:
+                    try:
+                        target_tool = int(rec_tool)
+                    except (ValueError, TypeError):
+                        pass
+                if target_tool is None:
+                    try:
+                        target_tool = int(initial_tool)
+                    except (ValueError, TypeError):
+                        target_tool = self.reference_tool
+
+            tc_status = getattr(tc, "status", None)
+            tc_tool_num = getattr(tc, "tool_number", None)
+            tc_active = getattr(tc, "active_tool", None)
+
+            needs_reconciliation = (
+                tc_status == "uninitialized"
+                or tc_tool_num == -1
+                or tc_active is None
+            )
+
+            if needs_reconciliation and target_tool is not None:
+                logger.info(f"[tool_calibrator] Reconciling uninitialized toolchanger state to T{target_tool}")
+                registered_cmds = getattr(self.gcode, "commands", {})
+                if "INITIALIZE_TOOLCHANGER" in registered_cmds:
+                    try:
+                        self.gcode.run_script_from_command(f"INITIALIZE_TOOLCHANGER TOOL={target_tool}")
+                        logger.info(f"[tool_calibrator] Initialized toolchanger via INITIALIZE_TOOLCHANGER TOOL={target_tool}")
+                    except Exception as cmd_err:
+                        logger.debug(f"[tool_calibrator] INITIALIZE_TOOLCHANGER command failed: {cmd_err}")
+
+                # Direct object synchronization fallback if still uninitialized
+                if getattr(tc, "status", None) == "uninitialized" or getattr(tc, "tool_number", 0) == -1 or getattr(tc, "active_tool", None) is None:
+                    tools_dict = getattr(tc, "tools", {})
+                    tool_obj = tools_dict.get(target_tool) if isinstance(tools_dict, dict) else None
+                    if hasattr(tc, "set_tool") and tool_obj is not None:
+                        try:
+                            tc.set_tool(tool_obj)
+                        except Exception:
+                            pass
+                    if hasattr(tc, "active_tool"):
+                        tc.active_tool = tool_obj if tool_obj is not None else target_tool
+                    if hasattr(tc, "tool_number"):
+                        tc.tool_number = target_tool
+                    if hasattr(tc, "status") and tc.status == "uninitialized":
+                        tc.status = "ready"
+
+                msg = f"[tool_calibrator] Toolchanger state reconciled to physical tool T{target_tool}."
+                if gcmd is not None:
+                    gcmd.respond_info(msg)
+                logger.info(msg)
+        except Exception as rec_err:
+            logger.warning(f"[tool_calibrator] Failed to reconcile toolchanger state: {rec_err}")
+
     def _check_camera_thermal_safety(self, tool_no: Optional[int] = None, gcmd = None) -> None:
         """Ensures nozzle temperature does not exceed safe optical camera limit (100C) to prevent lens fogging/damage."""
         if tool_no is None:
@@ -958,16 +1068,39 @@ class ToolCalibrator:
             self.navigator.approach_switch(toolhead, gcode_move, offset_xy=offset_xy)
         else:
             self.navigator.move_to_safe_z(toolhead, gcode_move)
-            probe_x, probe_y = self.z_backend.get_probe_xy()
-            if offset_xy is not None:
-                probe_x += offset_x
-                probe_y += offset_y
-            self.navigator.validate_coordinate_safety(x=probe_x, y=probe_y)
-            toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
+            if tool_no == self.reference_tool:
+                probe_x, probe_y = self.z_backend.get_probe_xy()
+                gcmd.respond_info(f"[T{tool_no}] Moving to designated Z-probe coordinates: X{probe_x:.3f} Y{probe_y:.3f}")
+                self.navigator.validate_coordinate_safety(x=probe_x, y=probe_y)
+                toolhead.manual_move([probe_x, probe_y, None], self.navigator.travel_speed)
+                toolhead.wait_moves()
+            else:
+                active_ref = reference_z_result or getattr(self, "cached_reference_z_result", None)
+                ref_xy = active_ref.get("probe_xy") if isinstance(active_ref, dict) else None
+                if ref_xy and len(ref_xy) >= 2:
+                    base_x, base_y = float(ref_xy[0]), float(ref_xy[1])
+                else:
+                    base_x, base_y = self.z_backend.get_probe_xy()
+
+                target_x = base_x + (offset_x if offset_xy else 0.0)
+                target_y = base_y + (offset_y if offset_xy else 0.0)
+                gcmd.respond_info(
+                    f"[T{tool_no}] Moving to same-point Z probe coordinates: X{target_x:.3f} Y{target_y:.3f} "
+                    f"(Reference baseline was X{base_x:.3f} Y{base_y:.3f})"
+                )
+                self.navigator.validate_coordinate_safety(x=target_x, y=target_y)
+                toolhead.manual_move([target_x, target_y, None], self.navigator.travel_speed)
+                toolhead.wait_moves()
 
         if tool_no == self.reference_tool:
             ref_z = self.z_backend.probe_reference_tool(tool_no, gcmd)
-            gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established ({ref_z.get('source')})")
+            pos = toolhead.get_position()
+            actual_ref_x = ref_z.get("probe_x", round(pos[0], 3))
+            actual_ref_y = ref_z.get("probe_y", round(pos[1], 3))
+            ref_z["probe_x"] = actual_ref_x
+            ref_z["probe_y"] = actual_ref_y
+            ref_z["probe_xy"] = (actual_ref_x, actual_ref_y)
+            gcmd.respond_info(f"[T{tool_no}] Reference Z baseline established at X{actual_ref_x:.3f} Y{actual_ref_y:.3f} ({ref_z.get('source')})")
             tool_offsets["z"] = 0.0
             self.cached_reference_z_result = ref_z
             self.navigator.depart_station(toolhead, gcode_move)
@@ -988,6 +1121,29 @@ class ToolCalibrator:
                     "Please calibrate the reference tool or include it in the TOOLS parameter."
                 )
             z_res = self.z_backend.probe_secondary_tool(tool_no, active_ref, gcmd)
+
+            # Same-point coordinate verification check
+            if self.z_backend_type != "switch":
+                ref_xy = active_ref.get("probe_xy")
+                if ref_xy and len(ref_xy) >= 2:
+                    base_x, base_y = float(ref_xy[0]), float(ref_xy[1])
+                    expected_x = base_x + (offset_x if offset_xy else 0.0)
+                    expected_y = base_y + (offset_y if offset_xy else 0.0)
+                    res_xy = z_res.get("probe_xy")
+                    if res_xy and isinstance(res_xy, (list, tuple)) and len(res_xy) >= 2:
+                        actual_x = float(res_xy[0])
+                        actual_y = float(res_xy[1])
+                    else:
+                        actual_x = float(z_res.get("probe_x", toolhead.get_position()[0]))
+                        actual_y = float(z_res.get("probe_y", toolhead.get_position()[1]))
+                    dev_x = abs(actual_x - expected_x)
+                    dev_y = abs(actual_y - expected_y)
+                    if dev_x > 0.5 or dev_y > 0.5:
+                        raise gcmd.error(
+                            f"[ERR_Z_004] Probe coordinate mismatch: Tool T{tool_no} probed at ({actual_x:.3f}, {actual_y:.3f}), "
+                            f"differing from Reference T{self.reference_tool} target ({expected_x:.3f}, {expected_y:.3f}) by dx={dev_x:.3f}mm, dy={dev_y:.3f}mm (tolerance: 0.5mm)."
+                        )
+
             tool_offsets["z"] = z_res.get("suggested_z_offset", 0.0)
             gcmd.respond_info(f"[T{tool_no}] Calculated Z Offset: Z{tool_offsets['z']:+.3f}mm")
             self.navigator.depart_station(toolhead, gcode_move)
@@ -1015,6 +1171,7 @@ class ToolCalibrator:
         clean_nozzle = gcmd.get_int("CLEAN_NOZZLE", 0) == 1
         order = gcmd.get("ORDER", "XY_FIRST").upper()
         compensate_focal_z = gcmd.get_int("COMPENSATE_FOCAL_Z", 0) == 1
+        continue_on_error = gcmd.get_int("CONTINUE_ON_ERROR", 0) == 1
         tools_param = gcmd.get("TOOLS", None)
         samples_param = gcmd.get_int("SAMPLES", self.centering_samples)
         if samples_param < 3:
@@ -1033,6 +1190,7 @@ class ToolCalibrator:
         import os
         run_id = f"run_{int(_sys_time.time())}"
         active_t = self._get_active_tool_no()
+        start_mono = self.reactor.monotonic()
         self.run_record = {
             "run_id": run_id,
             "state": "RUNNING",
@@ -1041,12 +1199,14 @@ class ToolCalibrator:
             "physical_tool": active_t,
             "active_tool": active_t,
             "start_time": _sys_time.time(),
+            "start_monotonic": start_mono,
             "end_time": None,
             "duration_sec": 0.0,
             "error": None,
             "completed_tools": [],
             "offsets": {},
-            "valid": False
+            "valid": False,
+            "tool_errors": {}
         }
         self.last_run_status = "RUNNING"
 
@@ -1076,21 +1236,31 @@ class ToolCalibrator:
                 self._sync_switch_location_from_tools_calibrate()
 
             # Pre-flight check for Z backend capability
+            is_experimental_shuttle_z = False
             if calibrate_z and not dry_run:
                 meas_ref = getattr(self.z_backend, "measurement_reference", "nozzle")
                 allow_shuttle = self.allow_shuttle_z or (gcmd.get_int("ALLOW_SHUTTLE_Z", 0) == 1)
-                if meas_ref != "nozzle" and not allow_shuttle:
-                    raise gcmd.error(
-                        f"[ERR_Z_003] The active Z backend '{self.z_backend_type}' has measurement_reference='{meas_ref}'. "
-                        "A shuttle-mounted probe cannot observe individual nozzle tip lengths across tool changes. "
-                        "Per-tool Z calibration is rejected to prevent applying invalid Z offsets. "
-                        "Use a nozzle-contact switch backend (e.g. PF2 switch/Axiscope) or pass ALLOW_SHUTTLE_Z=1 if experimenting."
-                    )
+                if meas_ref != "nozzle":
+                    if not allow_shuttle:
+                        raise gcmd.error(
+                            f"[ERR_Z_003] The active Z backend '{self.z_backend_type}' has measurement_reference='{meas_ref}'. "
+                            "A shuttle-mounted probe cannot observe individual nozzle tip lengths across tool changes. "
+                            "Per-tool Z calibration is rejected to prevent applying invalid Z offsets. "
+                            "Use a nozzle-contact switch backend (e.g. PF2 switch/Axiscope) or pass ALLOW_SHUTTLE_Z=1 if experimenting."
+                        )
+                    else:
+                        is_experimental_shuttle_z = True
+                        if save_config:
+                            gcmd.respond_info(
+                                "[tool_calibrator] WARNING: Experimental ALLOW_SHUTTLE_Z=1 active with shuttle-mounted probe. "
+                                "Forcing SAVE_CONFIG=0 to protect production configuration. Measured Z values will NOT be persisted."
+                            )
+                            save_config = False
 
             # Discover tool sequence across any toolchanger flavor
             ordered_tools = self._discover_tools(tools_param)
 
-            gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run})")
+            gcmd.respond_info(f"[tool_calibrator] Starting Calibration Sequence across tools: {ordered_tools} (Order: {order}, Dry Run: {dry_run}, Continue-on-Error: {continue_on_error})")
 
             # Execute start_gcode hook
             if self.start_gcode is not None:
@@ -1111,69 +1281,82 @@ class ToolCalibrator:
                 self.run_record["phase"] = "CHANGING_TOOL"
                 gcmd.respond_info(f"\n--- Calibrating Toolhead T{tool_no} ---")
 
-                # Change tool
-                if self.before_pickup_gcode is not None:
-                    self._run_tool_hook(self.before_pickup_gcode, tool_no)
-                self.gcode.run_script_from_command(f"T{tool_no}")
-                if self.after_pickup_gcode is not None:
-                    self._run_tool_hook(self.after_pickup_gcode, tool_no)
+                try:
+                    # Change tool
+                    if self.before_pickup_gcode is not None:
+                        self._run_tool_hook(self.before_pickup_gcode, tool_no)
+                    self.gcode.run_script_from_command(f"T{tool_no}")
+                    if self.after_pickup_gcode is not None:
+                        self._run_tool_hook(self.after_pickup_gcode, tool_no)
 
-                toolhead.wait_moves()
-                self.run_record["physical_tool"] = tool_no
-                self.run_record["last_confirmed_tool"] = tool_no
-                self.run_record["phase"] = "CALIBRATING_TOOL"
+                    toolhead.wait_moves()
+                    self.run_record["physical_tool"] = tool_no
+                    self.run_record["last_confirmed_tool"] = tool_no
+                    self.run_record["phase"] = "CALIBRATING_TOOL"
 
-                # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
-                if clean_nozzle:
-                    if self.clean_nozzle_gcode is not None:
-                        gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
-                        self._run_tool_hook(self.clean_nozzle_gcode, tool_no)
-                        toolhead.wait_moves()
-                    else:
-                        clean_macro = self.printer.lookup_object("gcode_macro _CLEAN_NOZZLE", None)
-                        if clean_macro is not None:
-                            try:
-                                self.gcode.run_script_from_command(f"_CLEAN_NOZZLE TOOL={tool_no}")
-                                toolhead.wait_moves()
-                            except Exception:
-                                pass
+                    # Optional nozzle cleaning prior to optical inspection (strictly non-intrusive)
+                    if clean_nozzle:
+                        if self.clean_nozzle_gcode is not None:
+                            gcmd.respond_info(f"[T{tool_no}] Executing clean_nozzle_gcode hook...")
+                            self._run_tool_hook(self.clean_nozzle_gcode, tool_no)
+                            toolhead.wait_moves()
                         else:
-                            gcmd.respond_info(f"[tool_calibrator] Note: CLEAN_NOZZLE requested, but no cleaning macro is configured on this printer. Skipping.")
+                            clean_macro = self.printer.lookup_object("gcode_macro _CLEAN_NOZZLE", None)
+                            if clean_macro is not None:
+                                try:
+                                    self.gcode.run_script_from_command(f"_CLEAN_NOZZLE TOOL={tool_no}")
+                                    toolhead.wait_moves()
+                                except Exception:
+                                    pass
+                            else:
+                                gcmd.respond_info(f"[tool_calibrator] Note: CLEAN_NOZZLE requested, but no cleaning macro is configured on this printer. Skipping.")
 
-                tool_offsets: Dict[str, float] = {}
+                    tool_offsets: Dict[str, float] = {}
 
-                # Calibration sequence execution by order
-                if order == "Z_FIRST":
-                    if calibrate_z and not dry_run:
-                        self.run_record["phase"] = "PROBING_Z"
-                        reference_z_result = self._execute_z_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
-                        )
-                    if calibrate_xy:
-                        focal_z = None
-                        if compensate_focal_z and tool_no != self.reference_tool and "z" in tool_offsets:
-                            focal_z = self.navigator.cam_target_z + tool_offsets["z"]
-                        self.run_record["phase"] = "CENTERING_NOZZLE"
-                        reference_origin_xy = self._execute_xy_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z,
-                            samples=samples_param, enable_wiggle=wiggle_param
-                        )
-                else:
-                    if calibrate_xy:
-                        self.run_record["phase"] = "CENTERING_NOZZLE"
-                        reference_origin_xy = self._execute_xy_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets,
-                            samples=samples_param, enable_wiggle=wiggle_param
-                        )
-                    if calibrate_z and not dry_run:
-                        self.run_record["phase"] = "PROBING_Z"
-                        reference_z_result = self._execute_z_calibration(
-                            tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
-                        )
+                    # Calibration sequence execution by order
+                    if order == "Z_FIRST":
+                        if calibrate_z and not dry_run:
+                            self.run_record["phase"] = "PROBING_Z"
+                            reference_z_result = self._execute_z_calibration(
+                                tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
+                            )
+                        if calibrate_xy:
+                            focal_z = None
+                            if compensate_focal_z and tool_no != self.reference_tool and "z" in tool_offsets:
+                                focal_z = self.navigator.cam_target_z + tool_offsets["z"]
+                            self.run_record["phase"] = "CENTERING_NOZZLE"
+                            reference_origin_xy = self._execute_xy_calibration(
+                                tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets, focal_z,
+                                samples=samples_param, enable_wiggle=wiggle_param
+                            )
+                    else:
+                        if calibrate_xy:
+                            self.run_record["phase"] = "CENTERING_NOZZLE"
+                            reference_origin_xy = self._execute_xy_calibration(
+                                tool_no, toolhead, gcode_move, gcmd, reference_origin_xy, tool_offsets,
+                                samples=samples_param, enable_wiggle=wiggle_param
+                            )
+                        if calibrate_z and not dry_run:
+                            self.run_record["phase"] = "PROBING_Z"
+                            reference_z_result = self._execute_z_calibration(
+                                tool_no, toolhead, gcode_move, gcmd, reference_z_result, tool_offsets
+                            )
 
-                results[tool_no] = tool_offsets
-                self.run_record["completed_tools"].append(tool_no)
-                self.run_record["offsets"][tool_no] = dict(tool_offsets)
+                    results[tool_no] = tool_offsets
+                    self.run_record["completed_tools"].append(tool_no)
+                    self.run_record["offsets"][tool_no] = dict(tool_offsets)
+
+                except Exception as tool_ex:
+                    is_cancel = self.cancel_requested or "aborted" in str(tool_ex).lower() or "cancel" in str(tool_ex).lower()
+                    if not continue_on_error or is_cancel or tool_no == self.reference_tool:
+                        raise
+                    gcmd.respond_info(f"!! [tool_calibrator] Tool T{tool_no} calibration failed: {tool_ex}")
+                    gcmd.respond_info(f"!! [tool_calibrator] CONTINUE_ON_ERROR=1 active. Recording failure and continuing to next tool.")
+                    self.run_record.setdefault("tool_errors", {})[tool_no] = str(tool_ex)
+                    try:
+                        self.navigator.depart_station(toolhead, gcode_move)
+                    except Exception:
+                        pass
 
             # Restore Reference Tool
             self.run_record["phase"] = "RESTORING_REFERENCE"
@@ -1203,23 +1386,45 @@ class ToolCalibrator:
                     except Exception as e:
                         logger.warning(f"Failed to apply offsets to toolchanger runtime: {e}")
             else:
-                gcmd.respond_info("[tool_calibrator] Note: SAVE_CONFIG=0 or DRY_RUN=1 requested. Offsets retained in memory only.")
+                reason = "Experimental ALLOW_SHUTTLE_Z=1" if is_experimental_shuttle_z else ("SAVE_CONFIG=0" if not save_config else "DRY_RUN=1")
+                gcmd.respond_info(f"[tool_calibrator] Note: {reason} active. Offsets retained in memory only.")
 
             # Telemetry Summary
             gcmd.respond_info("\n================ CALIBRATION SUMMARY ================")
             for t_num, offs in results.items():
-                parts = [f"{k.upper()}={v:+.3f}mm" for k, v in offs.items()]
+                parts = []
+                for k, v in offs.items():
+                    if k.lower() == "z" and is_experimental_shuttle_z:
+                        parts.append(f"Z={v:+.3f}mm [EXPERIMENTAL - NOT SAVED]")
+                    else:
+                        parts.append(f"{k.upper()}={v:+.3f}mm")
                 gcmd.respond_info(f"Tool T{t_num}: {'  '.join(parts) if parts else 'No new offsets measured'}")
 
-            gcmd.respond_info("\n✔ ================= CALIBRATION COMPLETE =================\n")
-            gcmd.respond_info("  All configured tools calibrated safely and successfully.")
-            gcmd.respond_info("=====================================================")
+            if self.run_record.get("tool_errors"):
+                gcmd.respond_info("\n-- Tool Errors Recorded (CONTINUE_ON_ERROR=1) --")
+                for err_tool, err_msg in self.run_record["tool_errors"].items():
+                    gcmd.respond_info(f"  Tool T{err_tool}: FAILED ({err_msg})")
+
+            has_errors = bool(self.run_record.get("tool_errors"))
+            if has_errors:
+                status_text = "PARTIAL_SUCCESS" if results else "FAILED"
+                gcmd.respond_info(f"\n⚠ ================= CALIBRATION {status_text} =================\n")
+                gcmd.respond_info(f"  Calibration finished with errors on {len(self.run_record['tool_errors'])} tool(s).")
+                gcmd.respond_info("=====================================================")
+                self.run_record["state"] = status_text
+                self.run_record["phase"] = "COMPLETED_WITH_ERRORS"
+                self.run_record["valid"] = bool(results)
+                self.last_run_status = status_text
+            else:
+                gcmd.respond_info("\n✔ ================= CALIBRATION COMPLETE =================\n")
+                gcmd.respond_info("  All configured tools calibrated safely and successfully.")
+                gcmd.respond_info("=====================================================")
+                self.run_record["state"] = "SUCCESS"
+                self.run_record["phase"] = "COMPLETED"
+                self.run_record["valid"] = True
+                self.last_run_status = "SUCCESS"
 
             self.cached_offsets = results
-            self.run_record["state"] = "SUCCESS"
-            self.run_record["phase"] = "COMPLETED"
-            self.run_record["valid"] = True
-            self.last_run_status = "SUCCESS"
 
         except Exception as ex:
             is_cancel = self.cancel_requested or "aborted" in str(ex).lower() or "cancel" in str(ex).lower()
@@ -1237,8 +1442,19 @@ class ToolCalibrator:
             raise gcmd.error(f"[tool_calibrator] Calibration {term_state.capitalize()}: {ex}")
         finally:
             self.run_record["end_time"] = _sys_time.time()
-            if self.run_record.get("start_time"):
-                self.run_record["duration_sec"] = round(self.run_record["end_time"] - self.run_record["start_time"], 2)
+            if self.run_record.get("start_monotonic"):
+                try:
+                    self.run_record["duration_sec"] = max(0.0, round(self.reactor.monotonic() - float(self.run_record["start_monotonic"]), 2))
+                except Exception:
+                    self.run_record["duration_sec"] = 0.0
+            elif self.run_record.get("start_time"):
+                try:
+                    self.run_record["duration_sec"] = max(0.0, round(self.run_record["end_time"] - float(self.run_record["start_time"]), 2))
+                except Exception:
+                    self.run_record["duration_sec"] = 0.0
+
+            # Reconcile toolchanger state to avoid uninitialized state on failure
+            self._reconcile_toolchanger_state(active_t, gcmd)
 
             if session_token:
                 try:
@@ -1783,11 +1999,17 @@ class ToolCalibrator:
             if rec.get("run_id"):
                 validity_str = "VALID" if rec.get("valid") else "INCOMPLETE/FAILED"
                 dur = rec.get("duration_sec", 0.0)
-                if rec.get("state") == "RUNNING" and rec.get("start_time"):
-                    try:
-                        dur = round(time.time() - rec["start_time"], 1)
-                    except Exception:
-                        pass
+                if rec.get("state") == "RUNNING":
+                    if rec.get("start_monotonic"):
+                        try:
+                            dur = max(0.0, round(self.reactor.monotonic() - float(rec["start_monotonic"]), 1))
+                        except Exception:
+                            pass
+                    elif rec.get("start_time"):
+                        try:
+                            dur = max(0.0, round(time.time() - float(rec["start_time"]), 1))
+                        except Exception:
+                            pass
                 gcmd.respond_info(
                     f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
                 )
@@ -1812,10 +2034,16 @@ class ToolCalibrator:
         """Provides state dictionaries to Mainsail and Fluidd frontend templates."""
         try:
             rec = dict(self.run_record) if isinstance(self.run_record, dict) else {}
-            if rec.get("state") == "RUNNING" and rec.get("start_time"):
-                now = eventtime if (eventtime is not None and isinstance(eventtime, (int, float))) else time.time()
+            if rec.get("state") == "RUNNING":
                 try:
-                    rec["elapsed_sec"] = round(now - float(rec["start_time"]), 1)
+                    if rec.get("start_monotonic"):
+                        now = eventtime if (eventtime is not None and isinstance(eventtime, (int, float))) else self.reactor.monotonic()
+                        rec["elapsed_sec"] = max(0.0, round(float(now) - float(rec["start_monotonic"]), 1))
+                    elif rec.get("start_time"):
+                        now = time.time()
+                        rec["elapsed_sec"] = max(0.0, round(float(now) - float(rec["start_time"]), 1))
+                    else:
+                        rec["elapsed_sec"] = 0.0
                 except Exception:
                     rec["elapsed_sec"] = 0.0
 

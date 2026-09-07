@@ -163,3 +163,160 @@ class TestZGatingAndBaseline(unittest.TestCase):
         gcmd2 = DummyGCodeCommand()
         calibrator.cmd_CALIBRATION_STATUS(gcmd2)
         self.assertTrue(len(gcmd2.info_messages) > 0)
+
+    def test_probe_xy_discovers_modern_klipper_bmc_probe_mgr(self):
+        """BaseZBackend.get_probe_xy must discover zero reference coordinates from bed_mesh.bmc.probe_mgr.zero_ref_pos."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        class DummyProbeMgr:
+            zero_ref_pos = (174.0, 168.0)
+
+        class DummyBMC:
+            probe_mgr = DummyProbeMgr()
+
+        class DummyBedMesh:
+            bmc = DummyBMC()
+
+        self.printer.objects["bed_mesh"] = DummyBedMesh()
+        coords = calibrator.z_backend.get_probe_xy()
+        self.assertEqual(coords, (174.0, 168.0))
+
+    def test_probe_xy_discovers_configfile_settings(self):
+        """BaseZBackend.get_probe_xy must discover zero reference position from configfile [bed_mesh] settings."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        self.printer.objects["bed_mesh"] = None
+
+        class DummyConfigFile:
+            settings = {"bed_mesh": {"zero_reference_position": [174.0, 168.0]}}
+            config = {}
+
+        self.printer.objects["configfile"] = DummyConfigFile()
+        coords = calibrator.z_backend.get_probe_xy()
+        self.assertEqual(coords, (174.0, 168.0))
+
+    def test_shuttle_z_override_forces_save_config_zero(self):
+        """Experimental ALLOW_SHUTTLE_Z=1 on shuttle probe must force SAVE_CONFIG=0 to protect config."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.12, "probe_xy": (150.0, 150.0)})
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "ALLOW_SHUTTLE_Z": 1,
+            "SAVE_CONFIG": 1,
+            "TOOLS": "0,1"
+        })
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+        # Offset config must NOT be written to disk
+        self.assertFalse(os.path.exists(self.config_path))
+        messages = " ".join(gcmd.info_messages)
+        self.assertIn("Forcing SAVE_CONFIG=0", messages)
+        self.assertIn("[EXPERIMENTAL - NOT SAVED]", messages)
+
+    def test_same_point_coordinate_deviation_raises_err_z_004(self):
+        """Secondary tool probing at coordinates deviating from reference baseline must fail with ERR_Z_004."""
+        cfg_data = dict(self.base_config_data)
+        cfg_data["allow_shuttle_z"] = True
+        config = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(config)
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={
+            "contact_z": 0.0, "source": "cartographer", "probe_xy": (174.0, 168.0)
+        })
+        # Simulate 5mm Y deviation (as observed in trial T1 at 174, 163)
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={
+            "suggested_z_offset": 0.14, "probe_xy": (174.0, 163.0)
+        })
+
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "ALLOW_SHUTTLE_Z": 1,
+            "TOOLS": "0,1"
+        })
+
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertIn("ERR_Z_004", str(ctx.exception))
+        self.assertIn("Probe coordinate mismatch", str(ctx.exception))
+
+    def test_monotonic_clock_in_get_status(self):
+        """get_status with Klipper reactor monotonic eventtime must produce positive elapsed_sec."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        # Simulate active run started at monotonic 1000.0
+        calibrator.run_record = {
+            "run_id": "test_mono_run",
+            "state": "RUNNING",
+            "phase": "PROBING_Z",
+            "start_time": time.time(),
+            "start_monotonic": 1000.0,
+            "physical_tool": 0,
+            "calibrating_tool": 0,
+            "valid": False
+        }
+
+        # Query status with monotonic eventtime = 1007.5
+        st = calibrator.get_status(eventtime=1007.5)
+        self.assertEqual(st["status"], "RUNNING")
+        self.assertEqual(st["run_record"]["elapsed_sec"], 7.5)
+
+    def test_toolchanger_reconciliation_on_error(self):
+        """Exceptions during calibration must reconcile uninitialized toolchanger state in finally."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        # Corrupt toolchanger state to uninitialized
+        self.toolchanger.status = "uninitialized"
+        self.toolchanger.tool_number = -1
+        self.toolchanger.active_tool = None
+
+        # Force an error (missing ALLOW_SHUTTLE_Z)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1})
+        with self.assertRaises(Exception):
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # Toolchanger state must be reconciled
+        self.assertEqual(self.toolchanger.status, "ready")
+        self.assertEqual(self.toolchanger.tool_number, 0)
+
+    def test_continue_on_error_mode_collects_intermediate_failures(self):
+        """CONTINUE_ON_ERROR=1 must record tool failures and continue sequence across remaining tools."""
+        self.toolchanger.tool_numbers = [0, 1, 2]
+        cfg_data = dict(self.base_config_data)
+        cfg_data["allow_shuttle_z"] = True
+        config = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(config)
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={
+            "contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)
+        })
+
+        def mock_probe_secondary(tool_no, ref, gcmd):
+            if tool_no == 1:
+                raise Exception("Cartographer touch repeatability spread 1.054mm > 0.010mm")
+            return {"suggested_z_offset": 0.088, "probe_xy": (150.0, 150.0)}
+
+        calibrator.z_backend.probe_secondary_tool = mock_probe_secondary
+
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "ALLOW_SHUTTLE_Z": 1,
+            "CONTINUE_ON_ERROR": 1,
+            "TOOLS": "0,1,2"
+        })
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertEqual(calibrator.last_run_status, "PARTIAL_SUCCESS")
+        self.assertIn(1, calibrator.run_record["tool_errors"])
+        self.assertIn(2, calibrator.cached_offsets)
+        self.assertEqual(calibrator.run_record["physical_tool"], 0)
+        self.assertIn("T0", self.gcode.executed_scripts)

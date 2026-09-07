@@ -83,3 +83,32 @@ This document catalogues known hardware quirks, optical anomalies, and environme
 - **Remedies:**
   1. Always iterate over `toolchanger.tool_numbers`, never `range(n)`.
   2. Check `toolchanger.tool_number != -1` before starting. If unmounted, pickup reference tool `T0` first.
+
+### Issue 3.6: Modern Klipper Bed-Mesh Zero Reference Resolution (`bmc.probe_mgr`)
+- **Symptom:** Reference tool touches at configured `zero_reference_position` (e.g. `(174, 168)`), but secondary tools probe at travel center fallback (e.g. `(174, 163)`), causing a 5mm Y position delta.
+- **Root Cause:** Modern Klipper moves `zero_ref_pos` into `bed_mesh.bmc.probe_mgr.zero_ref_pos`. Older lookups on `bed_mesh.zero_ref_pos` or `bed_mesh.bmc.zero_ref_pos` fail silently.
+- **Remedies:**
+  1. `BaseZBackend.get_probe_xy()` checks all hierarchical paths: `bed_mesh.zero_ref_pos`, `bed_mesh.bmc.zero_ref_pos`, `bed_mesh.bmc.probe_mgr.zero_ref_pos`, `bed_mesh.probe_mgr.zero_ref_pos`, and `configfile.settings`.
+  2. TKC locks the secondary probe target to the exact physical coordinates captured from reference tool touch (`probe_x`, `probe_y`), raising `ERR_Z_004` if secondary target drifts $> 0.5\text{ mm}$.
+
+### Issue 3.7: Toolchanger Desynchronization on Hardware Probe Failure / Abort
+- **Symptom:** When a probe command fails (e.g. Cartographer sample spread $> 0.010\text{ mm}$ on T2) or an early preflight check triggers `ERR_Z_003`, the toolchanger carriage becomes `uninitialized` with `tool_number=-1` despite a tool remaining physically locked.
+- **Root Cause:** TKC's exception handling aborted the calibration routine without calling `_reconcile_toolchanger_state()`.
+- **Remedies:**
+  1. Wrap calibration execution in a `finally` block that invokes `_reconcile_toolchanger_state()`.
+  2. Query physical sensors (`detect_tool()`, `toollock.get_status()`, `run_record["physical_tool"]`) and execute `INITIALIZE_TOOLCHANGER TOOL={t}` or update internal tool objects to match physical reality before returning.
+
+### Issue 3.8: Incompatible Clock Domains in Klippy Reactor Telemetry (Negative `elapsed_sec`)
+- **Symptom:** Calling `TOOL_CALIBRATOR_STATUS` or reading `/status` during an active run displays a massive negative `elapsed_sec` value (e.g. `-1788774000.0`).
+- **Root Cause:** Run records initialized `start_time` with Unix epoch time (`time.time()` $\approx 1.78\times 10^9$), whereas Klippy's `get_status(eventtime)` provided reactor monotonic time ($\approx 10^3$). Subtracting Unix epoch time from monotonic time yielded large negative numbers.
+- **Remedies:**
+  1. Store `start_monotonic = self.reactor.monotonic()` at calibration initiation.
+  2. Calculate `elapsed_sec = max(0.0, current_monotonic - start_monotonic)` using uniform monotonic clock references.
+
+### Issue 3.9: Fixed-Shuttle Carriage Probes (Cartographer / Eddy) Measuring Multi-Tool Z
+- **Symptom:** Multi-tool calibration applies erroneous Z offsets or fails prints when using fixed-shuttle probes.
+- **Root Cause:** Fixed-shuttle probes measure carriage-to-bed distance, which does not change based on the length of the currently docked tool nozzle tip.
+- **Remedies:**
+  1. TKC marks shuttle probes with `measurement_reference = "shuttle"` and blocks multi-tool Z calibration by default (`ERR_Z_003`).
+  2. If diagnostic override `ALLOW_SHUTTLE_Z=1` is provided, TKC forces `SAVE_CONFIG=0` and logs offsets as `[EXPERIMENTAL - NOT SAVED]`.
+
