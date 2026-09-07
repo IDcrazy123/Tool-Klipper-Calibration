@@ -195,6 +195,34 @@ Khi có phiên bản mới trên GitHub:
    - Tự động kích hoạt virtualenv cập nhật thư viện python nếu `server/requirements.txt` có thay đổi.
    - Tự động khởi động lại `tool_calibrator.service` và `klipper.service`.
 
+### Bước 4.4: Tối Ưu Tốc Độ Cập Nhật (Khắc phục Treo / Chờ lâu ở "Updating Repo...")
+Nếu bạn thấy quá trình cập nhật bị dừng lâu (30s – 2 phút) ở dòng:
+`Git Repo tool_calibrator: Updating Repo...`
+
+**Nguyên nhân gốc rễ**:
+1. **Trễ DNS / IPv6 Timeout đến GitHub**: Mạng gia đình tại Việt Nam (Viettel, FPT, VNPT) thường cấp phát IPv6 nội bộ nhưng đường truyền quốc tế đi GitHub CDN qua IPv6 hay bị drop gói tin. Hệ thống Linux (Debian) trên Pi sẽ thử kết nối qua IPv6 và phải chờ timeout 30-60 giây trước khi tự động chuyển sang IPv4.
+2. **Thắt nút I/O thẻ nhớ SD**: Thẻ nhớ Raspberry Pi có tốc độ ghi ngẫu nhiên (random 4K) chậm. Khi repo tích lũy loose objects, lệnh kiểm tra git sẽ ngốn I/O thẻ nhớ.
+
+**Cách xử lý triệt để (Chạy 1 lần duy nhất qua SSH trên Raspberry Pi)**:
+```bash
+# 1. Ép hệ thống ưu tiên kết nối IPv4 (Khắc phục triệt để trễ timeout kết nối GitHub):
+sudo sed -i 's/^#precedence ::ffff:0:0\/96  100/precedence ::ffff:0:0\/96  100/' /etc/gai.conf || echo "precedence ::ffff:0:0/96  100" | sudo tee -a /etc/gai.conf
+
+# 2. Tối ưu bộ đệm truyền gói tin Git và giao thức HTTP/1.1:
+git config --global http.version HTTP/1.1
+git config --global http.postBuffer 524288000
+
+# 3. Nén gọn Git Repository trên máy in để giảm I/O thẻ nhớ:
+cd ~/Tool-Klipper-Calibration && git gc --prune=now
+```
+
+**Mẹo Cập nhật Nhanh Cực tốc (Chỉ mất 2 giây qua SSH)**:
+Trong quá trình thử nghiệm hoặc căn chỉnh thường xuyên, bạn có thể chạy lệnh 1 dòng trực tiếp qua terminal thay vì chờ web:
+```bash
+cd ~/Tool-Klipper-Calibration && git pull && sudo systemctl restart tool_calibrator && sudo systemctl restart klipper
+```
+*(Nếu cài đặt ở chế độ user-service, thay `sudo systemctl` bằng `systemctl --user`).*
+
 ---
 
 ## 5. Quy Trình Gỡ Bỏ Sạch Sẽ (Clean Uninstallation)
