@@ -1763,6 +1763,7 @@ class ToolCalibrator:
                 self.session_token = None
             self._set_inspection_lighting(False, self.reference_tool)
             self.navigator.depart_station(toolhead, gcode_move)
+            self._reconcile_toolchanger_state(self.reference_tool, gcmd)
 
     def cmd_CALIBRATION_SET_SAFE_POS(self, gcmd) -> None:
         """
@@ -1919,6 +1920,7 @@ class ToolCalibrator:
             raise gcmd.error(f"Centering failed: {ex}")
         finally:
             self._set_inspection_lighting(False, active_t)
+            self._reconcile_toolchanger_state(active_t, gcmd)
 
 
     def cmd_CALIBRATION_TEST_VISION(self, gcmd) -> None:
