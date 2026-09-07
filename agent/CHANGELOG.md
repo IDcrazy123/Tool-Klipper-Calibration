@@ -21,6 +21,11 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 - **3. Unified Installer & Uninstaller Synchronization**:
   - Updated `install.sh` to generate the 1-file master configuration and auto-link into target directories.
   - Updated `uninstall.sh` to cleanly purge or preserve the single entrypoint and macros without leaving dangling symlinks.
+- **4. Safe Z Elevation Bypass (`safe_z: 0.0` with `minval=0.0`)**:
+  - Relaxed `safe_z` validator from `above=0.0` to `minval=0.0`, enabling operators to configure `safe_z: 0.0`.
+  - When `safe_z <= 0.0`, `move_to_safe_z` and `depart_station` bypass vertical lifting entirely, allowing direct lateral transit when unobstructed trajectories are verified.
+- **5. Macro Directory Cleanup**:
+  - Removed obsolete `sample_tool_calibrator.cfg` and redundant `macros.cfg` from repository.
 
 ## [0.8.21] - 2026-09-07
 ### Fixed

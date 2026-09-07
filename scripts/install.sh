@@ -265,12 +265,16 @@ MACRO_DIR="${TARGET_CONFIG_DIR}/tool_calibrator"
 mkdir -p "${MACRO_DIR}"
 echo "DIR=${MACRO_DIR}" >> "${JOURNAL_FILE}"
 
-for macro_file in "tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "macros.cfg"; do
-    TARGET="${MACRO_DIR}/${macro_file}"
-    SOURCE="${REPO_DIR}/macros/${macro_file}"
-    ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
-    echo -e "${GREEN}    Linked ${macro_file} -> ${MACRO_DIR}/${NC}"
+# Setup Master Configuration under target config directory
+TARGET="${MACRO_DIR}/tool_calibrator.cfg"
+SOURCE="${REPO_DIR}/macros/tool_calibrator.cfg"
+ln -sf "${SOURCE}" "${TARGET}"
+echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
+echo -e "${GREEN}    Linked tool_calibrator.cfg -> ${MACRO_DIR}/${NC}"
+
+# Remove any obsolete legacy macro files if they exist in config
+for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" 2>/dev/null || true
 done
 
 # Provide 1-file master entrypoint in root target config directory

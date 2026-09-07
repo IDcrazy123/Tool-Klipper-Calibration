@@ -186,7 +186,7 @@ fi
 clean_macro_dir() {
     local dir="$1"
     if [ -d "${dir}" ]; then
-        for mf in "tool_calibrator.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+        for mf in "tool_calibrator.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "sample_tool_calibrator.cfg"; do
             if [ -L "${dir}/${mf}" ] || [ -f "${dir}/${mf}" ]; then
                 rm -f "${dir}/${mf}"
                 echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"

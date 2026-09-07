@@ -834,18 +834,20 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertGreaterEqual(self.toolhead.pos[2], 35.0)
 
     def test_no_duplicate_macros_with_python_commands(self):
-        """Verify macros/safe_staging_macros.cfg does not define commands colliding with Python module."""
+        """Verify macros in tool_calibrator.cfg do not collide with Python registered commands."""
         calibrator = ToolCalibrator(self.config)
-        macro_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "macros", "safe_staging_macros.cfg"))
-        self.assertTrue(os.path.exists(macro_path))
-        with open(macro_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        for rel_file in ["tool_calibrator.cfg", "safe_staging_macros.cfg", "tool_calibrator_macros.cfg"]:
+            macro_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "macros", rel_file))
+            if not os.path.exists(macro_path):
+                continue
+            with open(macro_path, "r", encoding="utf-8") as f:
+                content = f.read()
 
-        macro_names = re.findall(r"^\[gcode_macro\s+([^\]]+)\]", content, re.MULTILINE | re.IGNORECASE)
-        for m_name in macro_names:
-            m_name = m_name.strip()
-            # Registering each macro in DummyGCode must NOT collide with already registered python commands!
-            self.assertNotIn(m_name, self.gcode.commands)
+            macro_names = re.findall(r"^\[gcode_macro\s+([^\]]+)\]", content, re.MULTILINE | re.IGNORECASE)
+            for m_name in macro_names:
+                m_name = m_name.strip()
+                # Registering each macro in DummyGCode must NOT collide with already registered python commands!
+                self.assertNotIn(m_name, self.gcode.commands)
 
     def test_z_probing_secondary_tool_xy_compensation(self):
         """Verify secondary tool Z probing compensates carriage position by XY offsets."""

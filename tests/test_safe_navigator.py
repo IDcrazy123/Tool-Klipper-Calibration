@@ -61,7 +61,7 @@ class DummyConfig:
     def get_printer(self):
         return self._printer
 
-    def getfloat(self, key, default=None, above=None, below=None):
+    def getfloat(self, key, default=None, above=None, below=None, minval=None, maxval=None, **kwargs):
         val = self.data.get(key, default)
         if val is None:
             return None
@@ -70,6 +70,10 @@ class DummyConfig:
             raise ValueError(f"{key} must be above {above}")
         if below is not None and val >= below:
             raise ValueError(f"{key} must be below {below}")
+        if minval is not None and val < minval:
+            raise ValueError(f"{key} must be at least {minval}")
+        if maxval is not None and val > maxval:
+            raise ValueError(f"{key} must be at most {maxval}")
         return val
 
 
@@ -200,6 +204,28 @@ class TestSafeNavigator(unittest.TestCase):
         self.assertEqual(nav.switch_target_x, 230.0)
         self.assertEqual(nav.switch_target_y, 340.0)
         self.assertEqual(nav.switch_target_z, 16.0)
+
+    def test_safe_z_zero_bypasses_elevation(self):
+        """When safe_z: 0.0 is configured, move_to_safe_z and depart_station must bypass elevation entirely."""
+        zero_config = {
+            "safe_z": 0.0,
+            "travel_speed": 100.0,
+            "approach_speed": 25.0,
+            "z_speed": 10.0,
+        }
+        nav = SafeNavigator(DummyConfig(self.printer, zero_config))
+        self.assertEqual(nav.safe_z, 0.0)
+
+        # Toolhead is at Z=5.0
+        self.toolhead.pos = [100.0, 100.0, 5.0, 0.0]
+        nav.move_to_safe_z(self.toolhead, None)
+
+        # Must not have commanded any Z move
+        self.assertEqual(self.toolhead.pos[2], 5.0)
+
+        # depart_station must also not move Z
+        nav.depart_station(self.toolhead, None)
+        self.assertEqual(self.toolhead.pos[2], 5.0)
 
 
 if __name__ == "__main__":

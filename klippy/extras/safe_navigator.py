@@ -38,7 +38,8 @@ class SafeNavigator:
             self.z_speed /= 60.0
 
         # Global Safe Z Clearance Altitude (configured_safe_z is None if omitted/commented out)
-        configured_sz = config.getfloat("safe_z", None, above=0.0)
+        # safe_z=0 allows operators to bypass safe Z elevation when unobstructed trajectories are verified.
+        configured_sz = config.getfloat("safe_z", None, minval=0.0)
         self.configured_safe_z = configured_sz
         self.safe_z = configured_sz if configured_sz is not None else 35.0
 
@@ -202,7 +203,12 @@ class SafeNavigator:
         Elevates Z vertically to safe_z if currently lower.
         Clamps safe_z against the user's physical frame max_z to avoid Move out of range.
         Always waits for moves to finish before returning.
+        If safe_z <= 0.0, vertical elevation is completely bypassed.
         """
+        if self.safe_z <= 0.0:
+            logger.info("Safe_Z is <= 0.0; skipping safe Z elevation.")
+            return
+
         toolhead.wait_moves()
         cur_pos = toolhead.get_position()
 
@@ -296,7 +302,7 @@ class SafeNavigator:
         toolhead.wait_moves()
 
         # Step 3: Lower Z to switch clearance height
-        target_z = (self.switch_target_z + z_clearance) if self.switch_target_z is not None else self.safe_z
+        target_z = (self.switch_target_z + z_clearance) if self.switch_target_z is not None else max(5.0, self.safe_z)
         toolhead.manual_move([None, None, target_z], self.z_speed)
         toolhead.wait_moves()
 
