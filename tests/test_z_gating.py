@@ -50,9 +50,33 @@ class TestZGatingAndBaseline(unittest.TestCase):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
-    def test_shuttle_z_rejected_by_default(self):
-        """Cartographer with measurement_reference='shuttle' must be rejected during CALIBRATE_TOOL_OFFSETS."""
+    def test_cartographer_touch_nozzle_mode_allowed_and_persisted_by_default(self):
+        """Cartographer Touch defaults to measurement_reference='nozzle', allowing per-tool Z calibration and save."""
         config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+        self.assertEqual(calibrator.z_backend.measurement_reference, "nozzle")
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.14, "probe_xy": (150.0, 150.0)})
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "SAVE_CONFIG": 1,
+            "TOOLS": "0,1"
+        })
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+        self.assertIn(1, calibrator.cached_offsets)
+        self.assertAlmostEqual(calibrator.cached_offsets[1]["z"], 0.14)
+        # In nozzle mode with SAVE_CONFIG=1, offsets MUST be saved to disk
+        self.assertTrue(os.path.exists(self.config_path))
+
+    def test_shuttle_z_rejected_by_default(self):
+        """Explicit measurement_reference='shuttle' must be rejected during CALIBRATE_TOOL_OFFSETS."""
+        cfg_data = dict(self.base_config_data)
+        cfg_data["measurement_reference"] = "shuttle"
+        config = DummyConfig(self.printer, cfg_data)
         calibrator = ToolCalibrator(config)
         gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1})
 
@@ -63,7 +87,9 @@ class TestZGatingAndBaseline(unittest.TestCase):
 
     def test_shuttle_z_override_via_gcode_parameter(self):
         """ALLOW_SHUTTLE_Z=1 in G-code command must allow calibration despite shuttle probe."""
-        config = DummyConfig(self.printer, dict(self.base_config_data))
+        cfg_data = dict(self.base_config_data)
+        cfg_data["measurement_reference"] = "shuttle"
+        config = DummyConfig(self.printer, cfg_data)
         calibrator = ToolCalibrator(config)
         calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.0, "source": "cartographer"})
         calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.12})
@@ -83,6 +109,7 @@ class TestZGatingAndBaseline(unittest.TestCase):
     def test_shuttle_z_allowed_via_config(self):
         """allow_shuttle_z = True in config must permit calibration."""
         cfg_data = dict(self.base_config_data)
+        cfg_data["measurement_reference"] = "shuttle"
         cfg_data["allow_shuttle_z"] = True
         config = DummyConfig(self.printer, cfg_data)
         calibrator = ToolCalibrator(config)
@@ -199,7 +226,9 @@ class TestZGatingAndBaseline(unittest.TestCase):
 
     def test_shuttle_z_override_forces_save_config_zero(self):
         """Experimental ALLOW_SHUTTLE_Z=1 on shuttle probe must force SAVE_CONFIG=0 to protect config."""
-        config = DummyConfig(self.printer, dict(self.base_config_data))
+        cfg_data = dict(self.base_config_data)
+        cfg_data["measurement_reference"] = "shuttle"
+        config = DummyConfig(self.printer, cfg_data)
         calibrator = ToolCalibrator(config)
         calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)})
         calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.12, "probe_xy": (150.0, 150.0)})

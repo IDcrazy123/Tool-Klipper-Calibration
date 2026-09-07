@@ -105,10 +105,18 @@ This document catalogues known hardware quirks, optical anomalies, and environme
   1. Store `start_monotonic = self.reactor.monotonic()` at calibration initiation.
   2. Calculate `elapsed_sec = max(0.0, current_monotonic - start_monotonic)` using uniform monotonic clock references.
 
-### Issue 3.9: Fixed-Shuttle Carriage Probes (Cartographer / Eddy) Measuring Multi-Tool Z
-- **Symptom:** Multi-tool calibration applies erroneous Z offsets or fails prints when using fixed-shuttle probes.
-- **Root Cause:** Fixed-shuttle probes measure carriage-to-bed distance, which does not change based on the length of the currently docked tool nozzle tip.
+### Issue 3.9: Fixed-Shuttle Carriage Probes (Contactless Scan / Eddy) Measuring Multi-Tool Z
+- **Symptom:** Multi-tool calibration applies erroneous Z offsets or fails prints when using contactless fixed-shuttle probes.
+- **Root Cause:** Contactless fixed-shuttle probes measure carriage-to-bed distance, which does not change based on the length of the currently docked tool nozzle tip. *(Note: Cartographer Touch operates in nozzle-contact mode where the nozzle tip physically touches the bed, so Cartographer Touch is classified as `measurement_reference = "nozzle"` and correctly measures nozzle tip differences).*
 - **Remedies:**
-  1. TKC marks shuttle probes with `measurement_reference = "shuttle"` and blocks multi-tool Z calibration by default (`ERR_Z_003`).
-  2. If diagnostic override `ALLOW_SHUTTLE_Z=1` is provided, TKC forces `SAVE_CONFIG=0` and logs offsets as `[EXPERIMENTAL - NOT SAVED]`.
+  1. For contactless scan modes, configure `measurement_reference = "shuttle"`. TKC blocks multi-tool Z calibration by default (`ERR_Z_003`).
+  2. If diagnostic override `ALLOW_SHUTTLE_Z=1` is provided on a shuttle probe, TKC forces `SAVE_CONFIG=0` and logs offsets as `[EXPERIMENTAL - NOT SAVED]`.
+  3. For Cartographer Touch, keep default `measurement_reference: nozzle`.
+
+### Issue 3.10: Single-Tool Macro `CALIBRATE_TOOL_Z` Tool Parameter Defaulting
+- **Symptom:** Running `CALIBRATE_TOOL_Z` raised `gcode.CommandError: CALIBRATE_TOOL_Z requires a valid TOOL parameter, e.g. CALIBRATE_TOOL_Z TOOL=1`.
+- **Root Cause:** Single-tool macros (`CALIBRATE_TOOL`, `CALIBRATE_TOOL_XY`, `CALIBRATE_TOOL_Z`) expected explicit `TOOL=<int>`, failing even when a tool was already loaded on the carriage.
+- **Remedies:**
+  1. Macros now auto-detect active tool from `printer.toolchanger.tool_number` or `printer.tool_probe.active_tool_number`.
+  2. For automated multi-tool Z calibration, operators should invoke `CALIBRATE_TOOLS_Z` (plural) or `CALIBRATE_ALL_TOOLS`, which measures reference tool T0 baseline first and iterates through secondary tools.
 

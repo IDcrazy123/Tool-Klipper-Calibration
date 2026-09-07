@@ -33,6 +33,14 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
   - Enhanced `uninstall.sh` to remove preceding orphan comments in `moonraker.conf`.
   - Added `--purge-config` flag which creates an automated timestamped backup in `config_backups/tkc_purge_${TIMESTAMP}/` before purging configuration artifacts.
   - Prints a complete manifest of retained user configuration and backup directories upon exit.
+- **8. Cartographer Touch Physical Nozzle Contact Classification**:
+  - Recognized that Cartographer Touch (`CARTOGRAPHER_TOUCH_HOME` / `CARTOGRAPHER_TOUCH_PROBE`) operates via physical nozzle tip contact against the bed detected by eddy coil frequency rate-of-change, rather than contactless carriage scanning.
+  - Updated default `measurement_reference` in `CartographerBackend` from `"shuttle"` to `"nozzle"`.
+  - Enables seamless automated multi-tool Z calibration (`CALIBRATE_ALL_TOOLS` / `CALIBRATE_TOOLS_Z`) with direct nozzle-to-bed delta Z calculation without triggering false `ERR_Z_003` blocks.
+  - Preserved `ERR_Z_003` protection when `measurement_reference: shuttle` is explicitly configured for non-contact scan modes.
+- **9. Active Tool Auto-Detection in Single-Tool Calibration Macros**:
+  - `CALIBRATE_TOOL`, `CALIBRATE_TOOL_XY`, and `CALIBRATE_TOOL_Z` now automatically detect the currently mounted tool from `printer.toolchanger.tool_number` or `printer.tool_probe.active_tool_number` when the `TOOL` parameter is omitted.
+  - Forwarded `ALLOW_SHUTTLE_Z` and `CONTINUE_ON_ERROR` parameters consistently across `CALIBRATE_ALL_TOOLS`, `CALIBRATE_TOOL`, `CALIBRATE_TOOLS_Z`, and `CALIBRATE_TOOL_Z`.
 
 ## [0.8.20] - 2026-09-06
 ### Fixed

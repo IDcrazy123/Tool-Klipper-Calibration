@@ -55,7 +55,7 @@ safe_z: 35.0                 # Độ cao an toàn vượt qua mọi giá đỡ d
 travel_speed: 12000          # Tốc độ di chuyển nhanh giữa các trạm (mm/min)
 approach_speed: 1500         # Tốc độ tiếp cận chậm chính xác (mm/min)
 z_speed: 600                 # Tốc độ trục Z (mm/min)
-z_backend: cartographer      # 'cartographer' (shuttle probe) hoặc 'switch' (công tắc tiếp xúc nozzle)
+z_backend: cartographer      # 'cartographer' (Cartographer Touch) hoặc 'switch' (công tắc cơ khí)
 
 # Cấu hình Burst Sampling & Wiggle Recovery
 centering_samples: 3         # Số frame lấy mẫu mỗi bước căn chỉnh (1-7)
@@ -64,11 +64,12 @@ wiggle_distance: 0.10        # Biên độ dịch chuyển vi mô phá lóa sán
 wiggle_on_failure: True      # Bật tự động lắc khi mất dấu đầu phun
 ```
 
-> [!IMPORTANT]
-> **Lưu ý Quan trọng về `z_backend: cartographer` vs `z_backend: switch`**:
-> - **Cartographer / Eddy / Beacon (Shuttle Probe)**: Cảm biến gắn cố định trên carriage/shuttle. Khi thay đổi đầu phun (T0 $\rightarrow$ T1 $\rightarrow$ T2), khoảng cách từ đầu dò Cartographer tới bàn in **hoàn toàn không thay đổi theo chiều dài vòi phun (nozzle tip length)**. Do đó, probe shuttle **không thể** tự động đo được Z offset giữa các đầu phun khác nhau! Để bảo vệ bàn in và tránh làm hỏng cấu hình, TKC mặc định kích hoạt chốt an toàn **`[ERR_Z_003]`** từ chối cân Z trên probe kiểu shuttle.
-> - **Quy trình chuẩn cho máy dùng Cartographer**: Dùng TKC để **tự động cân chỉnh quang học trục XY (`CALIBRATE_TOOLS_XY`)**, còn Z offset nên cân bằng công tắc cơ khí chạm đầu phun (`z_backend: switch` như PF2 switch / Axiscope) hoặc căn Z thủ công.
-> - **Thử nghiệm chẩn đoán**: Nếu bạn muốn chạy thử nghiệm Cartographer Z cho mục đích chẩn đoán, bắt buộc phải truyền cờ `ALLOW_SHUTTLE_Z=1` (khi đó hệ thống sẽ tự động ép `SAVE_CONFIG=0` để bảo vệ file cấu hình).
+> [!TIP]
+> **Cơ chế Đo Z bằng Cartographer Touch**:
+> - **Cartographer Touch** sử dụng lệnh `CARTOGRAPHER_TOUCH_HOME` và `CARTOGRAPHER_TOUCH_PROBE`. Ở chế độ này, **chính đầu vòi phun (nozzle) trực tiếp chạm vật lý vào mặt bàn in**. Khi vòi phun chạm bàn, biến thiên tần số cảm ứng trên cuộn cảm LDC1612 phát hiện tức thời lực cản để kích hoạt điểm dừng.
+> - Do điểm tiếp xúc là **chính chóp vòi phun**, TKC mặc định cấu hình `measurement_reference: nozzle`, cho phép **đo đạc và tính toán chính xác độ chênh lệch Z giữa các đầu phun** khi tráo đổi trên bàn xe (shuttle).
+> - **Yêu cầu quan trọng**: Vì vòi phun trực tiếp chạm bàn, đầu phun phải sạch nhựa bám và nhiệt độ đầu phun nên duy trì $\le 150^\circ\text{C}$ để tránh làm mềm nhựa hoặc biến dạng mặt bàn PEI.
+> - Đối với các cảm biến quét không chạm thuần túy (Scan Mode / Eddy không chạm), nếu người dùng cấu hình `measurement_reference: shuttle`, hệ thống sẽ kích hoạt chốt bảo vệ `[ERR_Z_003]`.
 
 
 ---
@@ -153,57 +154,66 @@ Sau khi camera đã được hiệu chuẩn đầy đủ thang đo và ma trận
 
 ---
 
-### Bước 6: Tự động Hiệu chuẩn Đầu phun (Tách biệt Hoàn toàn XY và Z)
+### Bước 6: Tự động Hiệu chuẩn Đầu phun (Lựa chọn Quy trình Hiệu chuẩn)
 
-Hệ thống hỗ trợ **tách biệt độc lập 100% giữa đo quang học XY và dò tiếp xúc Z**. Hãy chọn đúng luồng lệnh phù hợp với cấu hình phần cứng của bạn:
-
----
-
-#### Luồng 1: Máy dùng Cartographer / Eddy / Beacon (Khuyên dùng: Chỉ đo Quang học XY)
-
-Đối với máy in dùng cảm biến gắn cố định trên bàn xe (shuttle probe) như Cartographer, cảm biến **chỉ đo độ cao bàn xe, không đo được chiều dài riêng biệt của từng vòi phun**. Do đó, quy trình chuẩn là sử dụng TKC để cân chỉnh quang học trục XY:
-
-```gcode
-# Đo quang học XY cho TOÀN BỘ đầu phun (không chạm bàn, giữ nguyên Z offset)
-CALIBRATE_TOOLS_XY
-
-# Đo quang học XY cho RIÊNG 1 đầu phun cụ thể (ví dụ T1)
-CALIBRATE_TOOL_XY TOOL=1
-```
-*Lưu ý: Khi chỉ chạy đo XY, file `tool_offsets.cfg` chỉ cập nhật `gcode_x_offset` và `gcode_y_offset`. Giá trị `gcode_z_offset` của mọi đầu phun được giữ nguyên 100%, không bị ghi đè hay reset về 0.000.*
+Hệ thống hỗ trợ cân chỉnh linh hoạt cả **Thị giác Quang học XY** và **Dò Tiếp xúc Z** (bằng Cartographer Touch hoặc Switch cơ khí), hoặc chạy độc lập từng trục. Hãy chọn đúng luồng lệnh phù hợp với mục tiêu vận hành của bạn:
 
 ---
 
-#### Luồng 2: Máy dùng Công tắc Tiếp xúc Đầu phun (`z_backend: switch`)
+#### Luồng 1: Hiệu chuẩn Tự động Toàn diện Cả XY và Z (Khuyên dùng cho Vận hành Chuẩn)
 
-Đối với máy in có công tắc cơ khí chạm đầu vòi phun (PF2 switch, Axiscope pin...):
+Dành cho hệ thống dùng **Cartographer Touch** (chế độ vòi phun chạm bàn) HOẶC **Công tắc cơ khí chạm vòi phun** (`z_backend: switch` như PF2 switch / Axiscope).
+Cả hai backend này đều sử dụng chính **chóp vòi phun (nozzle tip)** làm bề mặt tiếp xúc vật lý (`measurement_reference: nozzle`), đảm bảo đo đạc chuẩn xác độ lệch chiều dài vòi phun giữa các tool:
 
 ```gcode
-# Đo CẢ quang học XY và tiếp xúc Z cho toàn bộ đầu phun
+# Đo CẢ quang học XY và tiếp xúc Z cho toàn bộ đầu phun (T0 -> T1 -> ...):
 CALIBRATE_ALL_TOOLS
 
-# Hoặc CHỈ đo tiếp xúc Z cho toàn bộ đầu phun (bảo toàn XY hiện có)
+# Hoặc CHỈ đo tiếp xúc Z cho toàn bộ đầu phun (bảo toàn offset XY hiện có):
 CALIBRATE_TOOLS_Z
+```
+*Ghi chú: Khi chạy `CALIBRATE_TOOLS_Z`, T0 sẽ thực hiện chạm mốc baseline (`CARTOGRAPHER_TOUCH_HOME` hoặc Switch Probe), sau đó lần lượt T1, T2... sẽ chạm bàn (`CARTOGRAPHER_TOUCH_PROBE` hoặc Switch Probe) để xác định $\Delta Z = Z_n - Z_0$.*
 
-# Đo tiếp xúc Z cho riêng đầu phun T1
-CALIBRATE_TOOL_Z TOOL=1
+---
+
+#### Luồng 2: Chỉ Đo Quang Học Trục XY (Không Thay đổi Z Offset)
+
+Dành cho trường hợp bạn đã cân chuẩn Z trước đó và chỉ muốn cập nhật độ lệch tâm vòi phun XY, hoặc hệ thống dùng cảm biến quét không chạm thuần túy:
+
+```gcode
+# Đo quang học XY cho TOÀN BỘ đầu phun (không chạm bàn, giữ nguyên 100% Z offset):
+CALIBRATE_TOOLS_XY
+
+# Đo quang học XY cho nhóm đầu phun cụ thể:
+CALIBRATE_TOOLS_XY TOOLS="0,1"
 ```
 
 ---
 
-#### Luồng 3: Thử nghiệm Chẩn đoán Z với Cartographer (`ALLOW_SHUTTLE_Z=1`)
+#### Luồng 3: Tinh Chỉnh Riêng Biệt 1 Đầu Phun Cụ Thể
 
-Nếu bạn đang tiến hành nghiên cứu, thử nghiệm chẩn đoán độ lặp lại cảm biến Cartographer khi chạm bàn, bạn phải truyền thêm cờ `ALLOW_SHUTTLE_Z=1`:
+Khi bạn vừa thay vòi phun hoặc bảo trì một tool duy nhất (ví dụ Tool T1):
 
 ```gcode
-# Thử nghiệm đo Z Cartographer trên toàn bộ đầu phun:
-CALIBRATE_TOOLS_Z ALLOW_SHUTTLE_Z=1
+# 1. Chỉ đo lại quang học XY cho riêng T1:
+CALIBRATE_TOOL_XY TOOL=1
 
-# Hoặc thử nghiệm trên riêng đầu phun T1:
-CALIBRATE_TOOL_Z TOOL=1 ALLOW_SHUTTLE_Z=1
+# 2. Đo lại tiếp xúc Z cho riêng T1 (LƯU Ý: Yêu cầu T0 đã có mốc baseline):
+CALIBRATE_TOOL_Z TOOL=1
 ```
-> [!WARNING]
-> Khi bật `ALLOW_SHUTTLE_Z=1`, TKC sẽ **tự động ép `SAVE_CONFIG=0`** để bảo vệ file cấu hình sản xuất của bạn. Các giá trị Z đo được sẽ được gắn nhãn `[EXPERIMENTAL - NOT SAVED]` và chỉ hiển thị trên console phục vụ chẩn đoán.
+*(Nếu tool T1 đang được gá sẵn trên bàn xe, bạn có thể gõ ngắn gọn `CALIBRATE_TOOL_XY` hoặc `CALIBRATE_TOOL_Z`, macro sẽ tự động nhận diện `TOOL=1`).*
+
+---
+
+#### Luồng 4: Cảm biến Quét Không Chạm Bàn Xe (Shuttle Scan Mode / Beacon Contactless)
+
+Nếu máy in của bạn cấu hình cảm biến quét từ trường không chạm gắn trên bàn xe (`measurement_reference: shuttle`), cảm biến chỉ đo được độ cao bàn xe chứ không đo được chiều dài từng vòi phun.
+- Nếu bạn gọi `CALIBRATE_ALL_TOOLS` hoặc `CALIBRATE_TOOLS_Z`, hệ thống sẽ chặn an toàn với lỗi `[ERR_Z_003]`.
+- Nếu bạn muốn chạy thử nghiệm chẩn đoán, bạn phải truyền cờ `ALLOW_SHUTTLE_Z=1`:
+  ```gcode
+  CALIBRATE_TOOLS_Z ALLOW_SHUTTLE_Z=1
+  ```
+  *Lưu ý: Hệ thống sẽ tự động ép `SAVE_CONFIG=0` để bảo vệ file cấu hình, giá trị Z chỉ hiển thị trên console phục vụ nghiên cứu.*
 
 ---
 
@@ -211,7 +221,7 @@ CALIBRATE_TOOL_Z TOOL=1 ALLOW_SHUTTLE_Z=1
 
 1. **Phân biệt lệnh Số nhiều (`TOOLS`) và Số ít (`TOOL`)**:
    - `CALIBRATE_TOOLS_Z`: Có chữ `S` (số nhiều) $\rightarrow$ Dùng để đo Z cho **toàn bộ** đầu phun (hoặc danh sách nhóm `TOOLS="0,1"`). Không yêu cầu truyền `TOOL=`.
-   - `CALIBRATE_TOOL_Z`: Không có chữ `S` (số ít) $\rightarrow$ Dùng để đo Z cho **1 đầu phun cụ thể**. Bắt buộc truyền tham số `TOOL=<số>` (ví dụ `CALIBRATE_TOOL_Z TOOL=1`). Nếu không truyền, hệ thống sẽ cố gắng lấy tool đang gá trên carriage, nếu chưa gá tool nào sẽ báo lỗi.
+   - `CALIBRATE_TOOL_Z`: Không có chữ `S` (số ít) $\rightarrow$ Dùng để đo Z cho **1 đầu phun cụ thể**. Bạn có thể truyền `TOOL=<số>` (ví dụ `CALIBRATE_TOOL_Z TOOL=1`), hoặc nếu bỏ trống, macro sẽ tự động lấy tool đang gá trên carriage.
 
 2. **Quy tắc Mốc Z Tham chiếu T0 (`ERR_CAL_002`)**:
    - Khi đo Z cho tool phụ (T1..Tn), hệ thống luôn tính độ lệch tương đối so với T0:
@@ -259,23 +269,17 @@ CALIBRATE_TOOL_Z TOOL=1 ALLOW_SHUTTLE_Z=1
 3. **Lỗi `[ERR_CV_201] Nozzle orifice not found`**:
    - **Khắc phục**: Chạy `TEST_NOZZLE_VISION` để kiểm tra độ tương phản; điều chỉnh độ sáng LED hoặc tiêu cự Z.
 
-4. **Lỗi `[ERR_Z_003] The active Z backend 'cartographer' has measurement_reference='shuttle'`**:
-   - **Nguyên nhân**: Bạn đang dùng Cartographer và chạy lệnh đo Z (`CALIBRATE_TOOLS_Z` hoặc `CALIBRATE_ALL_TOOLS`). Cartographer gắn trên carriage không thể đo chiều dài riêng của từng vòi phun nên TKC chặn an toàn.
+4. **Lỗi `[ERR_Z_003] The active Z backend ... has measurement_reference='shuttle'`**:
+   - **Nguyên nhân**: Cấu hình đang đặt `measurement_reference: shuttle` (dành cho cảm biến quét không chạm bàn xe, không chạm đầu phun).
    - **Khắc phục**:
-     - Với Cartographer, hãy chạy lệnh chỉ cân chỉnh quang học XY:
-       ```gcode
-       CALIBRATE_TOOLS_XY
-       ```
-     - Nếu đang làm thí nghiệm chẩn đoán với Cartographer, truyền cờ override:
-       ```gcode
-       CALIBRATE_TOOLS_Z ALLOW_SHUTTLE_Z=1
-       ```
+     - Nếu bạn dùng **Cartographer Touch** (vòi phun chạm bàn), hãy bỏ dòng `measurement_reference: shuttle` trong `printer.cfg` (hoặc đặt rõ `measurement_reference: nozzle`) để TKC tự động kích hoạt chế độ vòi phun chạm bàn.
+     - Nếu bạn đang dùng cảm biến quét không chạm thuần túy: chỉ chạy `CALIBRATE_TOOLS_XY`, hoặc truyền `ALLOW_SHUTTLE_Z=1` nếu muốn chẩn đoán.
 
 5. **Lỗi `CALIBRATE_TOOL_Z requires a valid TOOL parameter, e.g. CALIBRATE_TOOL_Z TOOL=1`**:
-   - **Nguyên nhân**: Bạn gõ lệnh đo 1 tool đơn lẻ `CALIBRATE_TOOL_Z` mà quên truyền tham số `TOOL=1` (hoặc carriage đang ở trạng thái unmounted chưa gá tool).
+   - **Nguyên nhân**: Bạn gõ lệnh đo 1 tool đơn lẻ `CALIBRATE_TOOL_Z` khi chưa gá tool nào trên carriage và quên truyền tham số `TOOL=1`.
    - **Khắc phục**:
      - Nếu muốn đo Z toàn bộ các tool: Dùng lệnh số nhiều **`CALIBRATE_TOOLS_Z`** (có chữ `S`).
-     - Nếu muốn đo 1 tool cụ thể: Dùng lệnh **`CALIBRATE_TOOL_Z TOOL=1`**.
+     - Nếu muốn đo 1 tool cụ thể: Dùng lệnh **`CALIBRATE_TOOL_Z TOOL=1`** (hoặc chọn tool trước trên giao diện điều khiển rồi chạy `CALIBRATE_TOOL_Z`).
 
 6. **Lỗi `[ERR_CAL_002] Reference tool T0 Z baseline must be measured first before secondary tools`**:
    - **Nguyên nhân**: Chạy đo Z cho tool phụ (ví dụ `CALIBRATE_TOOL_Z TOOL=1`) khi chưa có mốc đo Z của reference tool T0.
