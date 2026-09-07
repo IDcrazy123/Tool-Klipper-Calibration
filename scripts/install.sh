@@ -294,12 +294,26 @@ MACRO_DIR="${TARGET_CONFIG_DIR}/tool_calibrator"
 mkdir -p "${MACRO_DIR}"
 echo "DIR=${MACRO_DIR}" >> "${JOURNAL_FILE}"
 
-# Setup Master Configuration under target config directory
+# Setup Master Configuration under target config directory (must be a writable regular file, NOT a symlink)
 TARGET="${MACRO_DIR}/tool_calibrator.cfg"
 SOURCE="${REPO_DIR}/macros/tool_calibrator.cfg"
-ln -sf "${SOURCE}" "${TARGET}"
-echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
-echo -e "${GREEN}    Linked tool_calibrator.cfg -> ${MACRO_DIR}/${NC}"
+
+if [ -L "${TARGET}" ]; then
+    echo -e "${CYAN}[+] Chuyển đổi symlink thành tệp cấu hình thực tế để cho phép chỉnh sửa trên Mainsail/Fluidd...${NC}"
+    rm -f "${TARGET}"
+    cp "${SOURCE}" "${TARGET}"
+    chmod 664 "${TARGET}"
+    echo "FILE=${TARGET}" >> "${JOURNAL_FILE}"
+    echo -e "${GREEN}[✔] Đã tạo file cấu hình có thể ghi: ${TARGET}${NC}"
+elif [ ! -f "${TARGET}" ]; then
+    cp "${SOURCE}" "${TARGET}"
+    chmod 664 "${TARGET}"
+    echo "FILE=${TARGET}" >> "${JOURNAL_FILE}"
+    echo -e "${GREEN}[✔] Đã tạo file cấu hình: ${TARGET}${NC}"
+else
+    chmod 664 "${TARGET}" 2>/dev/null || true
+    echo -e "${GREEN}[✔] Giữ nguyên file cấu hình hiện có của người dùng: ${TARGET}${NC}"
+fi
 
 # Remove any obsolete legacy macro files if they exist in config
 for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
