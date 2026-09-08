@@ -2312,7 +2312,9 @@ class ToolCalibrator:
                 if rec.get("error"):
                     gcmd.respond_info(f"  Last Error: {rec.get('error')}")
             safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", 0.0)
-            gcmd.respond_info(f"  Safe_Z: {safe_z_val:.2f}mm | Backend: {getattr(self, 'z_backend_type', 'unknown')}")
+            is_speedup = getattr(getattr(self, "navigator", None), "carto_speedup", False)
+            speedup_str = " [Carto Speed-Up: ENABLED (No Z-lift)]" if is_speedup else ""
+            gcmd.respond_info(f"  Safe_Z: {safe_z_val:.2f}mm (Station/Dock){speedup_str} | Backend: {getattr(self, 'z_backend_type', 'unknown')}")
 
             # Vision service connectivity and version telemetry
             try:
@@ -2371,6 +2373,7 @@ class ToolCalibrator:
                 "reference_tool": getattr(self, "reference_tool", 0),
                 "z_backend": getattr(self, "z_backend_type", "cartographer"),
                 "safe_z": safe_z_val,
+                "carto_speedup": getattr(getattr(self, "navigator", None), "carto_speedup", False),
                 "cached_offsets": dict(getattr(self, "cached_offsets", {}))
             }
         except Exception as ex:
