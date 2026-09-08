@@ -65,8 +65,8 @@ service_url: http://127.0.0.1:8090
 camera_stream_url: http://127.0.0.1:8080/?action=snapshot
 offsets_config_path: ~/printer_data/config/tool_calibrator/tool_offsets.cfg
 
-safe_z: 35.0                 # Độ cao an toàn di chuyển giữa các trạm/dock (mm)
-force_safe_z: False          # Đặt True nếu muốn giá trị safe_z này luôn ép buộc ghi đè toạ độ đã lưu
+# safe_z: 35.0                 # Để comment (#) để kích hoạt Bứt Tốc Cartographer; bỏ comment để ép độ cao cụ thể
+# force_safe_z: False          # Đặt True nếu muốn ép buộc dùng số safe_z này ghi đè trạm đã lưu
 
 travel_speed: 12000          # Tốc độ di chuyển nhanh XY giữa các trạm (mm/min)
 approach_speed: 1500         # Tốc độ tiếp cận chậm chính xác (mm/min)
@@ -78,7 +78,7 @@ centering_samples: 3         # Số frame lấy mẫu mỗi bước căn chỉnh
 sample_delay: 0.08           # Khoảng cách giữa các frame (giây)
 wiggle_distance: 0.10        # Biên độ lắc vi mô phá lóa sáng (mm)
 wiggle_on_failure: True      # Tự động lắc vi mô khi mất dấu đầu phun
-max_camera_temp: 100.0       # Giới hạn nhiệt độ an toàn bảo vệ camera (°C)
+max_camera_temp: 100.0       # Giới hạn nhiệt độ an toàn bảo vệ camera (°C) - FAIL-CLOSED nếu không đọc được nhiệt
 ```
 
 > [!TIP]
@@ -89,9 +89,11 @@ max_camera_temp: 100.0       # Giới hạn nhiệt độ an toàn bảo vệ ca
 > - Nếu sử dụng cảm biến quét không chạm bàn xe thuần túy (Scan Mode không chạm), cấu hình `measurement_reference: shuttle` sẽ được TKC bảo vệ chặn lại qua mã lỗi `[ERR_Z_003]`.
 
 > [!IMPORTANT]
-> **Tính Năng Bứt Tốc Đo Z Cartographer (`safe_z: 0.0` + `force_safe_z: True`):**
-> - Khi bạn đặt `safe_z: 0.0` (kèm `force_safe_z: True`), hệ thống sẽ **LOẠI BỎ HOÀN TOÀN** thao tác nâng trục Z lên cao khi chuyển đổi giữa các tool để đo Z trên bàn in. Đầu phun sẽ bay ngang XY ở độ cao hiện tại trực tiếp tới điểm đo, giúp chu trình đo 5-6 tool diễn ra cực nhanh!
-> - *Điều kiện áp dụng*: Bạn phải xác nhận hành trình di chuyển trên mặt bàn in không bị vướng kẹp bàn hay chướng ngại vật va chạm.
+> **Thiết Kế Safe Z 2 Tầng: Tách Biệt An Toàn Trạm & Bứt Tốc Đo Z Cartographer:**
+> - **Khi để comment (`# safe_z`):** Bạn **không cần phải cấu hình phức tạp** `safe_z: 0.0` + `force_safe_z: True`. Chỉ cần để comment 2 dòng này, hệ thống sẽ tự động kích hoạt **Bứt Tốc** cho riêng chuỗi đo Z của Cartographer Touch (đầu phun chuyển tiếp đo các tool ở cao độ mặt bàn cực nhanh).
+> - **Bảo vệ an toàn trạm & camera:** Tuy chuỗi đo Z chạy nhanh, nhưng hành trình vào/ra trạm Camera (`approach_camera`, `depart_station`) và trạm chuyển tool vẫn **luôn duy trì độ cao an toàn tách biệt** (độ cao trạm đã lưu hoặc mặc định 35.0mm, tối thiểu 10.0mm). Điều này loại bỏ hoàn toàn rủi ro va quệt camera khi bay ngang qua bàn in.
+> - **Khi khai báo số cụ thể (`safe_z: 25.0`):** Toàn bộ chu trình sẽ tuân thủ nghiêm ngặt độ cao đã khai báo.
+> - **Bảo vệ nhiệt độ Fail-Closed:** Trước khi đầu in tiến vào trạm camera, hệ thống tự động kiểm tra nhiệt độ của extruder tương ứng. Nếu nhiệt độ vượt ngưỡng hoặc không thể xác minh nhiệt độ (lỗi sensor), hệ thống lập tức dừng lại với mã `[ERR_PRE_002]` để bảo vệ camera/thấu kính.
 
 ---
 

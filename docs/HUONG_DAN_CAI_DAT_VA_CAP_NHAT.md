@@ -159,8 +159,10 @@ camera_stream_url: http://127.0.0.1:8080/?action=snapshot
 offsets_config_path: ~/printer_data/config/tool_calibrator/tool_offsets.cfg
 
 # 2. ĐỘ CAO AN TOÀN (SAFE_Z) & TÍNH NĂNG BỨT TỐC CARTOGRAPHER TOUCH
-# - Mặc định khi để comment (#): Cartographer Touch tự động bứt tốc (safe_z = 0.0)
-# - Bỏ comment (#) và nhập số: Hệ thống sẽ lập tức tuân thủ đúng số đã khai báo
+# - Mặc định khi để comment (#): Kích hoạt chế độ Bứt Tốc cục bộ cho chuỗi đo Z Cartographer,
+#   trong khi Camera, trạm và toolchange vẫn được bảo vệ bởi độ cao an toàn (mặc định 35.0mm / trạm đã lưu).
+# - Bỏ comment (#) và nhập số cụ thể: Hệ thống sẽ lập tức áp dụng đúng số đã khai báo cho toàn bộ hành trình.
+# - force_safe_z: True sẽ ép buộc dùng số khai báo này và ghi đè toạ độ đã lưu từ trước.
 # safe_z: 35.0
 # force_safe_z: False
 
@@ -183,9 +185,10 @@ max_camera_temp: 100.0       # Giới hạn nhiệt độ an toàn bảo vệ �
 ```
 
 > [!IMPORTANT]
-> **Tính Năng Bứt Tốc Mặc Định Cartographer Touch:**
-> Khi sử dụng **Cartographer Touch** (`z_backend: cartographer`), bạn chỉ cần **để comment (hoặc để trống)** 2 dòng `# safe_z` và `# force_safe_z`. Hệ thống sẽ **MẶC ĐỊNH TỰ ĐỘNG BỨT TỐC** (`safe_z = 0.0`), bỏ qua hoàn toàn thao tác nâng hạ trục Z thừa thãi giữa các lần chạm bàn in. Đầu phun sẽ bay thẳng ngang XY ở cao độ hiện tại tới điểm đo cực nhanh và mượt mà.
-> Nếu muốn nâng trục Z lên một độ cao an toàn cố định (ví dụ máy in có kẹp bàn hoặc chướng ngại vật), bạn chỉ việc bỏ dấu `#` và khai báo số cụ thể (ví dụ `safe_z: 35.0`), hệ thống sẽ lập tức nhận lệnh theo con số đã khai báo đó!
+> **Thiết Kế Safe Z 2 Tầng: Tách Biệt An Toàn Trạm & Bứt Tốc Đo Z Cartographer:**
+> - **Khi để comment (`# safe_z`):** Hệ thống tự động kích hoạt chế độ **Bứt Tốc** cho riêng chuỗi đo Z Cartographer. Đầu phun không nâng hạ 35mm thừa thãi giữa các lần chạm bàn in. Tuy nhiên, hành trình vào/ra trạm Camera (`approach_camera`, `depart_station`) và chuyển đổi toolhead vẫn **luôn được bảo vệ bởi Safe Z an toàn** (độ cao trạm đã lưu hoặc mặc định 35.0mm, tối thiểu 10.0mm). Điều này loại bỏ hoàn toàn rủi ro va quệt camera hay dock ở Z thấp trong khi vẫn giữ tốc độ đo Z tối đa!
+> - **Khi khai báo số cụ thể (`safe_z: 25.0`):** Hệ thống lập tức tuân thủ đúng độ cao đã khai báo cho toàn bộ chu trình.
+> - **Khi bật `force_safe_z: True`:** Hệ thống cưỡng chế số đã khai báo, vô hiệu hóa speed-up và ghi đè giá trị đã lưu trong file `tool_offsets.cfg`.
 
 Sau khi lưu cấu hình, nhấn **Save & Restart** Klipper trên giao diện web.
 
@@ -197,7 +200,6 @@ Sau khi lưu cấu hình, nhấn **Save & Restart** Klipper trên giao diện we
 
 ### Bước 4.1: Dán khối cấu hình vào `moonraker.conf`
 
-**Đối với cài đặt System Service mặc định:**
 ```ini
 [update_manager tool_calibrator]
 type: git_repo
@@ -206,15 +208,12 @@ origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 primary_branch: main
 virtualenv: ~/Tool-Klipper-Calibration/env
 requirements: server/requirements.txt
-is_system_service: True
 managed_services:
     tool_calibrator
     klipper
 info_tags:
     desc=Tool-Klipper-Calibration Automated Vision & Z Alignment
 ```
-
-*(Nếu bạn cài đặt bằng cờ `--user-service`, thay `is_system_service: True` thành `is_system_service: False` và thêm dòng `install_script: scripts/update_hook.sh`)*.
 
 ### Bước 4.2: Khởi động lại Moonraker
 Lưu file và khởi động lại Moonraker trên giao diện web hoặc qua terminal:
@@ -280,9 +279,11 @@ Script sẽ hỏi bạn 3 câu hỏi trực quan (nhấn `Y` hoặc bấm `Enter
 *(Cờ `--purge-all` sẽ tự động dọn sạch thư mục git clone, gỡ toàn bộ cấu hình, xóa sạch các bản backup cũ và phục hồi `printer.cfg`, `moonraker.conf` về trạng thái nguyên bản)*.
 
 #### Các cờ tùy chọn khác:
-- `--keep-data`: Gỡ phần mềm nhưng giữ nguyên tệp toạ độ `tool_offsets.cfg`.
+- `--keep-data`: (Mặc định) Giữ nguyên vẹn tệp toạ độ `tool_offsets.cfg` và bản sao lưu.
+- `--no-keep-data`: Cho phép xóa dữ liệu offsets khi gỡ cài đặt.
+- `--purge-all`: Dọn sạch toàn bộ mã nguồn git, cấu hình, và dữ liệu liên quan.
 - `--purge-repo`: Chỉ xóa thư mục clone git sau khi gỡ service và symlink.
-- `--config-subdir <subdir>`: Chỉ định thư mục con (ví dụ: `Printer-Setup`).
+- `--config-subdir <subdir>`: Chỉ định thư mục con (ví dụ: `Printer-Setup`). Script cũng tự động tìm kiếm manifest nếu không truyền tham số.
 
 ### Bước 5.2: Cài đặt lại phiên bản mới nhất từ đầu
 Sau khi chạy `./scripts/uninstall.sh --purge-all`, toàn bộ hệ thống đã sạch sẽ. Bạn có thể cài lại từ đầu theo đúng chuẩn:
