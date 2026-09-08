@@ -312,6 +312,55 @@ kinematics: corexy
         px, py = backend.get_probe_xy()
         self.assertEqual((px, py), (175.5, 175.5))
 
+    def test_touch_probe_gcode_never_falls_back_to_touch_home(self):
+        """touch_probe_gcode must never fall back to CARTOGRAPHER_TOUCH_HOME (origin reset safety)."""
+        self.gcode.commands = {"CARTOGRAPHER_TOUCH_HOME": MagicMock()}
+        backend = CartographerBackend(self.config)
+        # Must NOT be CARTOGRAPHER_TOUCH_HOME! Must default to CARTOGRAPHER_TOUCH_PROBE.
+        self.assertNotEqual(backend.touch_probe_gcode, "CARTOGRAPHER_TOUCH_HOME")
+        self.assertEqual(backend.touch_probe_gcode, "CARTOGRAPHER_TOUCH_PROBE")
+
+    def test_vision_samples_not_passed_to_carto_max_samples(self):
+        """Vision burst samples parameter must not be used as carto_max_samples."""
+        cfg = DummyConfig(self.printer, {
+            "samples": 3,
+            "touch_model_config_path": self.printer_cfg_path
+        })
+        backend = CartographerBackend(cfg)
+        self.assertIsNone(backend.max_samples)
+        self.assertNotIn("MAX_SAMPLES=", backend.touch_probe_gcode)
+
+    def test_thermal_safety_guard_permits_thermal_epsilon(self):
+        """Nozzle temperature with minor overshoot (<= 150 + 2.0°C epsilon) is permitted, above fails."""
+        # 151.5°C is within 150 + 2.0°C epsilon
+        self.printer.objects["extruder1"] = DummyExtruder(151.5)
+        backend = CartographerBackend(self.config)
+        gcmd = DummyGCodeCommand()
+        ref_result = {"contact_z": 0.050}
+        self.cartographer_obj.last_z_result = 0.080
+
+        sec_result = backend.probe_secondary_tool(1, ref_result, gcmd)
+        self.assertIsNotNone(sec_result)
+
+        # 152.5°C exceeds 150 + 2.0°C epsilon
+        self.printer.objects["extruder1"] = DummyExtruder(152.5)
+        with self.assertRaises(RuntimeError) as ctx:
+            backend.probe_secondary_tool(1, ref_result, gcmd)
+        self.assertIn("ERR_PRE_002", str(ctx.exception))
+
+    def test_touch_telemetry_extracted_in_probe_result(self):
+        """Touch telemetry exposed by cartographer plugin is captured in probe return dict."""
+        mock_carto = MagicMock()
+        mock_carto.get_status = MagicMock(return_value={
+            "touch": {"spread": 0.004, "threshold": 1819, "retries": 1},
+            "last_threshold": 1819
+        })
+        self.printer.objects["cartographer"] = mock_carto
+        backend = CartographerBackend(self.config)
+        telem = backend._get_touch_telemetry()
+        self.assertEqual(telem.get("spread"), 0.004)
+        self.assertEqual(telem.get("threshold"), 1819)
+
 
 class TestSwitchBackend(unittest.TestCase):
     def test_switch_probe_relative_offset(self):

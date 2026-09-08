@@ -14,14 +14,14 @@ In multi-tool 3D printers, mechanical crashes can bend toolhead mounts, shatter 
 
 ---
 
-## 2. Three-Tier Staging Coordinate Model
+## 2. Two-Tier Staging Coordinate & Speed-up Architecture
 
-Every measurement station (Camera Station or Z-Switch Station) is managed by three distinct spatial tiers:
+Every measurement station is protected by a two-tier spatial model that separates high-clearance station transit from fast bed probing:
 
 ```
                       [ Safe_Z Clearance Plane (e.g., Z = 35.0 mm) ]
                         ^                                       ^
-                        | (1. Vertical Lift)                    | (5. Vertical Lift)
+                        | (1. Vertical Lift for Station/Dock)   | (5. Vertical Lift)
                         |                                       |
 [ Dock / Prior Pos ] ---+                                       +---> [ Next Target ]
                              \
@@ -37,9 +37,10 @@ Every measurement station (Camera Station or Z-Switch Station) is managed by thr
 
 | Staging Tier | Technical Purpose & Constraint |
 | :--- | :--- |
-| **`Safe_Z`** | A horizontal plane elevated at least 15mm–25mm above the highest mechanical obstacle on the machine bed (camera housing, docks, clips). |
-| **`Safe_Approach_XY`** | A holding waypoint offset 20mm–30mm outside the station perimeter, allowing safe vertical descent without risking clipping the camera shroud. |
-| **`Target_XY_Z`** | The precise optical focal coordinate of the camera lens or the mechanical apex of the Z-switch pin. |
+| **`Safe_Z` (Station & Toolchange)** | A horizontal plane elevated at least 15mm–25mm above obstacles (camera shroud, docks, clips). Always enforced when entering/departing Camera, Switch stations, and before physical toolchanger pickups. |
+| **Cartographer Speed-Up (Bed Probing)** | When `safe_z` is commented in `tool_calibrator.cfg`, local Z probing on the bed bypasses global 35mm lifts. Head maintains low clearance (Z $\ge 2.0\text{mm}$) across open bed between nozzle touches. |
+| **`Safe_Approach_XY`** | A holding waypoint offset 20mm–30mm outside the station perimeter, allowing safe vertical descent without risking clipping camera shroud. |
+| **`Target_XY_Z`** | The precise optical focal coordinate of camera lens or mechanical apex of Z-switch pin. |
 
 ---
 
@@ -76,5 +77,7 @@ Coordinates are immediately stored in memory and committed to the configuration 
 2. **Iteration Clamping & Backlash Detection:**
    - The nozzle centering routine allows a maximum of 5 iterative moves per toolhead.
    - If positional convergence is not achieved within 5 attempts, execution aborts with a mechanical backlash warning.
-3. **Emergency E-Stop Integration:**
-   - Full compatibility with Klipper's emergency stop mechanism (`M112`). Motors immediately de-energize upon trigger.
+3. **Soft Abort (`CALIBRATION_ABORT`):**
+   - In-band software cancellation checked between iterative moves and calibration phases. Safely releases session locks, disables lighting, reconciles toolchanger status, and parks head at safe altitude.
+4. **Physical Emergency E-Stop (`M112`):**
+   - Full compatibility with Klipper's emergency stop mechanism (`M112`). For any immediate risk of mechanical collision or crash, invoke `M112` directly. Motors immediately de-energize upon trigger.

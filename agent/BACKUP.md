@@ -8,15 +8,15 @@ This document establishes configuration persistence protocols, automated backup 
 
 To prevent catastrophic configuration corruption:
 1. **Isolated Offset Storage:** All calibrated tool offsets are written to a dedicated configuration file:  
-   `~/printer_data/config/tool_offsets.cfg`
-2. **Master Inclusion:** The primary `printer.cfg` only requires a single include directive:  
+   `~/printer_data/config/tool_calibrator/tool_offsets.cfg`
+2. **Master Inclusion:** The master `tool_calibrator/tool_calibrator.cfg` automatically includes this file:  
    `[include tool_offsets.cfg]`
-3. **Format Standard:** Each tool section contains explicitly generated offset keys:
+3. **Format Standard:** Offsets are persisted under the dedicated `[tool_offsets]` section:
    ```ini
-   [tool 1]
-   gcode_x_offset: 0.142
-   gcode_y_offset: -0.085
-   gcode_z_offset: 0.310
+   [tool_offsets]
+   t1_x_offset: 0.142
+   t1_y_offset: -0.085
+   t1_z_offset: 0.310
    ```
 
 ---

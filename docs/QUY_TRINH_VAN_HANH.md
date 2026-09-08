@@ -269,12 +269,15 @@ CALIBRATE_TOOL_XY TOOL=1
 
 # 3. Chỉ đo tiếp xúc Z cho riêng T1:
 CALIBRATE_TOOL_Z TOOL=1
+
+# 4. Đo lặp lại riêng 1 tool (ví dụ T3) và giữ nguyên tool trên carriage (không đổi lại T0):
+CALIBRATE_TOOL_Z TOOL=3 RESTORE_TOOL=0
 ```
-*(Nếu tool T1 đang được gá sẵn trên carriage, bạn có thể gõ ngắn gọn `CALIBRATE_TOOL`, `CALIBRATE_TOOL_XY` hoặc `CALIBRATE_TOOL_Z` mà không cần truyền `TOOL=1`, macro sẽ tự động nhận diện)*.
+*(Nếu tool T1 đang được gá sẵn trên carriage, bạn có thể gõ ngắn gọn `CALIBRATE_TOOL`, `CALIBRATE_TOOL_XY` hoặc `CALIBRATE_TOOL_Z` mà không cần truyền `TOOL=1`, macro sẽ tự động nhận diện. Thêm `RESTORE_TOOL=0` để tránh việc gắp trả về T0 sau khi đo, giúp đo lặp lại nhiều lần cực nhanh mà không gây hao mòn cơ khí)*.
 
 > [!WARNING]
 > **Quy tắc Mốc Baseline T0 (`ERR_CAL_002`):**
-> Khi đo Z riêng cho tool phụ (ví dụ `CALIBRATE_TOOL_Z TOOL=1`), hệ thống bắt buộc phải có mốc đo Z baseline của T0 trong phiên làm việc để tính $\Delta Z$. Nếu chưa đo T0, hãy chạy `CALIBRATE_TOOL_Z TOOL=0` trước hoặc đo cả nhóm `CALIBRATE_TOOLS_Z TOOLS="0,1"`.
+> Khi đo Z riêng cho tool phụ (ví dụ `CALIBRATE_TOOL_Z TOOL=1`), hệ thống bắt buộc phải có mốc đo Z baseline của T0 trong cùng phiên làm việc (sau lần Home G28 gần nhất) để tính $\Delta Z$. Nếu vừa Home lại máy hoặc chưa đo T0, hãy chạy `CALIBRATE_TOOL_Z TOOL=0` trước hoặc đo cả nhóm `CALIBRATE_TOOLS_Z TOOLS="0,1"`.
 
 ---
 
@@ -288,12 +291,14 @@ CALIBRATION_ROLLBACK
 CALIBRATION_ROLLBACK BACKUP="tool_offsets.cfg.calib_backup_20260907_203000"
 ```
 
-#### Luồng 6: Hủy Bỏ Khẩn Cấp (`CALIBRATION_ABORT`)
-Nếu phát hiện sự cố trong khi đang chạy cân chỉnh tự động, gõ lệnh:
+#### Luồng 6: Hủy Bỏ Khẩn Cấp (`CALIBRATION_ABORT` vs `M112`)
+Nếu muốn dừng chu trình cân chỉnh tự động:
 ```gcode
 CALIBRATION_ABORT
 ```
-*(Hệ thống sẽ dừng ngay lập tức các bước đo tiếp theo, tự động nâng Z lên độ cao an toàn, tắt đèn camera và khôi phục trạng thái toolchanger an toàn)*.
+> [!NOTE]
+> `CALIBRATION_ABORT` là lệnh hủy mềm (soft abort) an toàn giữa các bước đo: giải phóng khóa camera, tắt đèn soi, kiểm tra phục hồi trạng thái toolchanger và đưa đầu in về cao độ an toàn.
+> **Nếu có nguy cơ va chạm cơ khí vật lý tức thì, luôn luôn nhấn nút Emergency Stop hoặc gõ `M112` để ngắt điện động cơ ngay lập tức!**
 
 ---
 
@@ -301,23 +306,23 @@ CALIBRATION_ABORT
 
 | Tên Macro / Lệnh | Mục Đích Sử Dụng | Các Tham Số Hỗ Trợ |
 | :--- | :--- | :--- |
-| `CALIBRATE_ALL_TOOLS` | Hiệu chuẩn toàn bộ đầu phun cả XY và Z | `TOOLS="0,1"`, `ORDER="XY_FIRST"`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `CLEAN_NOZZLE=1`, `SAMPLES=3`, `WIGGLE=1` |
-| `CALIBRATE_TOOLS_Z` | **Chỉ đo tiếp xúc Z** toàn bộ đầu phun (giữ nguyên XY) | `TOOLS="0,1,2"`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `ALLOW_SHUTTLE_Z=1` |
-| `CALIBRATE_TOOLS_XY` | **Chỉ đo quang học XY** toàn bộ đầu phun (giữ nguyên Z) | `TOOLS="0,1,2"`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `SAMPLES=3`, `WIGGLE=1` |
-| `CALIBRATE_TOOL` | Hiệu chuẩn cả XY và Z cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `CALIBRATE_XY=1`, `CALIBRATE_Z=1`, `DRY_RUN=1` |
-| `CALIBRATE_TOOL_Z` | **Chỉ đo tiếp xúc Z** cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `DRY_RUN=1`, `ALLOW_SHUTTLE_Z=1` |
-| `CALIBRATE_TOOL_XY` | **Chỉ đo quang học XY** cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `DRY_RUN=1`, `SAMPLES=3`, `WIGGLE=1` |
+| `CALIBRATE_ALL_TOOLS` | Hiệu chuẩn toàn bộ đầu phun cả XY và Z | `TOOLS="0,1"`, `ORDER="XY_FIRST"`, `RESTORE_TOOL=1`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `CLEAN_NOZZLE=1`, `SAMPLES=3`, `WIGGLE=1` |
+| `CALIBRATE_TOOLS_Z` | **Chỉ đo tiếp xúc Z** toàn bộ đầu phun (giữ nguyên XY) | `TOOLS="0,1,2"`, `RESTORE_TOOL=1`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `ALLOW_SHUTTLE_Z=1` |
+| `CALIBRATE_TOOLS_XY` | **Chỉ đo quang học XY** toàn bộ đầu phun (giữ nguyên Z) | `TOOLS="0,1,2"`, `RESTORE_TOOL=1`, `DRY_RUN=1`, `CONTINUE_ON_ERROR=1`, `SAMPLES=3`, `WIGGLE=1` |
+| `CALIBRATE_TOOL` | Hiệu chuẩn cả XY và Z cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `RESTORE_TOOL=1`, `CALIBRATE_XY=1`, `CALIBRATE_Z=1`, `DRY_RUN=1` |
+| `CALIBRATE_TOOL_Z` | **Chỉ đo tiếp xúc Z** cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `RESTORE_TOOL=1`, `DRY_RUN=1`, `ALLOW_SHUTTLE_Z=1` |
+| `CALIBRATE_TOOL_XY` | **Chỉ đo quang học XY** cho 1 tool cụ thể | `TOOL=1` (tự nhận diện nếu bỏ trống), `RESTORE_TOOL=1`, `DRY_RUN=1`, `SAMPLES=3`, `WIGGLE=1` |
 | `CALIBRATE_CAMERA` | Đo tỷ lệ mm/pixel và ma trận affine xoay camera | `DISTANCE=0.5` (biên độ dịch chuyển hình sao $\pm 0.5\text{mm}$) |
 | `AUTO_TEACH_CAMERA` | Tự động dạy toạ độ trạm camera 1-click | `APPROACH_DIST=25.0`, `AUTO_CENTER=1` |
 | `AUTO_TEACH_SWITCH` | Tự động dạy toạ độ trạm công tắc Z 1-click | `APPROACH_DIST=20.0`, `AUTO_TOUCH=1` |
 | `TEACH_CAMERA_SAFE_Z` | Lưu toạ độ Z hiện tại (hoặc tham số Z) làm Safe_Z | `Z=35.0` (nếu bỏ trống sẽ lấy toạ độ Z hiện tại) |
-| `CENTER_NOZZLE` | Căn tâm quang học vòi phun đang chọn với camera | `SAMPLES=3`, `WIGGLE=1` |
-| `TEST_NOZZLE_VISION` | Kiểm tra nhận diện camera tại chỗ (không di chuyển máy) | `SAMPLES=3` |
+| `CENTER_NOZZLE` | Căn tâm quang học vòi phun đang chọn với camera | `SAMPLES=3` (burst sampling camera), `WIGGLE=1` |
+| `TEST_NOZZLE_VISION` | Kiểm tra nhận diện camera tại chỗ (không di chuyển máy) | `SAMPLES=3` (số frame camera) |
 | `GOTO_CAMERA_TARGET` | Di chuyển an toàn 3 tầng vào trạm camera | *(Không có tham số)* |
 | `GOTO_SWITCH_TARGET` | Di chuyển an toàn 3 tầng vào trạm công tắc Z | *(Không có tham số)* |
 | `LEAVE_CALIBRATION_STATION` | Rời khỏi trạm về độ cao an toàn Safe_Z | *(Không có tham số)* |
-| `TKC_STATUS` | Hiển thị trạng thái runtime, offsets và backend | *(Không có tham số)* |
-| `CALIBRATION_ABORT` | Hủy bỏ an toàn chu trình cân chỉnh đang chạy | *(Không có tham số)* |
+| `TKC_STATUS` | Hiển thị trạng thái runtime, offsets, Vision Service và backend | *(Không có tham số)* |
+| `CALIBRATION_ABORT` | Hủy bỏ an toàn chu trình cân chỉnh đang chạy (soft abort) | *(Không có tham số)* |
 | `CALIBRATION_ROLLBACK` | Phục hồi cấu hình offsets từ bản backup trước | `BACKUP="tên_tệp_sao_lưu"` |
 
 ---

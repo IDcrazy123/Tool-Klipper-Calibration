@@ -67,16 +67,16 @@ For each secondary toolhead `Tn`:
 2. Follows the safe approach trajectory into the Camera Station.
 3. Centers nozzle `Tn` to optical center. Calculates XY offsets:
    $$\text{Offset}_X = X_n - X_0, \quad \text{Offset}_Y = Y_n - Y_0$$
-4. Elevates Z to `Safe_Z`, moves safely to the Z Probe Station.
+4. Elevates Z to `Safe_Z` (or fast local transit in Cartographer speed-up mode), moves safely to Z Probe Station (applying compensated XY offsets for secondary nozzle tip).
 5. Executes probe sequence:
    - **Switch Backend:** Probes switch, computes $\text{Offset}_Z = Z_n - Z_{\text{Ref}}$.
-   - **Cartographer Backend:** Executes `CARTOGRAPHER_TOUCH_PROBE`, computes $\text{Offset}_Z$ based on contact point and touch-model offset.
-6. Caches measured offsets in volatile memory.
+   - **Cartographer Backend:** Executes `CARTOGRAPHER_TOUCH_PROBE`. The plugin internally subtracts the touch-model offset for both T0 and Tn; across relative differential calibration against T0 ($\Delta Z = Z_n - Z_0$), the model offset cancels out completely, measuring the pure relative nozzle tip height.
+6. Caches measured offsets axis-by-axis in memory (preserving XY offsets across Z-only runs).
 
 ### Phase 4: Offset Persistence & Cleanup
-1. Re-engages Reference Tool `T0` and parks at safe home position.
-2. Automatically generates a timestamped backup of the target config file (see [BACKUP.md](BACKUP.md)).
-3. Writes or updates `gcode_x_offset`, `gcode_y_offset`, `gcode_z_offset` in section `[tool n]` of `tool_offsets.cfg`.
+1. If `RESTORE_TOOL=1` (default), re-engages Reference Tool `T0` and parks at safe position. If `RESTORE_TOOL=0`, the currently calibrated tool remains mounted on the carriage.
+2. Automatically generates a timestamped backup in `tool_calibrator/backups/calibration_offsets/` (see [BACKUP.md](BACKUP.md)).
+3. Writes or updates offsets in section `[tool_offsets]` of `tool_calibrator/tool_offsets.cfg` and dynamically applies to toolchanger runtime.
 4. Emits a comprehensive telemetry summary table to the Klipper console.
 
 ---
@@ -84,6 +84,6 @@ For each secondary toolhead `Tn`:
 ## 3. Contactless Dry-Run Mode
 By executing `CALIBRATE_TOOL_OFFSETS DRY_RUN=1`:
 - All toolchange commands, waypoint travel paths, and camera vision analyses execute normally.
-- Z axis motions are offset to stop at least $5.0\text{mm}$ above all physical switches and bed surfaces.
-- Configuration files remain untouched.
-- Allows immediate visual verification of trajectory paths without hardware collision risks.
+- Physical Z probing touch moves (switch probing and Cartographer touch) are completely bypassed (skipped) to eliminate collision risks.
+- Configuration files remain untouched, and measured offsets are kept in volatile memory only.
+- Allows immediate visual verification of trajectory paths and toolchanger indexing without touching bed or switch surfaces.

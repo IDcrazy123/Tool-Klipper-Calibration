@@ -29,8 +29,7 @@ class CartographerBackend(BaseZBackend):
         self.random_radius = config.getfloat("carto_random_radius", None, above=0.0)
         self.max_samples = config.getint("carto_max_samples", None, minval=1, maxval=20)
         if self.max_samples is None:
-            s = config.getint("samples", None, minval=1, maxval=20)
-            self.max_samples = s if s is not None else config.getint("carto_touch_retries", None, minval=1, maxval=20)
+            self.max_samples = config.getint("carto_touch_retries", None, minval=1, maxval=20)
 
         # Reject options unsupported by the official Cartographer Touch macro API
         unsupported = []
@@ -114,7 +113,7 @@ class CartographerBackend(BaseZBackend):
         raw = self._resolve_touch_cmd(
             self.configured_touch_probe_gcode,
             "CARTOGRAPHER_TOUCH_PROBE",
-            ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH_PROBE", "SCANNER_TOUCH", "CARTOGRAPHER_TOUCH_HOME")
+            ("SCANNER_TOUCH_PROBE", "CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
         )
         return self._build_probe_cmd(raw)
 
@@ -159,9 +158,11 @@ class CartographerBackend(BaseZBackend):
             try:
                 status = extruder.get_status(self.printer.get_reactor().monotonic())
                 temp = status.get("temperature", 0.0)
-                if temp > self.max_touch_temp:
+                # Upstream Cartographer Touch 1.9.0 permits a 2.0°C thermal fluctuation window
+                thermal_limit = self.max_touch_temp + 2.0
+                if temp > thermal_limit:
                     raise gcmd.error(
-                        f"[ERR_PRE_002] Tool T{tool_number} nozzle temperature ({temp:.1f}°C) exceeds safe Cartographer touch limit ({self.max_touch_temp:.1f}°C). Cool nozzle before touch probing."
+                        f"[ERR_PRE_002] Tool T{tool_number} nozzle temperature ({temp:.1f}°C) exceeds safe Cartographer touch limit ({self.max_touch_temp:.1f}°C + 2.0°C epsilon = {thermal_limit:.1f}°C). Cool nozzle before touch probing."
                     )
             except Exception as ex:
                 if "ERR_PRE_002" in str(ex):
@@ -252,6 +253,29 @@ class CartographerBackend(BaseZBackend):
 
         return None
 
+    def _get_touch_telemetry(self) -> Dict[str, Any]:
+        """Extracts available touch diagnostic telemetry (samples, threshold, spread) if exposed by plugin."""
+        telem: Dict[str, Any] = {}
+        for obj_name in ("cartographer", "scanner"):
+            obj = self.printer.lookup_object(obj_name, None)
+            if obj is not None:
+                if callable(getattr(obj, "get_status", None)):
+                    try:
+                        eventtime = self.printer.get_reactor().monotonic()
+                        st = obj.get_status(eventtime)
+                        if isinstance(st, dict) and not hasattr(st, "_mock_name"):
+                            touch_st = st.get("touch")
+                            if isinstance(touch_st, dict) and not hasattr(touch_st, "_mock_name"):
+                                for k in ("samples", "selected_samples", "spread", "threshold", "retries", "temperature"):
+                                    if k in touch_st:
+                                        telem[k] = touch_st[k]
+                            for k in ("touch_threshold", "temperature", "last_threshold"):
+                                if k in st:
+                                    telem[k] = st[k]
+                    except Exception:
+                        pass
+        return telem
+
     def probe_reference_tool(self, tool_number: int, gcmd) -> Dict[str, Any]:
         """
         Executes baseline Cartographer touch measurement for Reference Tool (T0).
@@ -281,6 +305,7 @@ class CartographerBackend(BaseZBackend):
         effective_contact_z = 0.0 if is_homing else measured_z
         ref_x = round(float(cur_pos[0]), 3)
         ref_y = round(float(cur_pos[1]), 3)
+        telem = self._get_touch_telemetry()
 
         return {
             "source": "cartographer_touch_reference",
@@ -292,7 +317,8 @@ class CartographerBackend(BaseZBackend):
             "tool_number": tool_number,
             "probe_x": ref_x,
             "probe_y": ref_y,
-            "probe_xy": (ref_x, ref_y)
+            "probe_xy": (ref_x, ref_y),
+            "telemetry": telem
         }
 
     def probe_secondary_tool(self, tool_number: int, reference_result: Dict[str, Any], gcmd) -> Dict[str, Any]:
@@ -328,6 +354,7 @@ class CartographerBackend(BaseZBackend):
         else:
             ref_z = reference_result.get("contact_z", 0.0)
         delta_z = round(measured_z - ref_z, 3)
+        telem = self._get_touch_telemetry()
 
         return {
             "source": "cartographer_touch",
@@ -337,5 +364,6 @@ class CartographerBackend(BaseZBackend):
             "tool_number": tool_number,
             "probe_x": sec_x,
             "probe_y": sec_y,
-            "probe_xy": (sec_x, sec_y)
+            "probe_xy": (sec_x, sec_y),
+            "telemetry": telem
         }

@@ -349,3 +349,143 @@ class TestZGatingAndBaseline(unittest.TestCase):
         self.assertIn(2, calibrator.cached_offsets)
         self.assertEqual(calibrator.run_record["physical_tool"], 0)
         self.assertIn("T0", self.gcode.executed_scripts)
+
+    def test_z_only_run_preserves_cached_xy_offsets(self):
+        """Z-only calibration must merge results axis-by-axis, preserving previously cached XY offsets."""
+        cfg_data = dict(self.base_config_data)
+        cfg_data["allow_shuttle_z"] = True
+        config = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(config)
+
+        # Pre-populate cache with optical XY offsets
+        calibrator.cached_offsets = {
+            1: {"x": 0.820, "y": 0.240}
+        }
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={
+            "contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)
+        })
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={
+            "suggested_z_offset": -0.326, "probe_xy": (150.82, 150.24)
+        })
+
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "ALLOW_SHUTTLE_Z": 1,
+            "TOOLS": "0,1"
+        })
+
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+
+        # Crucial check: T1 must now have BOTH its previously cached XY and newly measured Z
+        self.assertIn(1, calibrator.cached_offsets)
+        self.assertAlmostEqual(calibrator.cached_offsets[1]["x"], 0.820)
+        self.assertAlmostEqual(calibrator.cached_offsets[1]["y"], 0.240)
+        self.assertAlmostEqual(calibrator.cached_offsets[1]["z"], -0.326)
+
+    def test_secondary_tool_xy_compensation_fallbacks(self):
+        """_lookup_tool_xy_offset must resolve XY offsets via 3-tier fallback hierarchy."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        # Tier 1: In-memory cache
+        calibrator.cached_offsets = {1: {"x": 0.123, "y": -0.456}}
+        x1, y1 = calibrator._lookup_tool_xy_offset(1)
+        self.assertAlmostEqual(x1, 0.123)
+        self.assertAlmostEqual(y1, -0.456)
+
+        # Tier 2: Persisted tool_offsets object
+        calibrator.cached_offsets = {}
+        mock_to_obj = MagicMock()
+        mock_to_obj.parse_tool_offsets = MagicMock(return_value={1: {"x": 0.789, "y": 0.321}})
+        self.printer.objects["tool_offsets"] = mock_to_obj
+        x2, y2 = calibrator._lookup_tool_xy_offset(1)
+        self.assertAlmostEqual(x2, 0.789)
+        self.assertAlmostEqual(y2, 0.321)
+
+        # Tier 3: Klipper [tool Tn] object attributes
+        del self.printer.objects["tool_offsets"]
+        mock_tool_obj = MagicMock()
+        mock_tool_obj.gcode_x_offset = 0.555
+        mock_tool_obj.gcode_y_offset = -0.666
+        self.printer.objects["tool 1"] = mock_tool_obj
+        x3, y3 = calibrator._lookup_tool_xy_offset(1)
+        self.assertAlmostEqual(x3, 0.555)
+        self.assertAlmostEqual(y3, -0.666)
+
+    def test_toolchanger_reconciliation_warning_when_uninitialized(self):
+        """When toolchanger reconciliation fails to confirm active tool, emit a warning instead of claiming success."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        # Force toolchanger to stay uninitialized even when initialize_to_tool is called
+        self.toolchanger.status = "uninitialized"
+        self.toolchanger.tool_number = -1
+        self.toolchanger.active_tool = None
+        self.toolchanger.initialize_to_tool = MagicMock()  # Does nothing, remains uninitialized
+
+        gcmd = DummyGCodeCommand()
+        calibrator._reconcile_toolchanger_state(1, gcmd)
+
+        # Must report a warning, NOT false success
+        self.assertTrue(any("Warning: Toolchanger state reconciliation" in m for m in gcmd.info_messages))
+        self.assertFalse(any("reconciled to physical tool T1." in m for m in gcmd.info_messages))
+
+    def test_restore_tool_zero_retains_measured_tool(self):
+        """RESTORE_TOOL=0 must retain the currently calibrated tool instead of restoring T0."""
+        cfg_data = dict(self.base_config_data)
+        cfg_data["allow_shuttle_z"] = True
+        config = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(config)
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={
+            "contact_z": 0.0, "source": "cartographer", "probe_xy": (150.0, 150.0)
+        })
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={
+            "suggested_z_offset": 0.05, "probe_xy": (150.0, 150.0)
+        })
+
+        gcmd = DummyGCodeCommand({
+            "CALIBRATE_XY": 0,
+            "CALIBRATE_Z": 1,
+            "RESTORE_TOOL": 0,
+            "TOOLS": "0,1"
+        })
+
+        self.gcode.executed_scripts = []
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        self.assertEqual(calibrator.run_record["physical_tool"], 1)
+        # T0 was run at start for tool 0, but NOT run at the end to restore reference
+        self.assertEqual(self.gcode.executed_scripts[-1], "T1")
+
+    def test_homing_invalidates_z_baseline_cache(self):
+        """A homing event must invalidate cached reference Z baseline."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+
+        calibrator.cached_reference_z_result = {"contact_z": 0.0, "probe_xy": (150.0, 150.0)}
+        self.assertIsNotNone(calibrator.cached_reference_z_result)
+
+        # Trigger homing event
+        calibrator._handle_homing_event()
+        self.assertIsNone(calibrator.cached_reference_z_result)
+
+    def test_calibration_status_includes_vision_and_cached_offsets(self):
+        """cmd_CALIBRATION_STATUS must output Vision Service status and Cached Offsets."""
+        config = DummyConfig(self.printer, dict(self.base_config_data))
+        calibrator = ToolCalibrator(config)
+        calibrator.cached_offsets = {1: {"x": 0.100, "y": 0.200, "z": -0.300}}
+        calibrator._query_vision = MagicMock(return_value={
+            "status": "ok", "service": "tkc-vision", "version": "1.2.0", "camera_ready": True
+        })
+
+        gcmd = DummyGCodeCommand()
+        calibrator.cmd_CALIBRATION_STATUS(gcmd)
+
+        status_text = "\n".join(gcmd.info_messages)
+        self.assertIn("Vision Service: ONLINE (tkc-vision v1.2.0)", status_text)
+        self.assertIn("Cached Offsets", status_text)
+        self.assertIn("T1: X=+0.100 Y=+0.200 Z=-0.300", status_text)
