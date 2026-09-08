@@ -31,6 +31,10 @@ cd ~
 git clone https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 cd ~/Tool-Klipper-Calibration && ./scripts/install.sh
 ```
+Sau đó thêm duy nhất 1 dòng vào `printer.cfg`:
+```ini
+[include tool_calibrator/tool_calibrator.cfg]
+```
 
 ---
 
