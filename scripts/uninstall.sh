@@ -16,7 +16,7 @@ echo -e "${YELLOW}    Tool-Klipper-Calibration Safe Uninstaller       ${NC}"
 echo -e "${YELLOW}====================================================${NC}"
 
 # Parse optional arguments
-KEEP_DATA=false
+KEEP_DATA=true
 CONFIG_SUBDIR=""
 PURGE_REPO=false
 PURGE_CONFIG=false
@@ -35,6 +35,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keep-data)
             KEEP_DATA=true
+            shift
+            ;;
+        --no-keep-data|--purge-data)
+            KEEP_DATA=false
             shift
             ;;
         --purge-repo)
@@ -148,6 +152,21 @@ if [ ! -f "${PERSISTENT_MANIFEST}" ] && [ -f "${CONFIG_DIR}/.tool_calibrator_man
     PERSISTENT_MANIFEST="${CONFIG_DIR}/.tool_calibrator_manifest.json"
 fi
 
+if [ -z "${CONFIG_SUBDIR}" ] && [ ! -f "${PERSISTENT_MANIFEST}" ]; then
+    # Auto-discover manifest in subdirectories of CONFIG_DIR with canonical path verification
+    while IFS= read -r found_manifest; do
+        if [ -f "${found_manifest}" ]; then
+            real_found="$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${found_manifest}" 2>/dev/null || realpath "${found_manifest}" 2>/dev/null || echo "${found_manifest}")"
+            real_config="$(python3 -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "${CONFIG_DIR}" 2>/dev/null || realpath "${CONFIG_DIR}" 2>/dev/null || echo "${CONFIG_DIR}")"
+            if [[ "${real_found}" == "${real_config}/"* ]]; then
+                PERSISTENT_MANIFEST="${found_manifest}"
+                echo -e "${GREEN}[+] Tự động phát hiện manifest trong thư mục con: ${PERSISTENT_MANIFEST}${NC}"
+                break
+            fi
+        fi
+    done < <(find "${CONFIG_DIR}" -maxdepth 3 -name ".tool_calibrator_manifest.json" 2>/dev/null || true)
+fi
+
 if [ -f "${PERSISTENT_MANIFEST}" ]; then
     echo -e "${GREEN}[+] Đã tìm thấy manifest cài đặt: ${PERSISTENT_MANIFEST}${NC}"
     DISCOVERED_SUBDIR=$(python3 -c "
@@ -165,10 +184,10 @@ except Exception:
     fi
 fi
 
-OFFSETS_CFG="${TARGET_CONFIG_DIR}/tool_offsets.cfg"
-ROOT_OFFSETS_CFG="${CONFIG_DIR}/tool_offsets.cfg"
 MACRO_DIR="${TARGET_CONFIG_DIR}/tool_calibrator"
 ROOT_MACRO_DIR="${CONFIG_DIR}/tool_calibrator"
+OFFSETS_CFG="${MACRO_DIR}/tool_offsets.cfg"
+ROOT_OFFSETS_CFG="${ROOT_MACRO_DIR}/tool_offsets.cfg"
 
 # 1. Stop and disable systemd service (both system and user mode if found)
 echo -e "\n${BLUE}[1/5] Dừng và gỡ bỏ systemd service...${NC}"
@@ -223,16 +242,24 @@ if [ -d "${KLIPPY_EXTRAS}" ]; then
     fi
 fi
 
-# Remove Macro Symlinks safely (NEVER rm -rf)
+# Remove Macro Symlinks safely (NEVER rm -rf, and preserve tool_offsets.cfg)
 clean_macro_dir() {
     local dir="$1"
     if [ -d "${dir}" ]; then
-        for mf in "tool_calibrator.cfg" "tool_offsets.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "sample_tool_calibrator.cfg"; do
-            if [ -L "${dir}/${mf}" ] || [ -f "${dir}/${mf}" ]; then
+        for mf in "tool_calibrator.cfg" "macros.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg" "sample_tool_calibrator.cfg"; do
+            if [ -L "${dir}/${mf}" ]; then
+                rm -f "${dir}/${mf}"
+                echo -e "${GREEN}    Đã gỡ symlink ${dir}/${mf}${NC}"
+            elif [ "${PURGE_CONFIG}" = true ] && [ -f "${dir}/${mf}" ]; then
                 rm -f "${dir}/${mf}"
                 echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
             fi
         done
+        # If tool_offsets.cfg is a symlink, remove the symlink only
+        if [ -L "${dir}/tool_offsets.cfg" ]; then
+            rm -f "${dir}/tool_offsets.cfg"
+            echo -e "${GREEN}    Đã gỡ symlink ${dir}/tool_offsets.cfg${NC}"
+        fi
         # Only remove directory if it is completely empty
         rmdir "${dir}" 2>/dev/null && echo -e "${GREEN}[✔] Đã dọn thư mục rỗng ${dir}/${NC}" || true
     fi
@@ -336,7 +363,7 @@ with open('${MOONRAKER_CONF}', 'w') as f:
 fi
 
 if [ "${PURGE_CONFIG}" = true ]; then
-    echo -e "\n${YELLOW}[!] Đang thực hiện gỡ bỏ hoàn toàn cấu hình TKC (--purge-config)...${NC}"
+    echo -e "\n${YELLOW}[!] Đang thực hiện gỡ bỏ cấu hình TKC (--purge-config)...${NC}"
     if [ "${PURGE_BACKUPS}" = false ]; then
         TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
         PURGE_BACKUP_DIR="${TKC_BACKUP_DIR}/archived_configs/purge_${TIMESTAMP}"
@@ -349,6 +376,10 @@ if [ "${PURGE_CONFIG}" = true ]; then
         for pattern in "tool_offsets.cfg*" "tool_calibrator.cfg*" "tool-calibrator.cfg*" "sample_tool_calibrator.cfg*" "safe_staging_macros.cfg*" "tool_calibrator_macros.cfg*"; do
             for f in "${dir}"/${pattern}; do
                 if [ -f "${f}" ] || [ -L "${f}" ]; then
+                    if [[ "${pattern}" == "tool_offsets.cfg"* ]] && [ "${KEEP_DATA}" = true ] && [ ! -L "${f}" ]; then
+                        echo -e "${YELLOW}[+] Bảo tồn dữ liệu toạ độ: ${f} (bảo toàn dữ liệu mặc định/--keep-data).${NC}"
+                        continue
+                    fi
                     if [ "${PURGE_BACKUPS}" = false ] && [ -f "${f}" ] && [ ! -L "${f}" ]; then
                         cp -a "${f}" "${PURGE_BACKUP_DIR}/"
                     fi
@@ -358,9 +389,15 @@ if [ "${PURGE_CONFIG}" = true ]; then
             done
         done
     done
-    rm -rf "${MACRO_DIR}" "${ROOT_MACRO_DIR}" 2>/dev/null || true
+
+    # Remove macro dirs only if keep-data is false, or only if empty
+    if [ "${KEEP_DATA}" = false ]; then
+        rm -rf "${MACRO_DIR}" "${ROOT_MACRO_DIR}" 2>/dev/null || true
+    else
+        rmdir "${MACRO_DIR}" "${ROOT_MACRO_DIR}" 2>/dev/null || true
+    fi
 else
-    # Archive tool_offsets.cfg safely in unified backup directory
+    # Archive or preserve tool_offsets.cfg safely
     archive_offsets() {
         local target="$1"
         if [ -f "${target}" ] && [ ! -L "${target}" ]; then
@@ -372,7 +409,7 @@ else
                 mv "${target}" "${ARCHIVE_CFG}"
                 echo -e "${GREEN}[✔] Đã di chuyển và lưu trữ ${target} -> ${ARCHIVE_CFG}${NC}"
             else
-                echo -e "${YELLOW}[+] Bảo tồn ${target} (--keep-data enabled).${NC}"
+                echo -e "${YELLOW}[+] Bảo tồn dữ liệu toạ độ: ${target} (bảo toàn dữ liệu mặc định/--keep-data).${NC}"
             fi
         fi
     }
@@ -381,6 +418,11 @@ else
     if [ "${OFFSETS_CFG}" != "${ROOT_OFFSETS_CFG}" ]; then
         archive_offsets "${ROOT_OFFSETS_CFG}"
     fi
+    for legacy_off in "${TARGET_CONFIG_DIR}/tool_offsets.cfg" "${CONFIG_DIR}/tool_offsets.cfg"; do
+        if [ "${legacy_off}" != "${OFFSETS_CFG}" ] && [ "${legacy_off}" != "${ROOT_OFFSETS_CFG}" ]; then
+            archive_offsets "${legacy_off}"
+        fi
+    done
 fi
 
 # Remove persistent manifest

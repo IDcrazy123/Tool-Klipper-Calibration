@@ -46,11 +46,42 @@ class DummyGCodeCommand:
 class DummyToolchanger:
     def __init__(self, tools=(0, 1)):
         self.tool_numbers = list(tools)
+        self.tools = {t: MagicMock() for t in tools}
+        self.status = "ready"
+        self.tool_number = 0
+        self.active_tool = self.tools.get(0)
+
+    def get_tool_by_number(self, num):
+        return self.tools.get(num)
+
+    def initialize_to_tool(self, tool):
+        self.status = "ready"
+        if isinstance(tool, int):
+            self.tool_number = tool
+        else:
+            self.active_tool = tool
+            for num, obj in self.tools.items():
+                if obj == tool:
+                    self.tool_number = num
+                    break
+
+
+class DummyExtruder:
+    def __init__(self, name="extruder", temp=22.0):
+        self.name = name
+        self.temp = temp
+
+    def get_status(self, eventtime=0):
+        return {"temperature": self.temp}
 
 
 class DummyToolhead:
     def __init__(self):
         self.pos = [150.0, 150.0, 35.0, 0.0]
+        self._extruder = DummyExtruder("extruder", 22.0)
+
+    def get_extruder(self):
+        return self._extruder
 
     def get_position(self):
         return list(self.pos)
@@ -136,6 +167,8 @@ class DummyPrinter:
             "toolchanger": self.toolchanger,
             "gcode_move": self.gcode_move,
             "gcode_macro": self.gcode_macro,
+            "extruder": self.toolhead.get_extruder(),
+            "extruder1": DummyExtruder("extruder1", 22.0),
         }
 
     def get_reactor(self):
@@ -733,8 +766,8 @@ class TestCalibrationCycle(unittest.TestCase):
         forced_calibrator = ToolCalibrator(forced_config)
         self.assertEqual(forced_calibrator.navigator.safe_z, 25.0)
 
-    def test_cartographer_speedup_defaults_to_zero_ignoring_saved_stations(self):
-        """When safe_z is omitted with Cartographer Touch, safe_z must default to 0.0 even if station data exists."""
+    def test_cartographer_respects_saved_station_safe_z(self):
+        """When safe_z is omitted with Cartographer Touch, safe_z loads from saved stations to preserve motion invariants."""
         # 1. Pre-seed tool_offsets.cfg with camera station safe_z = 70.0
         with open(self.config_path, "w") as f:
             f.write("[tool_calibrator_station camera]\nsafe_z = 70.0\n")
@@ -746,10 +779,11 @@ class TestCalibrationCycle(unittest.TestCase):
         carto_config = DummyConfig(self.printer, carto_config_data)
 
         calibrator = ToolCalibrator(carto_config)
-        self.assertEqual(calibrator.navigator.safe_z, 0.0)
+        self.assertEqual(calibrator.navigator.safe_z, 70.0)
+        self.assertTrue(calibrator.navigator.carto_speedup)
 
     def test_cartographer_uses_declared_safe_z(self):
-        """When Cartographer has explicit safe_z declared, that exact number is used."""
+        """When Cartographer has explicit safe_z declared, that exact number is used and speedup disabled."""
         carto_config_data = dict(self.config_data)
         carto_config_data["safe_z"] = 18.5
         carto_config_data["z_backend"] = "cartographer"
@@ -757,6 +791,35 @@ class TestCalibrationCycle(unittest.TestCase):
 
         calibrator = ToolCalibrator(carto_config)
         self.assertEqual(calibrator.navigator.safe_z, 18.5)
+        self.assertFalse(calibrator.navigator.carto_speedup)
+
+    def test_cartographer_speedup_skips_safe_z_lift_in_execute_z_calibration(self):
+        """Cartographer speed-up skips move_to_safe_z during Z-probe sequence, but declared safe_z lifts."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = None
+        carto_config_data["z_backend"] = "cartographer"
+        carto_config = DummyConfig(self.printer, carto_config_data)
+        calibrator = ToolCalibrator(carto_config)
+
+        calibrator.navigator.move_to_safe_z = MagicMock()
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05})
+        gcmd = DummyGCodeCommand({})
+        tool_offsets = {}
+        calibrator._execute_z_calibration(0, self.toolhead, None, gcmd, {}, tool_offsets)
+        # speed-up mode skips move_to_safe_z during Z probe sequence
+        calibrator.navigator.move_to_safe_z.assert_not_called()
+
+        # When safe_z is declared, move_to_safe_z is called
+        carto_declared_data = dict(self.config_data)
+        carto_declared_data["safe_z"] = 25.0
+        carto_declared_data["z_backend"] = "cartographer"
+        printer2 = DummyPrinter(self.toolhead, DummyGCode(), self.toolchanger)
+        declared_calibrator = ToolCalibrator(DummyConfig(printer2, carto_declared_data))
+        declared_calibrator.navigator.move_to_safe_z = MagicMock()
+        declared_calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05})
+        declared_calibrator._execute_z_calibration(0, self.toolhead, None, gcmd, {}, tool_offsets)
+        # When safe_z is declared, move_to_safe_z is called on entry and depart (2 times)
+        self.assertEqual(declared_calibrator.navigator.move_to_safe_z.call_count, 2)
 
     def test_config_manager_backups_strictly_inside_tool_calibrator(self):
         """ConfigManager must store backups inside <config_dir>/backups/calibration_offsets."""
@@ -871,11 +934,29 @@ class TestCalibrationCycle(unittest.TestCase):
         calibrator = ToolCalibrator(self.config)
         # Start at low Z
         self.toolhead.pos = [100.0, 100.0, 3.0, 0.0]
-        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 0, "DRY_RUN": 1})
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "DRY_RUN": 1})
 
         calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
         # Must have lifted to at least Safe_Z (35.0)
         self.assertGreaterEqual(self.toolhead.pos[2], 35.0)
+
+    def test_reject_when_neither_xy_nor_z_selected(self):
+        """CALIBRATE_XY=0 and CALIBRATE_Z=0 must be rejected early without performing moves or tool changes."""
+        calibrator = ToolCalibrator(self.config)
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 0})
+        with self.assertRaises(Exception) as ctx:
+            calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+        self.assertIn("neither xy nor z calibration was selected", str(ctx.exception).lower())
+
+    def test_default_config_path_no_name_error(self):
+        """When offset_config_path is omitted, default path resolution must not raise NameError."""
+        cfg_data = dict(self.config_data)
+        cfg_data.pop("offset_config_path", None)
+        cfg_data.pop("offsets_config_path", None)
+        cfg = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(cfg)
+        self.assertTrue(os.path.isabs(calibrator.config_manager.config_path))
+        self.assertIn("tool_offsets.cfg", calibrator.config_manager.config_path)
 
     def test_no_duplicate_macros_with_python_commands(self):
         """Verify macros in tool_calibrator.cfg do not collide with Python registered commands."""

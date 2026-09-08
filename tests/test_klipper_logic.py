@@ -85,6 +85,42 @@ class TestConfigManager(unittest.TestCase):
         with self.assertRaises(ConfigManagerException):
             self.manager.rollback("non_existent_backup.calib_backup_9999")
 
+    def test_backup_sort_mixed_directories_by_timestamp(self):
+        """Backups from multiple directories must sort by timestamp/mtime rather than path prefix."""
+        # Create two directories: dir_a (alphabetically first) and dir_z (alphabetically last)
+        dir_a = os.path.join(self.test_dir, "aaa_new_dir")
+        dir_z = os.path.join(self.test_dir, "zzz_legacy_dir")
+        os.makedirs(dir_a, exist_ok=True)
+        os.makedirs(dir_z, exist_ok=True)
+
+        # File in dir_a with NEWER timestamp
+        b_new = os.path.join(dir_a, "tool_offsets.cfg.calib_backup_20260908_180000")
+        # File in dir_z with OLDER timestamp
+        b_old = os.path.join(dir_z, "tool_offsets.cfg.calib_backup_20260908_120000")
+
+        with open(b_new, "w", encoding="utf-8") as f:
+            f.write("[tool_offsets]\nt1_x: 0.888\n")
+        with open(b_old, "w", encoding="utf-8") as f:
+            f.write("[tool_offsets]\nt1_x: 0.111\n")
+
+        # Mock glob/discovery across both directories
+        with unittest.mock.patch("glob.glob") as mock_glob:
+            # Return old then new in random/reversed order
+            mock_glob.side_effect = lambda pat: [b_old, b_new] if "calib_backup_" in pat else []
+
+            backups = self.manager._get_all_backups()
+            # Sorted oldest first, newest last
+            self.assertEqual(len(backups), 2)
+            self.assertEqual(backups[0], b_old)
+            self.assertEqual(backups[1], b_new)
+
+            # Rollback without args must restore b_new (the latest timestamp)
+            restored = self.manager.rollback()
+            self.assertEqual(restored, b_new)
+            with open(self.cfg_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("t1_x: 0.888", content)
+
     def test_save_and_load_station_section(self):
         """Verify saving and loading custom sections like [tool_calibrator_station camera]."""
         station_data = {

@@ -129,6 +129,9 @@ class DummyConfig:
     def has_section(self, section):
         return False
 
+    def error(self, msg):
+        return RuntimeError(msg)
+
 
 class TestCartographerBackend(unittest.TestCase):
     def setUp(self):
@@ -278,17 +281,27 @@ kinematics: corexy
         self.assertEqual(backend.touch_home_gcode, "SCANNER_TOUCH")
 
     def test_build_command_str_with_parameters(self):
-        """Official Cartographer SPEED, TOLERANCE, and RETRIES parameters should be appended."""
+        """Cartographer Touch appends EXPERIMENTAL_RANDOM_RADIUS to HOME and MAX_SAMPLES to PROBE."""
         cfg = DummyConfig(self.printer, {
-            "touch_probe_gcode": "CARTOGRAPHER_TOUCH",
-            "carto_touch_speed": 2.5,
-            "carto_touch_tolerance": 0.0080,
-            "carto_touch_retries": 5,
+            "touch_home_gcode": "CARTOGRAPHER_TOUCH_HOME",
+            "touch_probe_gcode": "CARTOGRAPHER_TOUCH_PROBE",
+            "carto_random_radius": 2.5,
+            "carto_max_samples": 5,
             "touch_model_config_path": self.printer_cfg_path
         })
         backend = CartographerBackend(cfg)
-        expected = "CARTOGRAPHER_TOUCH SPEED=2.5 TOLERANCE=0.0080 RETRIES=5"
-        self.assertEqual(backend.touch_probe_gcode, expected)
+        self.assertEqual(backend.touch_home_gcode, "CARTOGRAPHER_TOUCH_HOME EXPERIMENTAL_RANDOM_RADIUS=2.50")
+        self.assertEqual(backend.touch_probe_gcode, "CARTOGRAPHER_TOUCH_PROBE MAX_SAMPLES=5")
+
+    def test_unsupported_carto_options_rejected(self):
+        """Unsupported speed/tolerance options are rejected with configuration error."""
+        cfg = DummyConfig(self.printer, {
+            "carto_touch_speed": 3.0,
+            "touch_model_config_path": self.printer_cfg_path
+        })
+        with self.assertRaises(Exception) as ctx:
+            CartographerBackend(cfg)
+        self.assertIn("not supported", str(ctx.exception).lower())
 
     def test_get_probe_xy_with_bed_mesh_zero_ref_pos(self):
         """When bed_mesh provides zero_ref_pos, get_probe_xy should prioritize it."""

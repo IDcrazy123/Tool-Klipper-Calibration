@@ -38,19 +38,20 @@ class SafeNavigator:
             self.z_speed /= 60.0
 
         # Global Safe Z Clearance Altitude (configured_safe_z is None if omitted/commented out)
-        # safe_z=0 allows operators to bypass safe Z elevation when unobstructed trajectories are verified.
-        # Smart default: when safe_z is omitted/commented out, Cartographer Touch defaults to speed-up mode (0.0mm).
-        # If safe_z is explicitly configured with a number, that declared number is strictly respected.
+        # Cartographer Speed-Up Mode: When safe_z is omitted/commented out, Cartographer Z-probing
+        # executes in fast mode without redundant high-Z lifts between touch probes.
+        # Camera station, station departure, and toolchange safe clearance remain protected at station_safe_z.
+        # If safe_z is explicitly configured with a number, that declared number is strictly respected everywhere.
         configured_sz = config.getfloat("safe_z", None, minval=0.0)
         self.configured_safe_z = configured_sz
-        z_backend = "cartographer"
-        if hasattr(config, "get"):
-            z_backend = str(config.get("z_backend", "cartographer") or "cartographer").strip().lower()
+        self.z_backend_type = config.get("z_backend", "switch").strip().lower()
+        self.force_safe_z = config.getboolean("force_safe_z", False) if hasattr(config, "getboolean") else bool(config.get("force_safe_z", False))
 
-        if configured_sz is not None:
+        # Cartographer speed-up mode applies strictly to local Cartographer Z measurement
+        self.carto_speedup = (self.z_backend_type == "cartographer" and self.configured_safe_z is None and not self.force_safe_z)
+
+        if configured_sz is not None and configured_sz > 0.0:
             self.safe_z = configured_sz
-        elif z_backend == "cartographer":
-            self.safe_z = 0.0
         else:
             self.safe_z = 35.0
 
@@ -73,6 +74,7 @@ class SafeNavigator:
         self.switch_target_y = sw_ty if sw_ty is not None else config.getfloat("zswitch_y_pos", None)
         sw_tz = config.getfloat("switch_target_z", None)
         self.switch_target_z = sw_tz if sw_tz is not None else config.getfloat("zswitch_z_pos", None)
+        self.switch_approach_z = config.getfloat("switch_approach_z", None)
 
     def get_axis_limits(self) -> Dict[str, Tuple[float, float]]:
         """
@@ -214,18 +216,16 @@ class SafeNavigator:
         Elevates Z vertically to safe_z if currently lower.
         Clamps safe_z against the user's physical frame max_z to avoid Move out of range.
         Always waits for moves to finish before returning.
-        If safe_z <= 0.0, vertical elevation is completely bypassed.
+        Enforces a minimum safe height of 10.0mm if safe_z <= 0 to guarantee motion safety.
         """
-        if self.safe_z <= 0.0:
-            logger.info("Safe_Z is <= 0.0; skipping safe Z elevation.")
-            return
-
         toolhead.wait_moves()
         cur_pos = toolhead.get_position()
 
+        target_clearance = self.safe_z if self.safe_z > 0.0 else 10.0
+
         limits = self.get_axis_limits()
         max_z = limits["z"][1]
-        effective_safe_z = min(self.safe_z, max(limits["z"][0], max_z - 3.0))
+        effective_safe_z = min(target_clearance, max(limits["z"][0], max_z - 3.0))
 
         if cur_pos[2] < effective_safe_z:
             logger.info(f"Lifting Z from {cur_pos[2]:.2f}mm to Safe_Z ({effective_safe_z:.2f}mm)")
@@ -313,7 +313,12 @@ class SafeNavigator:
         toolhead.wait_moves()
 
         # Step 3: Lower Z to switch clearance height
-        target_z = (self.switch_target_z + z_clearance) if self.switch_target_z is not None else max(5.0, self.safe_z)
+        if self.switch_approach_z is not None:
+            target_z = self.switch_approach_z
+        elif self.switch_target_z is not None:
+            target_z = self.switch_target_z + z_clearance
+        else:
+            target_z = max(5.0, self.safe_z)
         toolhead.manual_move([None, None, target_z], self.z_speed)
         toolhead.wait_moves()
 

@@ -26,9 +26,24 @@ class CartographerBackend(BaseZBackend):
         super().__init__(config)
         self.configured_touch_home_gcode = config.get("touch_home_gcode", None)
         self.configured_touch_probe_gcode = config.get("touch_probe_gcode", None)
-        self.touch_speed = config.getfloat("carto_touch_speed", None, above=0.0)
-        self.touch_retries = config.getint("carto_touch_retries", None, minval=1)
-        self.touch_tolerance = config.getfloat("carto_touch_tolerance", None, above=0.0)
+        self.random_radius = config.getfloat("carto_random_radius", None, above=0.0)
+        self.max_samples = config.getint("carto_max_samples", None, minval=1, maxval=20)
+        if self.max_samples is None:
+            s = config.getint("samples", None, minval=1, maxval=20)
+            self.max_samples = s if s is not None else config.getint("carto_touch_retries", None, minval=1, maxval=20)
+
+        # Reject options unsupported by the official Cartographer Touch macro API
+        unsupported = []
+        if config.get("carto_touch_speed", None) is not None:
+            unsupported.append("carto_touch_speed")
+        if config.get("carto_touch_tolerance", None) is not None:
+            unsupported.append("carto_touch_tolerance")
+        if unsupported:
+            raise config.error(
+                f"[cartographer_backend] Option(s) {unsupported} are not supported by the upstream Cartographer Touch macro API. "
+                "Cartographer Touch obtains speed and sensitivity thresholds directly from the [cartographer] or [scanner] section in printer.cfg."
+            )
+
         self.probe_x = config.getfloat("carto_probe_x", None)
         self.probe_y = config.getfloat("carto_probe_y", None)
         self.max_touch_temp = config.getfloat("carto_max_touch_temp", 150.0, above=50.0, maxval=200.0)
@@ -71,15 +86,18 @@ class CartographerBackend(BaseZBackend):
                     return fb
         return primary
 
-    def _build_command_str(self, base_cmd: str) -> str:
-        """Appends official Cartographer SPEED, TOLERANCE, RETRIES parameters if configured."""
+    def _build_home_cmd(self, base_cmd: str) -> str:
+        """Appends Cartographer EXPERIMENTAL_RANDOM_RADIUS parameter if configured."""
         parts = [base_cmd]
-        if self.touch_speed is not None and "SPEED=" not in base_cmd:
-            parts.append(f"SPEED={self.touch_speed:.1f}")
-        if self.touch_tolerance is not None and "TOLERANCE=" not in base_cmd:
-            parts.append(f"TOLERANCE={self.touch_tolerance:.4f}")
-        if self.touch_retries is not None and "RETRIES=" not in base_cmd:
-            parts.append(f"RETRIES={self.touch_retries}")
+        if self.random_radius is not None and "EXPERIMENTAL_RANDOM_RADIUS=" not in base_cmd:
+            parts.append(f"EXPERIMENTAL_RANDOM_RADIUS={self.random_radius:.2f}")
+        return " ".join(parts)
+
+    def _build_probe_cmd(self, base_cmd: str) -> str:
+        """Appends Cartographer MAX_SAMPLES parameter if configured."""
+        parts = [base_cmd]
+        if self.max_samples is not None and "MAX_SAMPLES=" not in base_cmd:
+            parts.append(f"MAX_SAMPLES={self.max_samples}")
         return " ".join(parts)
 
     @property
@@ -89,7 +107,7 @@ class CartographerBackend(BaseZBackend):
             "CARTOGRAPHER_TOUCH_HOME",
             ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
         )
-        return self._build_command_str(raw)
+        return self._build_home_cmd(raw)
 
     @property
     def touch_probe_gcode(self) -> str:
@@ -98,7 +116,7 @@ class CartographerBackend(BaseZBackend):
             "CARTOGRAPHER_TOUCH_PROBE",
             ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH_PROBE", "SCANNER_TOUCH", "CARTOGRAPHER_TOUCH_HOME")
         )
-        return self._build_command_str(raw)
+        return self._build_probe_cmd(raw)
 
     def _load_touch_model_offset(self) -> float:
         """Parses saved touch-model z_offset from the #*# auto-save section."""

@@ -30,9 +30,25 @@ class ConfigManager:
         self.config_path = os.path.expanduser(config_file_path)
         self.max_backups = 10
         self.config_dir = os.path.dirname(self.config_path)
+        os.makedirs(self.config_dir, exist_ok=True)
         # Dedicated consolidated backup directory strictly inside tool_calibrator:
         # <tool_calibrator_dir>/backups/calibration_offsets
         self.backup_dir = os.path.join(self.config_dir, "backups", "calibration_offsets")
+
+    @staticmethod
+    def _backup_sort_key(filepath: str) -> tuple:
+        """
+        Extracts timestamp from backup filename for chronological ordering across directories,
+        falling back to file modification time if timestamp pattern is absent.
+        """
+        filename = os.path.basename(filepath)
+        match = re.search(r'\.calib_backup_(\d{8}_\d{6}(?:_\d+)?)', filename)
+        if match:
+            return (0, match.group(1))
+        try:
+            return (1, os.path.getmtime(filepath))
+        except OSError:
+            return (2, filepath)
 
     def create_backup(self) -> Optional[str]:
         """
@@ -56,15 +72,19 @@ class ConfigManager:
             logger.error(f"Failed to create configuration backup: {ex}")
             raise ConfigManagerException(f"Backup creation failed: {ex}")
 
-    def _rotate_backups(self) -> None:
-        """Keeps the most recent N backups in backup dir and deletes older ones."""
+    def _get_all_backups(self) -> List[str]:
+        """Discovers all available backup files across modern and legacy directories, sorted oldest first, newest last."""
         fn = os.path.basename(self.config_path)
         pattern_new = os.path.join(self.backup_dir, f"{fn}.calib_backup_*")
         pattern_legacy_tc = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
         pattern_legacy_parent = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
         pattern_legacy_flat = f"{self.config_path}.calib_backup_*"
         all_backups = glob.glob(pattern_new) + glob.glob(pattern_legacy_tc) + glob.glob(pattern_legacy_parent) + glob.glob(pattern_legacy_flat)
-        backups = sorted(set(all_backups))
+        return sorted(set(all_backups), key=self._backup_sort_key)
+
+    def _rotate_backups(self) -> None:
+        """Keeps the most recent N backups in backup dir and deletes older ones."""
+        backups = self._get_all_backups()
         if len(backups) > self.max_backups:
             to_remove = backups[:-self.max_backups]
             for old_backup in to_remove:
@@ -178,6 +198,7 @@ class ConfigManager:
 
     def _write_lines_atomically(self, lines: List[str]) -> None:
         """Atomically writes lines to self.config_path via temporary file replacement."""
+        os.makedirs(self.config_dir, exist_ok=True)
         tmp_path = f"{self.config_path}.tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -259,13 +280,7 @@ class ConfigManager:
         Returns:
             str: Name of the restored backup file.
         """
-        fn = os.path.basename(self.config_path)
-        pattern_new = os.path.join(self.backup_dir, f"{fn}.calib_backup_*")
-        pattern_legacy_tc = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
-        pattern_legacy_parent = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
-        pattern_legacy_flat = f"{self.config_path}.calib_backup_*"
-        all_backups = glob.glob(pattern_new) + glob.glob(pattern_legacy_tc) + glob.glob(pattern_legacy_parent) + glob.glob(pattern_legacy_flat)
-        backups = sorted(set(all_backups))
+        backups = self._get_all_backups()
 
         if target_backup:
             # Check direct path, inside tool_calibrator/backups, legacy backup dir, or config dir

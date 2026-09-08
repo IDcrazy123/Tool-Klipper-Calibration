@@ -303,11 +303,17 @@ if [ -L "${TARGET}" ]; then
     rm -f "${TARGET}"
     cp "${SOURCE}" "${TARGET}"
     chmod 664 "${TARGET}"
+    if [ -n "${CONFIG_SUBDIR}" ]; then
+        sed -i "s|offsets_config_path:.*tool_calibrator/tool_offsets.cfg|offsets_config_path: ~/printer_data/config/${CONFIG_SUBDIR}/tool_calibrator/tool_offsets.cfg|" "${TARGET}" 2>/dev/null || true
+    fi
     echo "FILE=${TARGET}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}[✔] Đã tạo file cấu hình có thể ghi: ${TARGET}${NC}"
 elif [ ! -f "${TARGET}" ]; then
     cp "${SOURCE}" "${TARGET}"
     chmod 664 "${TARGET}"
+    if [ -n "${CONFIG_SUBDIR}" ]; then
+        sed -i "s|offsets_config_path:.*tool_calibrator/tool_offsets.cfg|offsets_config_path: ~/printer_data/config/${CONFIG_SUBDIR}/tool_calibrator/tool_offsets.cfg|" "${TARGET}" 2>/dev/null || true
+    fi
     echo "FILE=${TARGET}" >> "${JOURNAL_FILE}"
     echo -e "${GREEN}[✔] Đã tạo file cấu hình: ${TARGET}${NC}"
 else
@@ -315,14 +321,36 @@ else
     echo -e "${GREEN}[✔] Giữ nguyên file cấu hình hiện có của người dùng: ${TARGET}${NC}"
 fi
 
-# Remove any obsolete legacy macro files if they exist in config
-for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
-    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" "${CONFIG_DIR}/${stale}" 2>/dev/null || true
+# Define standard offsets configuration path
+OFFSETS_CFG="${MACRO_DIR}/tool_offsets.cfg"
+OFF_PATH="${OFFSETS_CFG}"
+
+# Safe migration: if legacy loose tool_offsets.cfg exists, backup and migrate to ${OFF_PATH}
+for legacy_offsets in "${TARGET_CONFIG_DIR}/tool_offsets.cfg" "${CONFIG_DIR}/tool_offsets.cfg"; do
+    if [ -f "${legacy_offsets}" ] && [ ! -L "${legacy_offsets}" ] && [ "${legacy_offsets}" != "${OFF_PATH}" ]; then
+        echo -e "${CYAN}[+] Tìm thấy file toạ độ cũ: ${legacy_offsets}${NC}"
+        BK_OFF_DIR="${MACRO_DIR}/backups/calibration_offsets"
+        mkdir -p "${BK_OFF_DIR}"
+        TS="$(date +%Y%m%d_%H%M%S)"
+        cp -a "${legacy_offsets}" "${BK_OFF_DIR}/tool_offsets.cfg.legacy_migrated_${TS}"
+        if [ ! -f "${OFF_PATH}" ]; then
+            echo -e "${GREEN}[+] Di chuyển toạ độ đã học sang vị trí chuẩn: ${OFF_PATH}${NC}"
+            cp -a "${legacy_offsets}" "${OFF_PATH}"
+            echo "FILE=${OFF_PATH}" >> "${JOURNAL_FILE}"
+        fi
+        rm -f "${legacy_offsets}"
+        echo -e "${GREEN}[✔] Đã sao lưu và bảo tồn dữ liệu toạ độ cũ thành công.${NC}"
+    fi
 done
 
 # Clean up obsolete include lines from printer.cfg to prevent missing-file startup crashes
 PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
 if [ -f "${PRINTER_CFG}" ]; then
+    # Transactional backup for printer.cfg before modification
+    PRINTER_CFG_BAK="${PRINTER_CFG}.tkc_bak_$(date +%Y%m%d_%H%M%S)"
+    cp -a "${PRINTER_CFG}" "${PRINTER_CFG_BAK}"
+    echo "BACKUP=${PRINTER_CFG_BAK}:${PRINTER_CFG}" >> "${JOURNAL_FILE}"
+
     python3 -c "
 import re
 try:
@@ -343,10 +371,18 @@ except Exception as ex:
     done
 fi
 
-# Clean up any loose duplicate files outside in root config directory
-for loose in "tool_calibrator.cfg" "tool_offsets.cfg"; do
-    rm -f "${TARGET_CONFIG_DIR}/${loose}" "${CONFIG_DIR}/${loose}" 2>/dev/null || true
+# Remove any obsolete legacy macro template files if they exist (never delete tool_offsets.cfg here!)
+for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" "${CONFIG_DIR}/${stale}" 2>/dev/null || true
 done
+
+# Clean up loose duplicate tool_calibrator.cfg outside in root config directory if different from target
+if [ "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" != "${TARGET}" ]; then
+    rm -f "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" 2>/dev/null || true
+fi
+if [ "${CONFIG_DIR}/tool_calibrator.cfg" != "${TARGET}" ]; then
+    rm -f "${CONFIG_DIR}/tool_calibrator.cfg" 2>/dev/null || true
+fi
 
 # Consolidate all backups strictly into ${MACRO_DIR}/backups/ (remove any legacy outside backup folders)
 for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/tool_calibrator_backups"; do
@@ -360,7 +396,6 @@ for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/t
 done
 
 # Ensure tool_offsets.cfg placeholder exists inside tool_calibrator directory
-OFF_PATH="${MACRO_DIR}/tool_offsets.cfg"
 if [ ! -f "${OFF_PATH}" ]; then
     echo -e "${CYAN}[+] Khởi tạo tệp cấu hình ban đầu: ${OFF_PATH}...${NC}"
     cat > "${OFF_PATH}" << 'EOF'
@@ -375,15 +410,13 @@ fi
 # 5. Moonraker Allowed Services (ASVC)
 echo -e "\n${BLUE}[4/6] Cấu hình Moonraker Allowed Services (ASVC)...${NC}"
 
-if [ "${SERVICE_MODE}" = "system" ]; then
-    ASVC_FILE="${HOME}/printer_data/moonraker.asvc"
-    if [ -d "${HOME}/printer_data" ]; then
-        [ ! -f "${ASVC_FILE}" ] && touch "${ASVC_FILE}"
-        if ! grep -q "^tool_calibrator$" "${ASVC_FILE}" 2>/dev/null; then
-            [ -s "${ASVC_FILE}" ] && echo "" >> "${ASVC_FILE}"
-            echo "tool_calibrator" >> "${ASVC_FILE}"
-            echo -e "${GREEN}[✔] Đã thêm 'tool_calibrator' vào ${ASVC_FILE}${NC}"
-        fi
+ASVC_FILE="${HOME}/printer_data/moonraker.asvc"
+if [ -d "${HOME}/printer_data" ]; then
+    [ ! -f "${ASVC_FILE}" ] && touch "${ASVC_FILE}"
+    if ! grep -q "^tool_calibrator$" "${ASVC_FILE}" 2>/dev/null; then
+        [ -s "${ASVC_FILE}" ] && echo "" >> "${ASVC_FILE}"
+        echo "tool_calibrator" >> "${ASVC_FILE}"
+        echo -e "${GREEN}[✔] Đã thêm 'tool_calibrator' vào ${ASVC_FILE}${NC}"
     fi
 fi
 
@@ -577,9 +610,9 @@ origin: https://github.com/IDcrazy123/Tool-Klipper-Calibration.git
 primary_branch: main
 virtualenv: ${VENV_DIR}
 requirements: server/requirements.txt
-install_script: scripts/update_hook.sh
 is_system_service: False
 managed_services:
+    tool_calibrator
     klipper
 info_tags:
     desc=Tool-Klipper-Calibration Automated Vision & Z Alignment (User Service)

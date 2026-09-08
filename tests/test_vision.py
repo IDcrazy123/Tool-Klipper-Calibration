@@ -513,6 +513,16 @@ class TestServerEndpoints(unittest.TestCase):
         resp_matrix = client.post("/set_matrix", json={"matrix": [[1, 0, 0], [0, 1, 0]]})
         self.assertEqual(resp_matrix.status_code, 403)
 
+        # 2b. Client B attempts detection / offset calculation without token -> 403
+        resp_detect = client.post("/detect_nozzle", json={})
+        self.assertEqual(resp_detect.status_code, 403)
+
+        resp_offset = client.post("/calculate_offset", json={"center_uv": [640, 360]})
+        self.assertEqual(resp_offset.status_code, 403)
+
+        resp_delta = client.post("/calculate_tool_delta", json={"tool_id": 1, "target_uv": [640, 360]})
+        self.assertEqual(resp_delta.status_code, 403)
+
         # 3. Release lock without token -> 403
         resp_rel_empty = client.post("/release_lock", json={})
         self.assertEqual(resp_rel_empty.status_code, 403)
@@ -528,6 +538,68 @@ class TestServerEndpoints(unittest.TestCase):
         # 6. Client A releases lock with token -> 200
         resp_rel_ok = client.post("/release_lock", json={"session_id": "client_A"})
         self.assertEqual(resp_rel_ok.status_code, 200)
+
+    def test_detect_nozzle_does_not_mutate_global_detector(self):
+        """POST /detect_nozzle with threshold overrides must NOT mutate global detector instance."""
+        from server.tool_calibrator_server import app, detector, grabber
+        client = app.test_client()
+
+        orig_conf = detector.min_confidence
+        orig_min_r = detector.min_radius
+        orig_max_r = detector.max_radius
+
+        dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        with unittest.mock.patch.object(grabber, "grab_frame", return_value=(dummy_frame, None)):
+            # Call /detect_nozzle with custom overrides
+            with unittest.mock.patch.object(detector, "detect") as mock_detect:
+                mock_res = MagicMock()
+                mock_res.found = False
+                mock_res.center = None
+                mock_res.radius = 0.0
+                mock_res.confidence = 0.0
+                mock_res.diagnostics = {}
+                mock_detect.return_value = mock_res
+
+                client.post("/detect_nozzle", json={
+                    "min_confidence": 0.99,
+                    "min_radius": 25.0,
+                    "max_radius": 80.0
+                })
+
+            # Assert detector instance attributes remained unchanged
+            self.assertEqual(detector.min_confidence, orig_conf)
+            self.assertEqual(detector.min_radius, orig_min_r)
+            self.assertEqual(detector.max_radius, orig_max_r)
+
+            # Assert detect was called with kwargs overrides
+            self.assertTrue(mock_detect.called)
+            kwargs = mock_detect.call_args[1]
+            self.assertEqual(kwargs.get("min_confidence"), 0.99)
+            self.assertEqual(kwargs.get("min_radius"), 25.0)
+            self.assertEqual(kwargs.get("max_radius"), 80.0)
+
+    def test_solve_matrix_api_contract_points_and_calibration_points(self):
+        """POST /solve_matrix must accept both 'points' (Klippy client) and 'calibration_points'."""
+        from server.tool_calibrator_server import app, solver
+        client = app.test_client()
+
+        dummy_pts = [
+            [[0.0, 0.0], [640.0, 360.0]],
+            [[1.0, 0.0], [740.0, 360.0]],
+            [[0.0, 1.0], [640.0, 460.0]],
+            [[1.0, 1.0], [740.0, 460.0]],
+        ]
+
+        with unittest.mock.patch.object(solver, "solve_matrix", return_value=True):
+            # 1. Payload with 'points' (contract sent by Klippy)
+            res1 = client.post("/solve_matrix", json={"points": dummy_pts})
+            self.assertEqual(res1.status_code, 200)
+            self.assertTrue(res1.get_json()["success"])
+
+            # 2. Payload with 'calibration_points' (legacy/alternative contract)
+            res2 = client.post("/solve_matrix", json={"calibration_points": dummy_pts})
+            self.assertEqual(res2.status_code, 200)
+            self.assertTrue(res2.get_json()["success"])
 
     def test_server_daemon_imports_and_typing_hints(self):
         """Verify server module imports cleanly with all typing hints (Tuple, Optional, Dict, Any)."""

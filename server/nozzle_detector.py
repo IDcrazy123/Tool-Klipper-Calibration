@@ -464,7 +464,13 @@ class NozzleDetector:
             key=lambda kp: math.hypot(kp.pt[0] - cx, kp.pt[1] - cy)
         )
 
-    def detect(self, frame: np.ndarray) -> DetectionResult:
+    def detect(
+        self,
+        frame: np.ndarray,
+        min_confidence: Optional[float] = None,
+        min_radius: Optional[float] = None,
+        max_radius: Optional[float] = None
+    ) -> DetectionResult:
         """
         Runs the multi-stage detection pipeline on the provided frame:
         1. Primary: Radial Edge-Curvature Gradient Invariance with Upper-Arc Symmetry.
@@ -541,10 +547,14 @@ class NozzleDetector:
             tier_mult = 1.0 if matched_tier == 1 else (0.88 if matched_tier == 2 else 0.70)
             dynamic_conf = round(float(np.clip(conf_val * tier_mult, 0.0, 0.99)), 3)
 
+            eff_min_r = self.min_radius if min_radius is None else float(min_radius)
+            eff_max_r = self.max_radius if max_radius is None else float(max_radius)
+            eff_min_conf = self.min_confidence if min_confidence is None else float(min_confidence)
+
             # Strict false-positive gating: texture, contrast/continuity, radius sanity, confidence floor
             if (lap_std < 0.5 or lap_std > 120.0 or contrast < 1.0 or continuity < 0.15
-                    or radius < self.min_radius or radius > self.max_radius
-                    or dynamic_conf < self.min_confidence):
+                    or radius < eff_min_r or radius > eff_max_r
+                    or dynamic_conf < eff_min_conf):
                 pt_x, pt_y = None, None
 
 

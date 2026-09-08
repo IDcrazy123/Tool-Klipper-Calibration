@@ -14,8 +14,8 @@ logger = logging.getLogger("tool_calibrator.switch_backend")
 
 class PinAdapterConfig:
     """
-    Adapter proxy providing 'pin' option to upstream tools_calibrate
-    when user configured 'switch_pin' in [tool_calibrator].
+    Adapter proxy providing 'pin', 'speed', and tolerance options to upstream tools_calibrate
+    when user configured 'switch_pin', 'probing_speed', etc. in [tool_calibrator].
     """
 
     def __init__(self, real_config, pin_value: str) -> None:
@@ -28,7 +28,51 @@ class PinAdapterConfig:
             if val is not None:
                 return val
             return self._pin_value
+        if option == "speed":
+            val = self._config.get("probing_speed", None)
+            if val is not None:
+                return val
+        if option == "lift_speed":
+            val = self._config.get("lift_speed", None)
+            if val is not None:
+                return val
+        if option in ("sample_retract_dist", "samples_retract_dist"):
+            val = self._config.get("samples_retract_dist", None)
+            if val is not None:
+                return val
+        if option == "samples_tolerance":
+            val = self._config.get("samples_tolerance", None)
+            if val is not None:
+                return val
         return self._config.get(option, default, **kwargs)
+
+    def getfloat(self, option: str, default: Any = None, **kwargs) -> Any:
+        if option == "speed":
+            val = self._config.getfloat("probing_speed", None)
+            if val is not None:
+                return val
+        if option == "lift_speed":
+            val = self._config.getfloat("lift_speed", None)
+            if val is not None:
+                return val
+        if option in ("sample_retract_dist", "samples_retract_dist"):
+            val = self._config.getfloat("samples_retract_dist", None)
+            if val is not None:
+                return val
+        if option == "samples_tolerance":
+            val = self._config.getfloat("samples_tolerance", None)
+            if val is not None:
+                return val
+        return self._config.getfloat(option, default, **kwargs)
+
+    def getint(self, option: str, default: Any = None, **kwargs) -> Any:
+        if option in ("samples", "switch_samples"):
+            val = self._config.getint("switch_samples", None)
+            if val is None:
+                val = self._config.getint("samples", None)
+            if val is not None:
+                return val
+        return self._config.getint(option, default, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._config, name)
@@ -48,6 +92,7 @@ class SwitchBackend(BaseZBackend):
         self.switch_pin = config.get("switch_pin", config.get("pin", None))
         self.probing_speed = config.getfloat("probing_speed", 3.0, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", 5.0, above=0.0)
+        self.samples_tolerance = config.getfloat("samples_tolerance", 0.05, above=0.0)
         self.samples_retract_dist = config.getfloat("samples_retract_dist", 2.0, above=0.0)
         self.probe = None
 

@@ -338,17 +338,20 @@ def detect_nozzle():
         timeout (float): Max seconds to wait for stable detection (default: 5.0).
         tolerance_px (float): Max pixel delta for consecutive stability (default: 1.5).
     """
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
+
     try:
         data = request.get_json(silent=True) or {}
         min_matches = int(data.get("min_matches", 1))
         timeout = float(data.get("timeout", 5.0))
         tolerance_px = float(data.get("tolerance_px", 1.5))
-        if "min_confidence" in data:
-            detector.min_confidence = float(data["min_confidence"])
-        if "min_radius" in data:
-            detector.min_radius = float(data["min_radius"])
-        if "max_radius" in data:
-            detector.max_radius = float(data["max_radius"])
+        override_conf = float(data["min_confidence"]) if "min_confidence" in data else None
+        override_min_r = float(data["min_radius"]) if "min_radius" in data else None
+        override_max_r = float(data["max_radius"]) if "max_radius" in data else None
 
         start_time = time.time()
         last_uv = None
@@ -368,7 +371,12 @@ def detect_nozzle():
             h, w = frame.shape[:2]
             solver.set_frame_center(w / 2.0, h / 2.0)
 
-            result = detector.detect(frame)
+            result = detector.detect(
+                frame,
+                min_confidence=override_conf,
+                min_radius=override_min_r,
+                max_radius=override_max_r
+            )
             status_text = f"FOUND (Tier {result.tier})" if result.found else "SEARCHING..."
             debugger.update_frame(result.annotated_frame, status_text)
 
@@ -463,7 +471,7 @@ def solve_matrix():
         return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
-        points = data.get("calibration_points", [])
+        points = data.get("calibration_points") or data.get("points") or []
         if not points:
             return jsonify({"success": False, "error": "No calibration points provided"}), 400
 
@@ -515,6 +523,11 @@ def calculate_offset():
     Calculates physical machine XY offset from detected nozzle center pixel coords:
     Payload: { "center_uv": [u, v] }
     """
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
         center_uv = data.get("center_uv")
@@ -555,6 +568,11 @@ def calculate_tool_delta():
         "tool": 1
     }
     """
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(force=True)
         ref_uv = data.get("reference_uv")

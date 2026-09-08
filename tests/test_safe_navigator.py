@@ -79,6 +79,9 @@ class DummyConfig:
             raise ValueError(f"{key} must be at most {maxval}")
         return val
 
+    def getboolean(self, key, default=False):
+        return bool(self.data.get(key, default))
+
 
 class TestSafeNavigator(unittest.TestCase):
     def setUp(self):
@@ -208,8 +211,8 @@ class TestSafeNavigator(unittest.TestCase):
         self.assertEqual(nav.switch_target_y, 340.0)
         self.assertEqual(nav.switch_target_z, 16.0)
 
-    def test_safe_z_zero_bypasses_elevation(self):
-        """When safe_z: 0.0 is configured, move_to_safe_z and depart_station must bypass elevation entirely."""
+    def test_safe_z_zero_clamps_to_safe_clearance(self):
+        """When safe_z: 0.0 is configured, safe_z must clamp to safe altitude (35.0mm) to prevent low-Z collisions."""
         zero_config = {
             "safe_z": 0.0,
             "travel_speed": 100.0,
@@ -217,21 +220,22 @@ class TestSafeNavigator(unittest.TestCase):
             "z_speed": 10.0,
         }
         nav = SafeNavigator(DummyConfig(self.printer, zero_config))
-        self.assertEqual(nav.safe_z, 0.0)
+        self.assertEqual(nav.safe_z, 35.0)
 
         # Toolhead is at Z=5.0
         self.toolhead.pos = [100.0, 100.0, 5.0, 0.0]
         nav.move_to_safe_z(self.toolhead, None)
 
-        # Must not have commanded any Z move
-        self.assertEqual(self.toolhead.pos[2], 5.0)
+        # Must have lifted to safe altitude
+        self.assertGreaterEqual(self.toolhead.pos[2], 10.0)
 
-        # depart_station must also not move Z
+        # depart_station must also lift to safe altitude
+        self.toolhead.pos = [100.0, 100.0, 5.0, 0.0]
         nav.depart_station(self.toolhead, None)
-        self.assertEqual(self.toolhead.pos[2], 5.0)
+        self.assertGreaterEqual(self.toolhead.pos[2], 10.0)
 
-    def test_cartographer_default_safe_z_is_zero(self):
-        """When safe_z is omitted, Cartographer Touch must default to 0.0 (speed-up mode)."""
+    def test_cartographer_default_safe_z_is_safe_default(self):
+        """When safe_z is omitted, Cartographer Touch enables carto_speedup while keeping safe_z=35.0mm for stations/toolchange."""
         carto_config = {
             "z_backend": "cartographer",
             "travel_speed": 100.0,
@@ -240,10 +244,11 @@ class TestSafeNavigator(unittest.TestCase):
         }
         nav = SafeNavigator(DummyConfig(self.printer, carto_config))
         self.assertIsNone(nav.configured_safe_z)
-        self.assertEqual(nav.safe_z, 0.0)
+        self.assertTrue(nav.carto_speedup)
+        self.assertEqual(nav.safe_z, 35.0)
 
     def test_switch_default_safe_z_is_35(self):
-        """When safe_z is omitted, Switch backend must default to 35.0mm."""
+        """When safe_z is omitted, Switch backend must default to 35.0mm and not enable carto_speedup."""
         switch_config = {
             "z_backend": "switch",
             "travel_speed": 100.0,
@@ -252,10 +257,11 @@ class TestSafeNavigator(unittest.TestCase):
         }
         nav = SafeNavigator(DummyConfig(self.printer, switch_config))
         self.assertIsNone(nav.configured_safe_z)
+        self.assertFalse(nav.carto_speedup)
         self.assertEqual(nav.safe_z, 35.0)
 
     def test_declared_safe_z_overrides_cartographer_default(self):
-        """When safe_z is declared, the declared number must be used over default 0.0."""
+        """When safe_z is declared, the declared number must be used and carto_speedup disabled."""
         carto_declared = {
             "z_backend": "cartographer",
             "safe_z": 22.5,
@@ -266,6 +272,7 @@ class TestSafeNavigator(unittest.TestCase):
         nav = SafeNavigator(DummyConfig(self.printer, carto_declared))
         self.assertEqual(nav.configured_safe_z, 22.5)
         self.assertEqual(nav.safe_z, 22.5)
+        self.assertFalse(nav.carto_speedup)
 
 
 if __name__ == "__main__":
