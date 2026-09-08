@@ -346,8 +346,10 @@ done
 # Clean up obsolete include lines from printer.cfg to prevent missing-file startup crashes
 PRINTER_CFG="${CONFIG_DIR}/printer.cfg"
 if [ -f "${PRINTER_CFG}" ]; then
-    # Transactional backup for printer.cfg before modification
-    PRINTER_CFG_BAK="${PRINTER_CFG}.tkc_bak_$(date +%Y%m%d_%H%M%S)"
+    # Transactional backup for printer.cfg before modification inside tool_calibrator/backups/system_configs
+    SYS_BK_DIR="${MACRO_DIR}/backups/system_configs"
+    mkdir -p "${SYS_BK_DIR}"
+    PRINTER_CFG_BAK="${SYS_BK_DIR}/printer.cfg.tkc_bak_$(date +%Y%m%d_%H%M%S)"
     cp -a "${PRINTER_CFG}" "${PRINTER_CFG_BAK}"
     echo "BACKUP=${PRINTER_CFG_BAK}:${PRINTER_CFG}" >> "${JOURNAL_FILE}"
 
@@ -392,6 +394,16 @@ for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/t
         cp -rn "${legacy_bk}"/* "${MACRO_DIR}/backups/" 2>/dev/null || true
         rm -rf "${legacy_bk}"
         echo -e "${GREEN}[✔] Đã dọn sạch thư mục sao lưu bên ngoài (${legacy_bk}).${NC}"
+    fi
+done
+
+# Consolidate any loose printer.cfg or system backup files from root config directory into system_configs/
+SYS_BK_DIR="${MACRO_DIR}/backups/system_configs"
+for loose_bak in "${CONFIG_DIR}"/printer.cfg.tkc_bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.tkc_bak_* "${CONFIG_DIR}"/printer.cfg.uninstall.bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.uninstall.bak_*; do
+    if [ -f "${loose_bak}" ] && [ ! -L "${loose_bak}" ]; then
+        mkdir -p "${SYS_BK_DIR}"
+        mv -f "${loose_bak}" "${SYS_BK_DIR}/" 2>/dev/null || true
+        echo -e "${GREEN}[✔] Đã gom bản sao lưu (${loose_bak##*/}) vào ${SYS_BK_DIR}/${NC}"
     fi
 done
 

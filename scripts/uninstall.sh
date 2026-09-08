@@ -291,6 +291,18 @@ for legacy_bk in "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/t
     fi
 done
 
+# Consolidate any loose printer.cfg or system backup files from root config directory into system_configs/
+if [ "${PURGE_BACKUPS}" = false ]; then
+    SYSTEM_BK_DIR="${TKC_BACKUP_DIR}/system_configs"
+    for loose_bak in "${CONFIG_DIR}"/printer.cfg.tkc_bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.tkc_bak_* "${CONFIG_DIR}"/printer.cfg.uninstall.bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.uninstall.bak_*; do
+        if [ -f "${loose_bak}" ] && [ ! -L "${loose_bak}" ]; then
+            mkdir -p "${SYSTEM_BK_DIR}"
+            mv -f "${loose_bak}" "${SYSTEM_BK_DIR}/" 2>/dev/null || true
+            echo -e "${GREEN}[✔] Đã chuyển bản sao lưu bên ngoài (${loose_bak##*/}) vào ${SYSTEM_BK_DIR}/${NC}"
+        fi
+    done
+fi
+
 # 3. Safely comment out TKC includes in printer.cfg to prevent Klipper startup crash
 echo -e "\n${BLUE}[3/5] Bảo vệ cấu hình Klipper (printer.cfg)...${NC}"
 if [ -f "${PRINTER_CFG}" ]; then
@@ -451,7 +463,7 @@ if [ "${PURGE_BACKUPS}" = true ]; then
     # 3. Remove loose legacy backup files
     for dir in "${TARGET_CONFIG_DIR}" "${CONFIG_DIR}"; do
         [ -d "${dir}" ] || continue
-        for bk_pat in "tool_offsets.cfg.calib_backup_*" "tool_offsets.cfg.archived_*" "tool_offsets.cfg.bak_*" "*.uninstall.bak_*" "*.bak_[0-9]*"; do
+        for bk_pat in "tool_offsets.cfg.calib_backup_*" "tool_offsets.cfg.archived_*" "tool_offsets.cfg.bak_*" "*.uninstall.bak_*" "*.tkc_bak_*" "*.bak_[0-9]*"; do
             for f in "${dir}"/${bk_pat}; do
                 if [ -f "${f}" ]; then
                     rm -f "${f}"
