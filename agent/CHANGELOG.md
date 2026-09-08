@@ -8,6 +8,17 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.25] - 2026-09-08
+### Fixed & Enhanced
+- **Eliminate Unnecessary Safe Z Elevation in Cartographer Speed-Up Mode**:
+  - In `CALIBRATE_TOOL_Z` / `CALIBRATE_TOOLS_Z` when Cartographer speed-up mode is active (`safe_z` omitted or `0.0`), bypassed global initial `move_to_safe_z` lift before touch homing and final `move_to_safe_z` park at completion. The gantry stays at bed level without lifting to 35mm.
+  - Skips redundant `move_to_safe_z` and redundant `T{tool}` commands when the tool is already selected on the toolhead.
+  - Skips `move_to_safe_z` when restoring the reference tool if the reference tool is already active.
+  - Preserved toolchange safe clearance (`move_to_safe_z`) during real physical tool switches (`current_active != tool_no`) across multiple tools.
+  - Added minimal bed clearance protection (2.0mm) during rapid lateral XY transit in Cartographer speed-up mode if starting at very low Z (<2.0mm).
+  - Enhanced `_get_active_tool_no` to read canonical `toolchanger.tool_number` and avoid parsing memory addresses of mocked objects.
+  - Direct check on `toolhead.get_extruder()` in `_check_camera_thermal_safety` when `tool_no=None`.
+
 ## [0.8.24] - 2026-09-08
 ### Added & Enhanced
 - **1. Smart Cartographer Touch Speed-Up Default (`safe_z: 0.0`)**:

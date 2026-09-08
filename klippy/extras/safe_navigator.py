@@ -48,7 +48,11 @@ class SafeNavigator:
         self.force_safe_z = config.getboolean("force_safe_z", False) if hasattr(config, "getboolean") else bool(config.get("force_safe_z", False))
 
         # Cartographer speed-up mode applies strictly to local Cartographer Z measurement
-        self.carto_speedup = (self.z_backend_type == "cartographer" and self.configured_safe_z is None and not self.force_safe_z)
+        self.carto_speedup = (
+            self.z_backend_type == "cartographer"
+            and (self.configured_safe_z is None or self.configured_safe_z <= 0.0)
+            and not self.force_safe_z
+        )
 
         if configured_sz is not None and configured_sz > 0.0:
             self.safe_z = configured_sz

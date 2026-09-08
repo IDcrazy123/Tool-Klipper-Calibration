@@ -861,20 +861,31 @@ class ToolCalibrator:
         """Determines the active tool number from toolchanger or toolhead extruder."""
         tc = self.printer.lookup_object("toolchanger", None)
         if tc is not None:
+            # 1. Primary check: toolchanger.tool_number
+            t_num = getattr(tc, "tool_number", None)
+            if t_num is not None and not hasattr(t_num, "_mock_name"):
+                try:
+                    val = int(t_num)
+                    if val >= 0:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+
+            # 2. Check tc.active_tool
             active_tool = getattr(tc, "active_tool", None)
-            if active_tool is not None:
+            if active_tool is not None and not hasattr(active_tool, "_mock_name"):
                 if isinstance(active_tool, int):
                     return active_tool
                 t_num = getattr(active_tool, "tool_number", None)
-                if t_num is not None:
+                if t_num is not None and not hasattr(t_num, "_mock_name"):
                     try:
                         return int(t_num)
                     except (ValueError, TypeError):
                         pass
-                name = getattr(active_tool, "name", "")
-                m = re.search(r"(\d+)", str(name))
-                if m:
-                    return int(m.group(1))
+                if hasattr(active_tool, "name") and isinstance(active_tool.name, str):
+                    m = re.search(r"(\d+)", active_tool.name)
+                    if m:
+                        return int(m.group(1))
 
         try:
             toolhead = self.printer.lookup_object("toolhead", None)
@@ -1002,10 +1013,17 @@ class ToolCalibrator:
 
     def _check_camera_thermal_safety(self, tool_no: Optional[int] = None, gcmd = None) -> None:
         """Ensures nozzle temperature does not exceed safe optical camera limit (100C) to prevent lens fogging/damage."""
-        if tool_no is None:
-            tool_no = self._get_active_tool_no()
-
         extruder = None
+
+        if tool_no is None:
+            try:
+                toolhead = self.printer.lookup_object("toolhead", None)
+                if toolhead is not None and hasattr(toolhead, "get_extruder"):
+                    extruder = toolhead.get_extruder()
+            except Exception:
+                pass
+            if extruder is None:
+                tool_no = self._get_active_tool_no()
         # 1. Inspect toolchanger object if present for custom extruder name
         tc = self.printer.lookup_object("toolchanger", None)
         if tc is not None:
@@ -1016,7 +1034,20 @@ class ToolCalibrator:
                 if ext_name:
                     extruder = self.printer.lookup_object(ext_name, None)
 
-        # 2. Check active toolhead extruder if tool is currently active
+        # 2. Check individual [tool <number>] object
+        if extruder is None:
+            tool_obj = self.printer.lookup_object(f"tool {tool_no}", None)
+            if tool_obj is not None:
+                ext_name = getattr(tool_obj, "extruder_name", None)
+                if ext_name:
+                    extruder = self.printer.lookup_object(ext_name, None)
+
+        # 3. Standard Klipper naming fallback: extruder / extruder<number>
+        if extruder is None:
+            std_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
+            extruder = self.printer.lookup_object(std_name, None)
+
+        # 4. Check active toolhead extruder fallback if tool is currently active
         if extruder is None:
             try:
                 toolhead = self.printer.lookup_object("toolhead", None)
@@ -1026,19 +1057,6 @@ class ToolCalibrator:
                         extruder = active_ext
             except Exception:
                 pass
-
-        # 3. Check individual [tool <number>] object
-        if extruder is None:
-            tool_obj = self.printer.lookup_object(f"tool {tool_no}", None)
-            if tool_obj is not None:
-                ext_name = getattr(tool_obj, "extruder_name", None)
-                if ext_name:
-                    extruder = self.printer.lookup_object(ext_name, None)
-
-        # 4. Standard Klipper naming fallback: extruder / extruder<number>
-        if extruder is None:
-            std_name = f"extruder{tool_no}" if tool_no > 0 else "extruder"
-            extruder = self.printer.lookup_object(std_name, None)
 
         # Fail-closed: If extruder cannot be identified or status verified, raise error
         if extruder is None or not hasattr(extruder, "get_status"):
@@ -1151,6 +1169,10 @@ class ToolCalibrator:
         else:
             if getattr(self.navigator, "carto_speedup", False):
                 logger.info(f"[T{tool_no}] Cartographer speed-up active (safe_z omitted): fast local Z-probing without redundant safe_z lift.")
+                cur_pos = toolhead.get_position()
+                if cur_pos[2] < 2.0:
+                    toolhead.manual_move([None, None, 2.0], self.navigator.z_speed)
+                    toolhead.wait_moves()
             else:
                 self.navigator.move_to_safe_z(toolhead, gcode_move)
             if tool_no == self.reference_tool:
@@ -1380,7 +1402,9 @@ class ToolCalibrator:
                 self._run_tool_hook(self.start_gcode, ordered_tools[0])
 
             # Safety First: Lift vertically to Safe_Z before any toolchange motion
-            self.navigator.move_to_safe_z(toolhead, gcode_move)
+            # In Z-only Cartographer speed-up mode, bypass global pre-calibration safe_z lift
+            if calibrate_xy or not getattr(self.navigator, "carto_speedup", False):
+                self.navigator.move_to_safe_z(toolhead, gcode_move)
 
             reference_origin_xy: Optional[List[float]] = None
             reference_z_result: Dict[str, Any] = {}
@@ -1395,8 +1419,12 @@ class ToolCalibrator:
                 gcmd.respond_info(f"\n--- Calibrating Toolhead T{tool_no} ---")
 
                 try:
-                    # Safety invariant: lift to safe Z clearance before toolchange
-                    self.navigator.move_to_safe_z(toolhead, gcode_move)
+                    # Safety invariant: only lift to safe Z clearance before a real physical toolchange
+                    current_active = self.run_record.get("physical_tool")
+                    if current_active is None:
+                        current_active = self._get_active_tool_no()
+                    if current_active != tool_no:
+                        self.navigator.move_to_safe_z(toolhead, gcode_move)
 
                     # Change tool
                     if self.before_pickup_gcode is not None:
@@ -1476,19 +1504,27 @@ class ToolCalibrator:
 
             # Restore Reference Tool
             self.run_record["phase"] = "RESTORING_REFERENCE"
-            self.navigator.move_to_safe_z(toolhead, gcode_move)
-            self.gcode.run_script_from_command(f"T{self.reference_tool}")
-            toolhead.wait_moves()
-            self.run_record["physical_tool"] = self.reference_tool
-            self.run_record["active_tool"] = self.reference_tool
+            current_active = self.run_record.get("physical_tool")
+            if current_active is None:
+                current_active = self._get_active_tool_no()
+            if current_active != self.reference_tool:
+                self.navigator.move_to_safe_z(toolhead, gcode_move)
+                self.gcode.run_script_from_command(f"T{self.reference_tool}")
+                toolhead.wait_moves()
+                self.run_record["physical_tool"] = self.reference_tool
+                self.run_record["active_tool"] = self.reference_tool
+            else:
+                self.run_record["physical_tool"] = self.reference_tool
+                self.run_record["active_tool"] = self.reference_tool
             self.run_record["calibrating_tool"] = None
 
             # Execute finish_gcode hook
             if self.finish_gcode is not None:
                 self._run_tool_hook(self.finish_gcode, self.reference_tool)
 
-            # Park at Safe_Z
-            self.navigator.move_to_safe_z(toolhead, gcode_move)
+            # Park at Safe_Z (bypassed in Z-only Cartographer speed-up mode)
+            if calibrate_xy or not getattr(self.navigator, "carto_speedup", False):
+                self.navigator.move_to_safe_z(toolhead, gcode_move)
 
             # Persist Offsets
             if save_config and not dry_run:

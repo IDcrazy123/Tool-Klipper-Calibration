@@ -821,6 +821,96 @@ class TestCalibrationCycle(unittest.TestCase):
         # When safe_z is declared, move_to_safe_z is called on entry and depart (2 times)
         self.assertEqual(declared_calibrator.navigator.move_to_safe_z.call_count, 2)
 
+    def test_cartographer_speedup_cmd_calibrate_z_skips_all_safe_z_lifts(self):
+        """When safe_z is omitted (speed-up mode), Z-only calibration on active tool must never call move_to_safe_z."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = None
+        carto_config_data["z_backend"] = "cartographer"
+        printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, carto_config_data))
+
+        # T0 is already active
+        self.toolchanger.tool_number = 0
+        self.toolhead.pos = [150.0, 150.0, 10.0, 0.0]
+
+        calibrator.navigator.move_to_safe_z = MagicMock()
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05, "source": "cartographer"})
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "TOOLS": "0", "SAVE_CONFIG": 1})
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # In speed-up mode with T0 already active, move_to_safe_z should NEVER be called
+        calibrator.navigator.move_to_safe_z.assert_not_called()
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+
+    def test_cartographer_declared_safe_z_cmd_calibrate_z_calls_safe_z(self):
+        """When safe_z is explicitly declared (e.g. 25.0mm), Z-only calibration MUST call move_to_safe_z."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = 25.0
+        carto_config_data["z_backend"] = "cartographer"
+        printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, carto_config_data))
+
+        calibrator.navigator.move_to_safe_z = MagicMock()
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05, "source": "cartographer"})
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "TOOLS": "0", "SAVE_CONFIG": 1})
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # With declared safe_z, move_to_safe_z must be called for safety
+        self.assertGreaterEqual(calibrator.navigator.move_to_safe_z.call_count, 1)
+
+    def test_cartographer_speedup_multi_tool_lifts_only_on_physical_toolchange(self):
+        """In speed-up mode across multiple tools, move_to_safe_z is called ONLY for real physical toolchanges."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = None
+        carto_config_data["z_backend"] = "cartographer"
+        printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, carto_config_data))
+
+        # T0 is initially active
+        self.toolchanger.tool_number = 0
+        calibrator.navigator.move_to_safe_z = MagicMock()
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05, "baseline_z": 0.05, "source": "cartographer", "probe_xy": (150.0, 150.0)})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.12, "probe_xy": (150.0, 150.0)})
+
+        # Simulate toolchanger updating active tool on T1 command
+        def mock_run_script(script):
+            if script == "T1":
+                self.toolchanger.tool_number = 1
+                self.toolchanger.active_tool = self.toolchanger.tools.get(1)
+            elif script == "T0":
+                self.toolchanger.tool_number = 0
+                self.toolchanger.active_tool = self.toolchanger.tools.get(0)
+            self.gcode.executed_scripts.append(script)
+
+        self.gcode.run_script_from_command = MagicMock(side_effect=mock_run_script)
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "TOOLS": "0,1", "SAVE_CONFIG": 1})
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # move_to_safe_z should be called exactly twice: once before T1 pickup, once before restoring T0
+        self.assertEqual(calibrator.navigator.move_to_safe_z.call_count, 2)
+        self.assertEqual(calibrator.last_run_status, "SUCCESS")
+
+    def test_cartographer_speedup_bed_clearance_hop_when_z_low(self):
+        """In speed-up mode, if toolhead is at low Z (<2.0mm), a minimal clearance hop to 2.0mm protects build sheet."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = None
+        carto_config_data["z_backend"] = "cartographer"
+        printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, carto_config_data))
+
+        # Toolhead sitting on bed at Z = 0.5mm
+        self.toolhead.pos = [100.0, 100.0, 0.5, 0.0]
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05, "source": "cartographer"})
+
+        gcmd = DummyGCodeCommand({})
+        calibrator._execute_z_calibration(0, self.toolhead, None, gcmd, {}, {})
+
+        # Should have hopped to at least 2.0mm before lateral move to probe point
+        self.assertGreaterEqual(self.toolhead.pos[2], 2.0)
+
     def test_config_manager_backups_strictly_inside_tool_calibrator(self):
         """ConfigManager must store backups inside <config_dir>/backups/calibration_offsets."""
         calibrator = ToolCalibrator(self.config)
