@@ -348,6 +348,17 @@ for loose in "tool_calibrator.cfg" "tool_offsets.cfg"; do
     rm -f "${TARGET_CONFIG_DIR}/${loose}" "${CONFIG_DIR}/${loose}" 2>/dev/null || true
 done
 
+# Consolidate all backups strictly into ${MACRO_DIR}/backups/ (remove any legacy outside backup folders)
+for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/tool_calibrator_backups"; do
+    if [ -d "${legacy_bk}" ]; then
+        echo -e "${CYAN}[+] Di chuyển các bản sao lưu cũ vào thư mục tập trung: ${MACRO_DIR}/backups/...${NC}"
+        mkdir -p "${MACRO_DIR}/backups"
+        cp -rn "${legacy_bk}"/* "${MACRO_DIR}/backups/" 2>/dev/null || true
+        rm -rf "${legacy_bk}"
+        echo -e "${GREEN}[✔] Đã dọn sạch thư mục sao lưu bên ngoài (${legacy_bk}).${NC}"
+    fi
+done
+
 # Ensure tool_offsets.cfg placeholder exists inside tool_calibrator directory
 OFF_PATH="${MACRO_DIR}/tool_offsets.cfg"
 if [ ! -f "${OFF_PATH}" ]; then

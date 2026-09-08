@@ -282,7 +282,7 @@ Nếu kết quả đo mới không ưng ý, bạn có thể quay lại bản sao
 # Phục hồi bản sao lưu gần nhất:
 CALIBRATION_ROLLBACK
 
-# Hoặc chỉ định rõ tên tệp backup trong tool_calibrator_backups/calibration_offsets/:
+# Hoặc chỉ định rõ tên tệp backup trong tool_calibrator/backups/calibration_offsets/:
 CALIBRATION_ROLLBACK BACKUP="tool_offsets.cfg.calib_backup_20260907_203000"
 ```
 

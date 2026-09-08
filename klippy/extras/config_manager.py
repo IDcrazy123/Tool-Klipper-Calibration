@@ -26,17 +26,18 @@ class ConfigManager:
     Manages offset reading, atomic persistence, and historical rollbacks.
     """
 
-    def __init__(self, config_file_path: str = "~/printer_data/config/tool_offsets.cfg") -> None:
+    def __init__(self, config_file_path: str = "~/printer_data/config/tool_calibrator/tool_offsets.cfg") -> None:
         self.config_path = os.path.expanduser(config_file_path)
         self.max_backups = 10
         self.config_dir = os.path.dirname(self.config_path)
-        # Dedicated consolidated backup directory: <config_dir>/tool_calibrator_backups/calibration_offsets
-        self.backup_dir = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets")
+        # Dedicated consolidated backup directory strictly inside tool_calibrator:
+        # <tool_calibrator_dir>/backups/calibration_offsets
+        self.backup_dir = os.path.join(self.config_dir, "backups", "calibration_offsets")
 
     def create_backup(self) -> Optional[str]:
         """
         Creates a timestamped backup copy of tool_offsets.cfg inside the consolidated
-        backup directory (tool_calibrator_backups/calibration_offsets).
+        backup directory (tool_calibrator/backups/calibration_offsets).
         Automatically rotates and purges backups older than max_backups.
         """
         if not os.path.exists(self.config_path):
@@ -56,10 +57,14 @@ class ConfigManager:
             raise ConfigManagerException(f"Backup creation failed: {ex}")
 
     def _rotate_backups(self) -> None:
-        """Keeps the most recent N backups in consolidated backup dir and deletes older ones."""
-        pattern_new = os.path.join(self.backup_dir, f"{os.path.basename(self.config_path)}.calib_backup_*")
-        pattern_legacy = f"{self.config_path}.calib_backup_*"
-        backups = sorted(glob.glob(pattern_new) + glob.glob(pattern_legacy))
+        """Keeps the most recent N backups in backup dir and deletes older ones."""
+        fn = os.path.basename(self.config_path)
+        pattern_new = os.path.join(self.backup_dir, f"{fn}.calib_backup_*")
+        pattern_legacy_tc = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
+        pattern_legacy_parent = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
+        pattern_legacy_flat = f"{self.config_path}.calib_backup_*"
+        all_backups = glob.glob(pattern_new) + glob.glob(pattern_legacy_tc) + glob.glob(pattern_legacy_parent) + glob.glob(pattern_legacy_flat)
+        backups = sorted(set(all_backups))
         if len(backups) > self.max_backups:
             to_remove = backups[:-self.max_backups]
             for old_backup in to_remove:
@@ -254,15 +259,23 @@ class ConfigManager:
         Returns:
             str: Name of the restored backup file.
         """
-        pattern_new = os.path.join(self.backup_dir, f"{os.path.basename(self.config_path)}.calib_backup_*")
-        pattern_legacy = f"{self.config_path}.calib_backup_*"
-        backups = sorted(glob.glob(pattern_new) + glob.glob(pattern_legacy))
+        fn = os.path.basename(self.config_path)
+        pattern_new = os.path.join(self.backup_dir, f"{fn}.calib_backup_*")
+        pattern_legacy_tc = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
+        pattern_legacy_parent = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", f"{fn}.calib_backup_*")
+        pattern_legacy_flat = f"{self.config_path}.calib_backup_*"
+        all_backups = glob.glob(pattern_new) + glob.glob(pattern_legacy_tc) + glob.glob(pattern_legacy_parent) + glob.glob(pattern_legacy_flat)
+        backups = sorted(set(all_backups))
 
         if target_backup:
-            # Check direct path, inside consolidated backup dir, or relative to config dir
+            # Check direct path, inside tool_calibrator/backups, legacy backup dir, or config dir
             candidate = os.path.expanduser(target_backup)
             if not os.path.exists(candidate):
                 candidate = os.path.join(self.backup_dir, os.path.basename(target_backup))
+            if not os.path.exists(candidate):
+                candidate = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", os.path.basename(target_backup))
+            if not os.path.exists(candidate):
+                candidate = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", os.path.basename(target_backup))
             if not os.path.exists(candidate):
                 candidate = os.path.join(self.config_dir, os.path.basename(target_backup))
 

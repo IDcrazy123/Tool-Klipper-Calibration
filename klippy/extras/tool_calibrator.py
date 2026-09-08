@@ -232,24 +232,27 @@ class ToolCalibrator:
                 self.navigator.switch_approach_y = float(switch_saved["approach_y"])
 
         # Priority Logic for safe_z:
-        # 1. If force_safe_z=True and safe_z is configured in [tool_calibrator], it overrides disk-saved stations.
-        # 2. Otherwise, restore the taught safe_z from saved station data in tool_offsets.cfg.
-        # 3. If no station data exists, use configured_safe_z or fallback to 35.0mm.
+        # 1. If safe_z is explicitly configured in [tool_calibrator], use the declared number:
+        #    ("còn nếu có khai báo thì sẽ dùng số của khai báo")
+        # 2. If safe_z is omitted / commented out:
+        #    - Cartographer Touch: Defaults to speed-up mode (0.0mm) without lifting Z.
+        #      ("tính năng bứt tốc Cartographer thay vì phải safe_z: 0.0 + force_safe_z: True chỉ cần comment chúng thì mặc định là.")
+        #    - Switch: Restores taught safe_z from saved station data, or fallback to 35.0mm.
         loaded_safe_zs = []
         if cam_saved and "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
             loaded_safe_zs.append(float(cam_saved["safe_z"]))
         if switch_saved and "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
             loaded_safe_zs.append(float(switch_saved["safe_z"]))
 
-        if getattr(self, "force_safe_z", False) and getattr(self.navigator, "configured_safe_z", None) is not None:
+        if getattr(self.navigator, "configured_safe_z", None) is not None:
             self.navigator.safe_z = self.navigator.configured_safe_z
-            logger.info(f"[tool_calibrator] force_safe_z active: configuration takes priority: Z{self.navigator.safe_z:.3f}")
+            logger.info(f"[tool_calibrator] Declared safe_z in configuration takes priority: Z{self.navigator.safe_z:.3f}")
+        elif self.z_backend_type == "cartographer":
+            self.navigator.safe_z = 0.0
+            logger.info("[tool_calibrator] Cartographer Touch active with safe_z omitted: defaulting to speed-up mode Z0.000")
         elif loaded_safe_zs:
             self.navigator.safe_z = max(loaded_safe_zs)
             logger.info(f"[tool_calibrator] Loaded safe_z from saved stations: Z{self.navigator.safe_z:.3f}")
-        elif getattr(self.navigator, "configured_safe_z", None) is not None:
-            self.navigator.safe_z = self.navigator.configured_safe_z
-            logger.info(f"[tool_calibrator] Loaded safe_z from configuration: Z{self.navigator.safe_z:.3f}")
         else:
             self.navigator.safe_z = 35.0
 

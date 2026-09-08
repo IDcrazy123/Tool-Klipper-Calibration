@@ -693,8 +693,12 @@ class TestCalibrationCycle(unittest.TestCase):
         self.assertIn("[ERR_CV_202]", str(ctx.exception))
 
     def test_safe_z_roundtrip_persistence(self):
-        """Safe Z taught via command must persist to disk and restore upon reinitialization."""
-        calibrator = ToolCalibrator(self.config)
+        """Safe Z taught via command must persist to disk and restore upon reinitialization for switch backend."""
+        switch_config_data = dict(self.config_data)
+        switch_config_data["safe_z"] = None
+        switch_config_data["z_backend"] = "switch"
+        switch_config = DummyConfig(self.printer, switch_config_data)
+        calibrator = ToolCalibrator(switch_config)
         self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
         gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
 
@@ -703,19 +707,23 @@ class TestCalibrationCycle(unittest.TestCase):
 
         # Re-initialize calibrator to verify load_saved_stations restores 70.0mm
         self.gcode.commands.clear()
-        new_calibrator = ToolCalibrator(self.config)
+        new_calibrator = ToolCalibrator(switch_config)
         self.assertEqual(new_calibrator.navigator.safe_z, 70.0)
 
     def test_force_safe_z_overrides_saved_stations(self):
-        """When force_safe_z: True is set in config, configured safe_z must override saved stations."""
+        """When safe_z is declared in config, configured safe_z must strictly override saved stations."""
         # 1. Pre-seed tool_offsets.cfg with safe_z = 70.0
-        calibrator = ToolCalibrator(self.config)
+        switch_config_data = dict(self.config_data)
+        switch_config_data["safe_z"] = None
+        switch_config_data["z_backend"] = "switch"
+        switch_config = DummyConfig(self.printer, switch_config_data)
+        calibrator = ToolCalibrator(switch_config)
         self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
         gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
         calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
         self.assertEqual(calibrator.navigator.safe_z, 70.0)
 
-        # 2. Re-initialize with force_safe_z=True and safe_z=25.0
+        # 2. Re-initialize with declared safe_z=25.0
         forced_config_data = dict(self.config_data)
         forced_config_data["safe_z"] = 25.0
         forced_config_data["force_safe_z"] = True
@@ -724,6 +732,38 @@ class TestCalibrationCycle(unittest.TestCase):
         self.gcode.commands.clear()
         forced_calibrator = ToolCalibrator(forced_config)
         self.assertEqual(forced_calibrator.navigator.safe_z, 25.0)
+
+    def test_cartographer_speedup_defaults_to_zero_ignoring_saved_stations(self):
+        """When safe_z is omitted with Cartographer Touch, safe_z must default to 0.0 even if station data exists."""
+        # 1. Pre-seed tool_offsets.cfg with camera station safe_z = 70.0
+        with open(self.config_path, "w") as f:
+            f.write("[tool_calibrator_station camera]\nsafe_z = 70.0\n")
+
+        # 2. Re-initialize Cartographer with safe_z omitted (commented out)
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = None
+        carto_config_data["z_backend"] = "cartographer"
+        carto_config = DummyConfig(self.printer, carto_config_data)
+
+        calibrator = ToolCalibrator(carto_config)
+        self.assertEqual(calibrator.navigator.safe_z, 0.0)
+
+    def test_cartographer_uses_declared_safe_z(self):
+        """When Cartographer has explicit safe_z declared, that exact number is used."""
+        carto_config_data = dict(self.config_data)
+        carto_config_data["safe_z"] = 18.5
+        carto_config_data["z_backend"] = "cartographer"
+        carto_config = DummyConfig(self.printer, carto_config_data)
+
+        calibrator = ToolCalibrator(carto_config)
+        self.assertEqual(calibrator.navigator.safe_z, 18.5)
+
+    def test_config_manager_backups_strictly_inside_tool_calibrator(self):
+        """ConfigManager must store backups inside <config_dir>/backups/calibration_offsets."""
+        calibrator = ToolCalibrator(self.config)
+        cm = calibrator.config_manager
+        expected_bk_dir = os.path.join(os.path.dirname(self.config_path), "backups", "calibration_offsets")
+        self.assertEqual(cm.backup_dir, expected_bk_dir)
 
     def test_safe_z_explicit_z_param(self):
         """CALIBRATION_SET_SAFE_POS TYPE=SAFE_Z with explicit Z param sets and persists without jogging."""

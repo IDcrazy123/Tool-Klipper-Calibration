@@ -61,6 +61,9 @@ class DummyConfig:
     def get_printer(self):
         return self._printer
 
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
     def getfloat(self, key, default=None, above=None, below=None, minval=None, maxval=None, **kwargs):
         val = self.data.get(key, default)
         if val is None:
@@ -226,6 +229,43 @@ class TestSafeNavigator(unittest.TestCase):
         # depart_station must also not move Z
         nav.depart_station(self.toolhead, None)
         self.assertEqual(self.toolhead.pos[2], 5.0)
+
+    def test_cartographer_default_safe_z_is_zero(self):
+        """When safe_z is omitted, Cartographer Touch must default to 0.0 (speed-up mode)."""
+        carto_config = {
+            "z_backend": "cartographer",
+            "travel_speed": 100.0,
+            "approach_speed": 25.0,
+            "z_speed": 10.0,
+        }
+        nav = SafeNavigator(DummyConfig(self.printer, carto_config))
+        self.assertIsNone(nav.configured_safe_z)
+        self.assertEqual(nav.safe_z, 0.0)
+
+    def test_switch_default_safe_z_is_35(self):
+        """When safe_z is omitted, Switch backend must default to 35.0mm."""
+        switch_config = {
+            "z_backend": "switch",
+            "travel_speed": 100.0,
+            "approach_speed": 25.0,
+            "z_speed": 10.0,
+        }
+        nav = SafeNavigator(DummyConfig(self.printer, switch_config))
+        self.assertIsNone(nav.configured_safe_z)
+        self.assertEqual(nav.safe_z, 35.0)
+
+    def test_declared_safe_z_overrides_cartographer_default(self):
+        """When safe_z is declared, the declared number must be used over default 0.0."""
+        carto_declared = {
+            "z_backend": "cartographer",
+            "safe_z": 22.5,
+            "travel_speed": 100.0,
+            "approach_speed": 25.0,
+            "z_speed": 10.0,
+        }
+        nav = SafeNavigator(DummyConfig(self.printer, carto_declared))
+        self.assertEqual(nav.configured_safe_z, 22.5)
+        self.assertEqual(nav.safe_z, 22.5)
 
 
 if __name__ == "__main__":

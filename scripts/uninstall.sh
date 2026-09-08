@@ -251,7 +251,18 @@ for root_sym in "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" "${CONFIG_DIR}/tool_c
     fi
 done
 
-TKC_BACKUP_DIR="${CONFIG_DIR}/tool_calibrator_backups"
+TKC_BACKUP_DIR="${MACRO_DIR}/backups"
+
+# Consolidate legacy backup folders strictly into ${MACRO_DIR}/backups/
+for legacy_bk in "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/tool_calibrator_backups"; do
+    if [ -d "${legacy_bk}" ]; then
+        if [ "${PURGE_BACKUPS}" = false ]; then
+            mkdir -p "${TKC_BACKUP_DIR}"
+            cp -rn "${legacy_bk}"/* "${TKC_BACKUP_DIR}/" 2>/dev/null || true
+        fi
+        rm -rf "${legacy_bk}"
+    fi
+done
 
 # 3. Safely comment out TKC includes in printer.cfg to prevent Klipper startup crash
 echo -e "\n${BLUE}[3/5] Bảo vệ cấu hình Klipper (printer.cfg)...${NC}"
@@ -380,7 +391,7 @@ fi
 if [ "${PURGE_BACKUPS}" = true ]; then
     echo -e "\n${BLUE}[+] Xóa sạch toàn bộ thư mục và file backup cũ (--purge-backups)...${NC}"
     # 1. Remove unified backup folder
-    rm -rf "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/tool_calibrator_backups" 2>/dev/null || true
+    rm -rf "${MACRO_DIR}/backups" "${ROOT_MACRO_DIR}/backups" "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/tool_calibrator_backups" 2>/dev/null || true
 
     # 2. Remove legacy backup folders: config_backups/tkc_* and config_backups/pre-tkc-*
     for bk_parent in "${CONFIG_DIR}/config_backups" "${TARGET_CONFIG_DIR}/config_backups"; do

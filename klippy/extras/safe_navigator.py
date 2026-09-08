@@ -39,9 +39,20 @@ class SafeNavigator:
 
         # Global Safe Z Clearance Altitude (configured_safe_z is None if omitted/commented out)
         # safe_z=0 allows operators to bypass safe Z elevation when unobstructed trajectories are verified.
+        # Smart default: when safe_z is omitted/commented out, Cartographer Touch defaults to speed-up mode (0.0mm).
+        # If safe_z is explicitly configured with a number, that declared number is strictly respected.
         configured_sz = config.getfloat("safe_z", None, minval=0.0)
         self.configured_safe_z = configured_sz
-        self.safe_z = configured_sz if configured_sz is not None else 35.0
+        z_backend = "cartographer"
+        if hasattr(config, "get"):
+            z_backend = str(config.get("z_backend", "cartographer") or "cartographer").strip().lower()
+
+        if configured_sz is not None:
+            self.safe_z = configured_sz
+        elif z_backend == "cartographer":
+            self.safe_z = 0.0
+        else:
+            self.safe_z = 35.0
 
         # Camera Station Waypoints (supports camera_target_x and camera_x aliases)
         self.cam_approach_x = config.getfloat("camera_approach_x", None)

@@ -17,7 +17,7 @@ graph TD
     E -->|Kiểm soát dịch vụ via moonraker.asvc| B
     E -->|Restart Service| A
     A -->|Lưu toạ độ & offsets| F[tool_calibrator/tool_offsets.cfg]
-    A -->|Sao lưu an toàn đa tầng| G[tool_calibrator_backups/]
+    A -->|Sao lưu an toàn đa tầng| G[tool_calibrator/backups/]
 ```
 
 ### Các thành phần chính:
@@ -34,17 +34,15 @@ graph TD
      - `config_manager.py`: Giao dịch ghi offset và sao lưu cấu hình tự động.
      - `z_backends/`: Module hỗ trợ đa cảm biến Z (`cartographer_backend.py`, `switch_backend.py`).
 
-3. **Cấu trúc Thư mục Cấu hình & Sao lưu Cô lập (Zero File Pollution)**:
-   - **Thư mục cấu hình**: Toàn bộ cấu hình và toạ độ học được gom gọn duy nhất trong:
+3. **Cấu trúc Thư mục Cô lập Duy nhất (100% trong `tool_calibrator/`)**:
+   - Toàn bộ cấu hình, toạ độ học và bản sao lưu (backup) được gom gọn duy nhất trong:
      `~/printer_data/config/tool_calibrator/`
      - `tool_calibrator.cfg`: Tệp cấu hình master (tệp thực tế có quyền ghi `chmod 664`, chỉnh sửa thoải mái trên Mainsail/Fluidd).
-     - `tool_offsets.cfg`: Tệp tự động nạp toạ độ trạm và offset của các đầu phun.
-   - **Thư mục sao lưu hợp nhất**: Toàn bộ lịch sử sao lưu được gom gọn trong:
-     `~/printer_data/config/tool_calibrator_backups/`
-     - `calibration_offsets/`: Lưu trữ các bản backup toạ độ offset trước mỗi lần cân chỉnh mới.
-     - `system_configs/`: Lưu trữ cấu hình hệ thống (`printer.cfg`, `moonraker.conf`) khi gỡ bỏ hoặc bảo trì.
-     - `archived_configs/`: Lưu trữ các tệp cấu hình cũ được bảo tồn khi dọn dẹp.
-   - **Tuyệt đối không để file rác bên ngoài thư mục root `config/`**.
+     - `tool_offsets.cfg`: Tệp tự động ghi toạ độ trạm và offset của các đầu phun.
+     - `backups/`: Thư mục tập trung chứa toàn bộ lịch sử sao lưu:
+       - `backups/calibration_offsets/`: Lưu trữ các bản backup toạ độ offset trước mỗi lần cân chỉnh mới (tự xoay vòng tối đa 10 bản).
+       - `backups/system_configs/`: Lưu trữ cấu hình hệ thống (`printer.cfg`) khi gỡ bỏ hoặc bảo trì.
+   - **Tuyệt đối không sinh bất kỳ thư mục hay file nào bên ngoài thư mục `tool_calibrator/`**.
 
 4. **Moonraker Update Manager & ASVC**:
    - Quản lý cập nhật trực tiếp 1-click từ giao diện Mainsail / Fluidd.
@@ -160,9 +158,11 @@ service_url: http://127.0.0.1:8090
 camera_stream_url: http://127.0.0.1:8080/?action=snapshot
 offsets_config_path: ~/printer_data/config/tool_calibrator/tool_offsets.cfg
 
-# 2. ĐỘ CAO AN TOÀN (SAFE_Z)
-safe_z: 35.0                 # Độ cao an toàn vượt qua trạm/dock khi di chuyển (mm)
-force_safe_z: False          # Đặt True nếu muốn ép giá trị safe_z này luôn ghi đè toạ độ đã lưu
+# 2. ĐỘ CAO AN TOÀN (SAFE_Z) & TÍNH NĂNG BỨT TỐC CARTOGRAPHER TOUCH
+# - Mặc định khi để comment (#): Cartographer Touch tự động bứt tốc (safe_z = 0.0)
+# - Bỏ comment (#) và nhập số: Hệ thống sẽ lập tức tuân thủ đúng số đã khai báo
+# safe_z: 35.0
+# force_safe_z: False
 
 # 3. TỐC ĐỘ DI CHUYỂN
 travel_speed: 12000          # Tốc độ di chuyển nhanh giữa các trạm (mm/min)
@@ -183,8 +183,9 @@ max_camera_temp: 100.0       # Giới hạn nhiệt độ an toàn bảo vệ �
 ```
 
 > [!IMPORTANT]
-> **Tính năng Bứt Tốc Đo Z Bằng Cartographer (`safe_z: 0.0` + `force_safe_z: True`):**
-> Khi sử dụng **Cartographer Touch**, đầu phun trực tiếp chạm vào bàn in để đo độ cao. Nếu bạn đặt `safe_z: 0.0` (kèm `force_safe_z: True`), hệ thống sẽ **LOẠI BỎ HOÀN TOÀN** thao tác nâng trục Z lên cao giữa các lần đo tool, đầu phun sẽ bay ngang XY ở độ cao an toàn hiện tại tới điểm đo. Điều này giúp đo Z cho cụm 4-6 tool chỉ mất chưa đến 1 phút! *(Chỉ kích hoạt khi bạn chắc chắn hành trình trên mặt bàn không có vật cản va quệt)*.
+> **Tính Năng Bứt Tốc Mặc Định Cartographer Touch:**
+> Khi sử dụng **Cartographer Touch** (`z_backend: cartographer`), bạn chỉ cần **để comment (hoặc để trống)** 2 dòng `# safe_z` và `# force_safe_z`. Hệ thống sẽ **MẶC ĐỊNH TỰ ĐỘNG BỨT TỐC** (`safe_z = 0.0`), bỏ qua hoàn toàn thao tác nâng hạ trục Z thừa thãi giữa các lần chạm bàn in. Đầu phun sẽ bay thẳng ngang XY ở cao độ hiện tại tới điểm đo cực nhanh và mượt mà.
+> Nếu muốn nâng trục Z lên một độ cao an toàn cố định (ví dụ máy in có kẹp bàn hoặc chướng ngại vật), bạn chỉ việc bỏ dấu `#` và khai báo số cụ thể (ví dụ `safe_z: 35.0`), hệ thống sẽ lập tức nhận lệnh theo con số đã khai báo đó!
 
 Sau khi lưu cấu hình, nhấn **Save & Restart** Klipper trên giao diện web.
 

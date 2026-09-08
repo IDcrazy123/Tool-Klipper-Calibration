@@ -8,6 +8,20 @@ All notable changes to the **Tool-Klipper-Calibration** project are documented i
 ### Planned
 - Complete live unattended multi-tool offset application with physical print validation.
 
+## [0.8.24] - 2026-09-08
+### Added & Enhanced
+- **1. Smart Cartographer Touch Speed-Up Default (`safe_z: 0.0`)**:
+  - Operators no longer need to configure `safe_z: 0.0` and `force_safe_z: True` simultaneously to achieve rapid bed probing.
+  - Simply leaving `safe_z` commented out (`# safe_z: ...`) or omitted in `tool_calibrator.cfg` automatically defaults to speed-up mode (`safe_z = 0.0`) for Cartographer Touch (`z_backend: cartographer`). Vertical Z lifts are completely bypassed during bed touch measurements.
+  - If a user explicitly uncomments and declares a number (e.g. `safe_z: 35.0`), that declared number is strictly respected without requiring `force_safe_z: True`.
+  - Switch backend (`z_backend: switch`) maintains the safe clearance default (35.0mm or taught station altitude) when `safe_z` is omitted to protect mechanical pins.
+- **2. 100% Single-Folder Architecture (`tool_calibrator/`)**:
+  - Consolidated all backups strictly inside `~/printer_data/config/tool_calibrator/backups/`:
+    - `backups/calibration_offsets/`: Historical rotated calibration backups of `tool_offsets.cfg`.
+    - `backups/system_configs/`: Pre-modification safety backups of `printer.cfg`.
+  - Completely eliminated the external `tool_calibrator_backups/` directory from `~/printer_data/config/`.
+  - `install.sh` and `uninstall.sh` automatically migrate any legacy external backup folders into `tool_calibrator/backups/` and purge the outside directory.
+
 ## [0.8.23] - 2026-09-07
 ### Added
 - **1. Consolidated Dedicated Backup Architecture (`tool_calibrator_backups/`)**:
