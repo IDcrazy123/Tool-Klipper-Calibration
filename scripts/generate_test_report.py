@@ -245,21 +245,30 @@ def main():
         tool_means[t] = (np.mean(us), np.mean(vs))
         md.append(f'| **{t}** | {len(vals)} | **{np.mean(us):.2f}** | {np.std(us):.3f}px | **{np.mean(vs):.2f}** | {np.std(vs):.3f}px | {np.mean(rs):.2f}px | {max(us)-min(us):.2f}px | {max(vs)-min(vs):.2f}px |')
 
-    md.append('\n## 6. Bảng Độ Lệch Vật Lý Giữa Các Tool So Với T0 (Tỉ Lệ MPP = 0.0125 mm/px)\n')
+    from server.affine_transform import TransformationSolver
+    solver = TransformationSolver()
+    calib_mpp = solver.mpp if solver.mpp is not None else solver.default_mpp
+    has_matrix = solver.transform_matrix is not None
+    matrix_desc = "Affine Transformation Matrix" if has_matrix else f"Calibrated MPP = {calib_mpp:.5f} mm/px"
+
+    md.append(f'\n## 6. Bảng Độ Lệch Vật Lý Giữa Các Tool So Với T0 ({matrix_desc})\n')
     t0_u, t0_v = tool_means['T0']
     md.append(f'Điểm neo quang học T0: U = {t0_u:.2f}px, V = {t0_v:.2f}px\n')
-    md.append('| Công Cụ | Delta U (px) | Delta V (px) | Offset X (mm) | Offset Y (mm) | Mã G-Code Bù Trừ Klipper |')
+    md.append('| Công Cụ | Delta U (px) | Delta V (px) | Offset X (mm) | Offset Y (mm) | Mã G-Code Bù Trừ Klipper (Upstream viesturz) |')
     md.append('|:---:|:---:|:---:|:---:|:---:|:---|')
 
-    mpp = 0.0125
     for t in ['T1', 'T2', 'T3', 'T4']:
         tu, tv = tool_means[t]
         du = tu - t0_u
         dv = tv - t0_v
-        dx = -1.0 * du * mpp
-        dy = -1.0 * dv * mpp
+        if has_matrix:
+            dx, dy = solver.calculate_tool_delta((t0_u, t0_v), (tu, tv))
+        else:
+            dx = -1.0 * du * calib_mpp
+            dy = -1.0 * dv * calib_mpp
         t_idx = t.replace('T', '')
-        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm** | **{dy:+.4f}mm** | `SET_TOOL_OFFSET TOOL={t_idx} X{dx:+.4f} Y{dy:+.4f}` |')
+        gcode_cmd = f"SET_TOOL_PARAMETER T={t_idx} PARAMETER=gcode_x_offset VALUE={dx:.6f}<br>SET_TOOL_PARAMETER T={t_idx} PARAMETER=gcode_y_offset VALUE={dy:.6f}"
+        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm** | **{dy:+.4f}mm** | `{gcode_cmd}` |')
 
     readme_path = os.path.join(out_dir, "README.md")
     with open(readme_path, 'w', encoding='utf-8') as f_md:

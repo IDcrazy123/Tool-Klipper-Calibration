@@ -491,44 +491,78 @@ class NozzleDetector:
         matched_tier = 0
         matched_combo = 0
 
+        eff_min_r = self.min_radius if min_radius is None else float(min_radius)
+        eff_max_r = self.max_radius if max_radius is None else float(max_radius)
+        eff_min_conf = self.min_confidence if min_confidence is None else float(min_confidence)
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        lap_std = float(cv2.Laplacian(gray, cv2.CV_32F).std())
+        is_valid_texture = (0.5 <= lap_std <= 120.0)
+
         # Tier 0 / Primary: Curvature Gradient Invariance
         curv_result = self.detect_curvature_circle(frame)
-        if curv_result is not None:
-            pt_x, pt_y, radius = curv_result
-            matched_tier = 1
-            matched_combo = 10  # Curvature Invariant combo ID
-            self.last_successful_combo = matched_combo
-        else:
+        if curv_result is not None and is_valid_texture:
+            c_x, c_y, c_r = curv_result
+            conf_val, contrast, continuity = self._evaluate_edge_confidence(gray, c_x, c_y, c_r)
+            dyn_conf = round(float(np.clip(conf_val * 1.0, 0.0, 0.99)), 3)
+            if (contrast >= 1.0 and continuity >= 0.15 and eff_min_r <= c_r <= eff_max_r and dyn_conf >= eff_min_conf):
+                pt_x, pt_y, radius = c_x, c_y, c_r
+                dynamic_conf = dyn_conf
+                matched_tier = 1
+                matched_combo = 10  # Curvature Invariant combo ID
+                self.last_successful_combo = matched_combo
+
+        if pt_x is None and is_valid_texture:
             # Fallback: 3-tier cascade SimpleBlobDetector
+            # Filter candidates across each tier by radius, contrast, continuity, and confidence FIRST,
+            # then select the best candidate based on quality score weighted by optical center proximity.
             tier_stages = [
                 (1, self.standard_detector, [(2, 1), (0, 2), (1, 3)]),
                 (2, self.relaxed_detector, [(2, 4), (0, 5), (1, 6)]),
                 (3, self.super_relaxed_detector, [(2, 7)]),
             ]
 
-            chosen_keypoint: Optional[cv2.KeyPoint] = None
+            d0 = max(140.0, min(width, height) * 0.22)
+            chosen_candidate = None
+
             for tier, detector, combos in tier_stages:
                 tier_candidates = []
+                tier_mult = 1.0 if tier == 1 else (0.88 if tier == 2 else 0.70)
                 for alg, combo_id in combos:
                     preprocessed = self.preprocess_image(frame, algorithm=alg)
                     keypoints = detector.detect(preprocessed)
                     for kp in keypoints:
-                        dist = math.hypot(kp.pt[0] - self.image_center[0], kp.pt[1] - self.image_center[1])
-                        tier_candidates.append((dist, kp, combo_id))
+                        cand_r = kp.size / 2.0
+                        # 1. Filter by radius bounds first
+                        if cand_r < eff_min_r or cand_r > eff_max_r:
+                            continue
+
+                        raw_x, raw_y = kp.pt
+                        # 2. Refine candidate position
+                        ref_x, ref_y = self._refine_upper_arc_symmetry(gray, raw_x, raw_y, cand_r, max_shift=3.0)
+
+                        # 3. Evaluate edge confidence, contrast, and continuity
+                        conf_val, contrast, continuity = self._evaluate_edge_confidence(gray, ref_x, ref_y, cand_r)
+                        dyn_conf = round(float(np.clip(conf_val * tier_mult, 0.0, 0.99)), 3)
+
+                        # 4. Filter by quality criteria
+                        if contrast < 1.0 or continuity < 0.15 or dyn_conf < eff_min_conf:
+                            continue
+
+                        # Candidate is qualified! Rank by score (confidence weighted by proximity to center)
+                        dist = math.hypot(ref_x - self.image_center[0], ref_y - self.image_center[1])
+                        w_dist = 1.0 / (1.0 + (dist / d0) ** 2)
+                        score = dyn_conf * w_dist
+                        tier_candidates.append((score, ref_x, ref_y, cand_r, dyn_conf, combo_id, tier))
+
                 if tier_candidates:
-                    tier_candidates.sort(key=lambda item: item[0])
-                    chosen_keypoint = tier_candidates[0][1]
-                    matched_combo = tier_candidates[0][2]
-                    matched_tier = tier
-                    self.last_successful_combo = matched_combo
+                    tier_candidates.sort(key=lambda item: item[0], reverse=True)
+                    chosen_candidate = tier_candidates[0]
                     break
 
-            if chosen_keypoint is not None:
-                raw_x, raw_y = chosen_keypoint.pt
-                radius = chosen_keypoint.size / 2.0
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                # Upper arc refinement to counteract glare flare
-                pt_x, pt_y = self._refine_upper_arc_symmetry(gray, raw_x, raw_y, radius, max_shift=3.0)
+            if chosen_candidate is not None:
+                _, pt_x, pt_y, radius, dynamic_conf, matched_combo, matched_tier = chosen_candidate
+                self.last_successful_combo = matched_combo
 
         # Draw visual overlay on debug frame
         cx, cy = int(self.image_center[0]), int(self.image_center[1])
@@ -537,25 +571,6 @@ class NozzleDetector:
         cv2.line(annotated, (0, cy), (width, cy), (0, 0, 0), 2, cv2.LINE_AA)
         cv2.line(annotated, (cx, 0), (cx, height), (255, 255, 255), 1, cv2.LINE_AA)
         cv2.line(annotated, (0, cy), (width, cy), (255, 255, 255), 1, cv2.LINE_AA)
-
-        if pt_x is not None and pt_y is not None:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            conf_val, contrast, continuity = self._evaluate_edge_confidence(gray, pt_x, pt_y, radius)
-
-            # False positive rejection: random noise, blank textures, or untextured frames
-            lap_std = float(cv2.Laplacian(gray, cv2.CV_32F).std())
-            tier_mult = 1.0 if matched_tier == 1 else (0.88 if matched_tier == 2 else 0.70)
-            dynamic_conf = round(float(np.clip(conf_val * tier_mult, 0.0, 0.99)), 3)
-
-            eff_min_r = self.min_radius if min_radius is None else float(min_radius)
-            eff_max_r = self.max_radius if max_radius is None else float(max_radius)
-            eff_min_conf = self.min_confidence if min_confidence is None else float(min_confidence)
-
-            # Strict false-positive gating: texture, contrast/continuity, radius sanity, confidence floor
-            if (lap_std < 0.5 or lap_std > 120.0 or contrast < 1.0 or continuity < 0.15
-                    or radius < eff_min_r or radius > eff_max_r
-                    or dynamic_conf < eff_min_conf):
-                pt_x, pt_y = None, None
 
 
         if pt_x is not None and pt_y is not None:

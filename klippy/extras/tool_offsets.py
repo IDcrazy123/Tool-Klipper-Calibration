@@ -30,12 +30,24 @@ class ToolOffsets:
 
         # Read all configured options in [tool_offsets]
         for opt in config.get_prefix_options(""):
-            try:
-                val = config.getfloat(opt, None)
-                if val is not None:
-                    self.offsets[opt.lower()] = val
-            except Exception:
-                pass
+            opt_lower = opt.lower()
+            if re.match(r"^t\d+_[xyz]$", opt_lower):
+                try:
+                    val = config.getfloat(opt)
+                    if val is not None:
+                        self.offsets[opt_lower] = val
+                except Exception as e:
+                    err_fn = getattr(config, "error", None)
+                    if callable(err_fn):
+                        raise err_fn(f"Invalid float value for [{self.name}] option '{opt}': {e}")
+                    raise ValueError(f"Invalid float value for [{self.name}] option '{opt}': {e}")
+            else:
+                try:
+                    val = config.getfloat(opt, None)
+                    if val is not None:
+                        self.offsets[opt_lower] = val
+                except Exception:
+                    pass
 
         logger.info(f"Loaded [tool_offsets] parameters: {self.offsets}")
 
@@ -76,6 +88,7 @@ class ToolOffsets:
         """
         Applies offsets to Klipper tool objects and toolchanger runtime.
         Returns the dictionary of applied tools and their offsets.
+        Only marks offsets as applied if an actual mechanism succeeded.
         """
         parsed = self.parse_tool_offsets()
         applied: Dict[int, Dict[str, float]] = {}
@@ -89,6 +102,7 @@ class ToolOffsets:
             x = axes.get("x")
             y = axes.get("y")
             z = axes.get("z")
+            applied_via_mechanism = False
 
             # 1. Look for Tool object in printer: [tool 1], [tool T1], etc.
             tool_obj = None
@@ -107,39 +121,62 @@ class ToolOffsets:
                 if hasattr(tool_obj, "set_offset") and callable(tool_obj.set_offset):
                     try:
                         tool_obj.set_offset(x=x, y=y, z=z)
+                        applied_via_mechanism = True
                     except Exception as e:
                         logger.warning(f"Failed to call set_offset on tool {t_num}: {e}")
                 if hasattr(tool_obj, "gcode_x_offset") and x is not None:
                     tool_obj.gcode_x_offset = x
+                    applied_via_mechanism = True
                 if hasattr(tool_obj, "gcode_y_offset") and y is not None:
                     tool_obj.gcode_y_offset = y
+                    applied_via_mechanism = True
                 if hasattr(tool_obj, "gcode_z_offset") and z is not None:
                     tool_obj.gcode_z_offset = z
+                    applied_via_mechanism = True
 
             # 2. If toolchanger has set_tool_offset method
             if tc is not None and hasattr(tc, "set_tool_offset") and callable(tc.set_tool_offset):
                 try:
                     tc.set_tool_offset(t_num, x=x, y=y, z=z)
+                    applied_via_mechanism = True
                 except Exception as e:
                     logger.debug(f"tc.set_tool_offset exception for T{t_num}: {e}")
 
-            # 3. Call SET_TOOL_OFFSET command if registered in gcode
-            if gcode is not None and hasattr(gcode, "commands") and "SET_TOOL_OFFSET" in gcode.commands:
-                cmd_parts = [f"SET_TOOL_OFFSET TOOL={t_num}"]
-                if x is not None:
-                    cmd_parts.append(f"X={x:.4f}")
-                if y is not None:
-                    cmd_parts.append(f"Y={y:.4f}")
-                if z is not None:
-                    cmd_parts.append(f"Z={z:.4f}")
-                cmd_str = " ".join(cmd_parts)
-                try:
-                    gcode.run_script_from_command(cmd_str)
-                except Exception as e:
-                    logger.warning(f"Failed to run script '{cmd_str}': {e}")
+            # 3. Call SET_TOOL_PARAMETER (upstream viesturz standard) or fallback to SET_TOOL_OFFSET if registered
+            if gcode is not None and hasattr(gcode, "commands"):
+                if "SET_TOOL_PARAMETER" in gcode.commands:
+                    for axis_name, axis_val in [("gcode_x_offset", x), ("gcode_y_offset", y), ("gcode_z_offset", z)]:
+                        if axis_val is not None:
+                            try:
+                                gcode.run_script_from_command(
+                                    f"SET_TOOL_PARAMETER T={t_num} PARAMETER={axis_name} VALUE={axis_val:.6f}"
+                                )
+                                applied_via_mechanism = True
+                            except Exception as e:
+                                logger.warning(f"Failed to run SET_TOOL_PARAMETER for T{t_num}: {e}")
+                elif "SET_TOOL_OFFSET" in gcode.commands:
+                    cmd_parts = [f"SET_TOOL_OFFSET TOOL={t_num}"]
+                    if x is not None:
+                        cmd_parts.append(f"X={x:.4f}")
+                    if y is not None:
+                        cmd_parts.append(f"Y={y:.4f}")
+                    if z is not None:
+                        cmd_parts.append(f"Z={z:.4f}")
+                    cmd_str = " ".join(cmd_parts)
+                    try:
+                        gcode.run_script_from_command(cmd_str)
+                        applied_via_mechanism = True
+                    except Exception as e:
+                        logger.warning(f"Failed to run script '{cmd_str}': {e}")
 
-            applied[t_num] = axes
-            logger.info(f"Applied offsets for Tool {t_num}: X={x} Y={y} Z={z}")
+            if applied_via_mechanism:
+                applied[t_num] = axes
+                logger.info(f"Applied offsets for Tool {t_num}: X={x} Y={y} Z={z}")
+            else:
+                logger.warning(
+                    f"Could not apply offsets for Tool {t_num}: no corresponding Tool object, "
+                    "toolchanger method, or G-Code command found."
+                )
 
         return applied
 

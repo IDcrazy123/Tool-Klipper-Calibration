@@ -274,11 +274,24 @@ kinematics: corexy
         self.assertIn("exceeds safe Cartographer touch limit", str(ctx.exception))
 
     def test_resolve_touch_cmd_scanner(self):
-        """When SCANNER_TOUCH is registered in Klipper gcode commands, resolve dynamically."""
-        self.gcode.commands = {"SCANNER_TOUCH": MagicMock()}
+        """When SCANNER_TOUCH_PROBE is registered in Klipper gcode commands, resolve dynamically."""
+        self.gcode.commands = {"SCANNER_TOUCH_PROBE": MagicMock(), "SCANNER_TOUCH_HOME": MagicMock()}
         backend = CartographerBackend(self.config)
-        self.assertEqual(backend.touch_probe_gcode, "SCANNER_TOUCH")
-        self.assertEqual(backend.touch_home_gcode, "SCANNER_TOUCH")
+        self.assertEqual(backend.touch_probe_gcode, "SCANNER_TOUCH_PROBE")
+        self.assertEqual(backend.touch_home_gcode, "SCANNER_TOUCH_HOME")
+
+    def test_legacy_homing_command_rejected_as_secondary_probe(self):
+        """Legacy homing touch command cannot be used as non-homing secondary probe (Issue 8)."""
+        cfg = DummyConfig(self.printer, {
+            "touch_probe_gcode": "SCANNER_TOUCH",
+            "touch_model_config_path": self.printer_cfg_path
+        })
+        backend = CartographerBackend(cfg)
+        gcmd = DummyGCodeCommand()
+        ref_result = {"contact_z": 0.050}
+        with self.assertRaises(RuntimeError) as ctx:
+            backend.probe_secondary_tool(1, ref_result, gcmd)
+        self.assertIn("ERR_Z_004", str(ctx.exception))
 
     def test_build_command_str_with_parameters(self):
         """Cartographer Touch appends EXPERIMENTAL_RANDOM_RADIUS to HOME and MAX_SAMPLES to PROBE."""

@@ -62,11 +62,11 @@ calibration_lock = {
 lock_mutex = threading.Lock()
 stream_lock = threading.Lock()
 active_preview_streams = 0
-MAX_PREVIEW_STREAMS = 2
+MAX_PREVIEW_STREAMS = 1
 
 
 def _check_auth(req) -> bool:
-    """Verifies optional API token."""
+    """Verifies optional API token via headers or query parameters."""
     expected = calibration_lock.get("token")
     if not expected:
         return True
@@ -74,6 +74,8 @@ def _check_auth(req) -> bool:
         req.headers.get("X-API-Token")
         or req.headers.get("Authorization", "").replace("Bearer ", "")
         or req.headers.get("X-Calibration-Token")
+        or req.args.get("token")
+        or req.args.get("api_token")
     )
     return header_token == expected
 
@@ -82,9 +84,18 @@ def _check_session_ownership(req) -> Tuple[bool, Optional[str]]:
     """
     Ensures that if an exclusive calibration session lock is held,
     the incoming request originates from the lock holder.
+    Refreshes the session lease timer on valid authenticated owner requests.
     """
+    header_session = req.headers.get("X-Session-Token") or req.headers.get("X-Calibration-Token")
+    body_session = None
+    data = req.get_json(silent=True) if req.is_json else {}
+    if isinstance(data, dict):
+        body_session = data.get("session_token") or data.get("session_id")
+
+    req_session = header_session or body_session
+
     with lock_mutex:
-        now = time.time()
+        now = time.monotonic()
         active_session = calibration_lock.get("session_id")
         locked_at = calibration_lock.get("locked_at", 0.0)
         timeout = calibration_lock.get("timeout_seconds", 600)
@@ -98,15 +109,11 @@ def _check_session_ownership(req) -> Tuple[bool, Optional[str]]:
         if active_session is None:
             return True, None
 
-    header_session = req.headers.get("X-Session-Token") or req.headers.get("X-Calibration-Token")
-    body_session = None
-    data = req.get_json(silent=True) if req.is_json else {}
-    if isinstance(data, dict):
-        body_session = data.get("session_token") or data.get("session_id")
+        if not req_session or req_session != active_session:
+            return False, "Session locked by another client or session token mismatch"
 
-    req_session = header_session or body_session
-    if not req_session or req_session != active_session:
-        return False, "Session locked by another client or session token mismatch"
+        # Refresh session lease
+        calibration_lock["locked_at"] = now
 
     return True, None
 
@@ -233,7 +240,7 @@ def acquire_lock():
     req_timeout = int(data.get("timeout_seconds", 600))
     req_timeout = max(30, min(1800, req_timeout))
     with lock_mutex:
-        now = time.time()
+        now = time.monotonic()
         timeout = calibration_lock.get("timeout_seconds", 600)
         current = calibration_lock["session_id"]
         if current is None or (now - calibration_lock["locked_at"] > timeout):
@@ -514,6 +521,8 @@ def set_matrix_endpoint():
 @app.route("/get_matrix", methods=["GET"])
 def get_matrix_endpoint():
     """Retrieves the currently active transformation matrix."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     return jsonify({"success": True, "matrix": solver.get_matrix()}), 200
 
 
@@ -594,6 +603,7 @@ def calculate_tool_delta():
         is_fallback = (solver.transform_matrix is None and solver.mpp is None)
         active_mpp = solver.mpp if solver.mpp is not None else solver.default_mpp
 
+        gcode_cmd = f"SET_TOOL_PARAMETER T={tool_idx} PARAMETER=gcode_x_offset VALUE={dx:.6f}\nSET_TOOL_PARAMETER T={tool_idx} PARAMETER=gcode_y_offset VALUE={dy:.6f}"
         return jsonify({
             "success": True,
             "tool": tool_idx,
@@ -601,7 +611,11 @@ def calculate_tool_delta():
             "delta_xy": [dx, dy],
             "mpp": active_mpp,
             "is_fallback": is_fallback,
-            "gcode_command": f"SET_TOOL_OFFSET TOOL={tool_idx} X={dx:.4f} Y={dy:.4f}",
+            "gcode_command": gcode_cmd,
+            "gcode_commands": [
+                f"SET_TOOL_PARAMETER T={tool_idx} PARAMETER=gcode_x_offset VALUE={dx:.6f}",
+                f"SET_TOOL_PARAMETER T={tool_idx} PARAMETER=gcode_y_offset VALUE={dy:.6f}"
+            ],
             "config_snippet": f"[tool_offsets]\nt{tool_idx}_x: {dx:.4f}\nt{tool_idx}_y: {dy:.4f}"
         }), 200
     except (ValueError, RuntimeError) as ex:
@@ -619,6 +633,8 @@ def calculate_tool_delta():
 @app.route("/api/samples", methods=["GET"])
 def list_samples():
     """Lists available benchmark test samples."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     sample_dir = os.path.join(os.path.dirname(__file__), "..", "tests", "sample_images")
     if not os.path.exists(sample_dir):
         return jsonify({"samples": []})
@@ -629,6 +645,11 @@ def list_samples():
 @app.route("/api/test_sample", methods=["POST"])
 def test_sample():
     """Runs nozzle detection on a named benchmark image."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    allowed, err = _check_session_ownership(request)
+    if not allowed:
+        return jsonify({"success": False, "error": err}), 403
     try:
         data = request.get_json(silent=True) or {}
         sample_name = data.get("sample_name")
@@ -672,6 +693,8 @@ def _fetch_live_frame():
 @app.route("/preview", methods=["GET"])
 def live_preview():
     """Serves real-time annotated MJPEG preview stream with concurrency limiting."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     global active_preview_streams
     with stream_lock:
         if active_preview_streams >= MAX_PREVIEW_STREAMS:
@@ -698,6 +721,8 @@ def live_preview():
 @app.route("/snapshot", methods=["GET"])
 def snapshot_jpeg():
     """Returns a single latest annotated JPEG frame."""
+    if not _check_auth(request):
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
     jpeg_data = debugger.get_latest_jpeg()
     return Response(jpeg_data, mimetype="image/jpeg")
 
@@ -714,6 +739,14 @@ def main():
 
     if args.api_token:
         calibration_lock["token"] = args.api_token
+
+    # Enforce localhost unless token is configured
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not calibration_lock.get("token"):
+        logger.warning(
+            f"Binding to public/network interface '{args.host}' without an API token is insecure. "
+            "Enforcing localhost (127.0.0.1). Set --api-token or CALIBRATION_API_TOKEN to allow non-localhost binding."
+        )
+        args.host = "127.0.0.1"
 
     # Configure camera URL if provided via CLI flag or env var
     cam_url = args.camera_url or os.environ.get("CAMERA_STREAM_URL")

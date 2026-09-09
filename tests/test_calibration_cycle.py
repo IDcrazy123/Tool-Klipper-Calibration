@@ -46,24 +46,40 @@ class DummyGCodeCommand:
 class DummyToolchanger:
     def __init__(self, tools=(0, 1)):
         self.tool_numbers = list(tools)
-        self.tools = {t: MagicMock() for t in tools}
+        self.tools = {}
+        for t in tools:
+            tool_mock = MagicMock()
+            tool_mock.tool_number = t
+            self.tools[t] = tool_mock
         self.status = "ready"
         self.tool_number = 0
         self.active_tool = self.tools.get(0)
+        self.detected_tool = self.active_tool
+
+    def get_tool(self, num):
+        return self.tools.get(num)
 
     def get_tool_by_number(self, num):
         return self.tools.get(num)
+
+    def get_status(self, eventtime=None):
+        return {
+            "status": self.status,
+            "tool": self.tool_number,
+            "detected_tool": getattr(self, "detected_tool", self.active_tool)
+        }
 
     def initialize_to_tool(self, tool):
         self.status = "ready"
         if isinstance(tool, int):
             self.tool_number = tool
+            self.active_tool = self.tools.get(tool)
         else:
             self.active_tool = tool
-            for num, obj in self.tools.items():
-                if obj == tool:
-                    self.tool_number = num
-                    break
+            self.tool_number = getattr(tool, "tool_number", 0)
+
+    def initialize(self, tool):
+        return self.initialize_to_tool(tool)
 
 
 class DummyExtruder:
@@ -725,61 +741,74 @@ class TestCalibrationCycle(unittest.TestCase):
 
         self.assertIn("[ERR_CV_202]", str(ctx.exception))
 
-    def test_safe_z_roundtrip_persistence(self):
-        """Safe Z taught via command must persist to disk and restore upon reinitialization for switch backend."""
-        switch_config_data = dict(self.config_data)
-        switch_config_data["safe_z"] = None
-        switch_config_data["z_backend"] = "switch"
-        switch_config = DummyConfig(self.printer, switch_config_data)
-        calibrator = ToolCalibrator(switch_config)
-        self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
-        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
-
-        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
-        self.assertEqual(calibrator.navigator.safe_z, 70.0)
-
-        # Re-initialize calibrator to verify load_saved_stations restores 70.0mm
-        self.gcode.commands.clear()
-        new_calibrator = ToolCalibrator(switch_config)
-        self.assertEqual(new_calibrator.navigator.safe_z, 70.0)
-
-    def test_force_safe_z_overrides_saved_stations(self):
-        """When safe_z is declared in config, configured safe_z must strictly override saved stations."""
+    def test_safe_z_declared_25_overrides_old_70(self):
+        """Precedence: declared safe_z: 25.0 in config strictly overrides old saved safe_z: 70.0."""
         # 1. Pre-seed tool_offsets.cfg with safe_z = 70.0
-        switch_config_data = dict(self.config_data)
-        switch_config_data["safe_z"] = None
-        switch_config_data["z_backend"] = "switch"
-        switch_config = DummyConfig(self.printer, switch_config_data)
-        calibrator = ToolCalibrator(switch_config)
-        self.toolhead.pos = [150.0, 10.0, 70.0, 0.0]
-        gcmd = DummyGCodeCommand({"STATION": "CAMERA", "TYPE": "SAFE_Z", "SAVE": 1})
-        calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
-        self.assertEqual(calibrator.navigator.safe_z, 70.0)
-
-        # 2. Re-initialize with declared safe_z=25.0
-        forced_config_data = dict(self.config_data)
-        forced_config_data["safe_z"] = 25.0
-        forced_config_data["force_safe_z"] = True
-        forced_config = DummyConfig(self.printer, forced_config_data)
-
-        self.gcode.commands.clear()
-        forced_calibrator = ToolCalibrator(forced_config)
-        self.assertEqual(forced_calibrator.navigator.safe_z, 25.0)
-
-    def test_cartographer_respects_saved_station_safe_z(self):
-        """When safe_z is omitted with Cartographer Touch, safe_z loads from saved stations to preserve motion invariants."""
-        # 1. Pre-seed tool_offsets.cfg with camera station safe_z = 70.0
         with open(self.config_path, "w") as f:
             f.write("[tool_calibrator_station camera]\nsafe_z = 70.0\n")
 
-        # 2. Re-initialize Cartographer with safe_z omitted (commented out)
-        carto_config_data = dict(self.config_data)
-        carto_config_data["safe_z"] = None
-        carto_config_data["z_backend"] = "cartographer"
-        carto_config = DummyConfig(self.printer, carto_config_data)
+        # 2. Config declares safe_z = 25.0
+        cfg_data = dict(self.config_data)
+        cfg_data["safe_z"] = 25.0
+        cfg = DummyConfig(self.printer, cfg_data)
 
-        calibrator = ToolCalibrator(carto_config)
-        self.assertEqual(calibrator.navigator.safe_z, 70.0)
+        calibrator = ToolCalibrator(cfg)
+        self.assertEqual(calibrator.navigator.safe_z, 25.0)
+        self.assertTrue(calibrator.navigator.is_safe_z_enabled())
+        self.assertFalse(calibrator.navigator.carto_speedup)
+
+    def test_safe_z_commented_with_old_70_is_disabled(self):
+        """Precedence: commented/omitted safe_z with old saved 70.0 must remain disabled."""
+        # 1. Pre-seed tool_offsets.cfg with safe_z = 70.0
+        with open(self.config_path, "w") as f:
+            f.write("[tool_calibrator_station camera]\nsafe_z = 70.0\n")
+
+        # 2. Config has safe_z omitted (None)
+        cfg_data = dict(self.config_data)
+        cfg_data["safe_z"] = None
+        cfg = DummyConfig(self.printer, cfg_data)
+
+        calibrator = ToolCalibrator(cfg)
+        self.assertIsNone(calibrator.navigator.safe_z)
+        self.assertFalse(calibrator.navigator.is_safe_z_enabled())
+        # Cartographer speedup is enabled because safe_z is disabled
+        self.assertTrue(calibrator.navigator.carto_speedup)
+
+    def test_safe_z_zero_with_old_70_is_disabled(self):
+        """Precedence: safe_z: 0.0 with old saved 70.0 must remain disabled."""
+        # 1. Pre-seed tool_offsets.cfg with safe_z = 70.0
+        with open(self.config_path, "w") as f:
+            f.write("[tool_calibrator_station camera]\nsafe_z = 70.0\n")
+
+        # 2. Config sets safe_z: 0.0
+        cfg_data = dict(self.config_data)
+        cfg_data["safe_z"] = 0.0
+        cfg = DummyConfig(self.printer, cfg_data)
+
+        calibrator = ToolCalibrator(cfg)
+        self.assertIsNone(calibrator.navigator.safe_z)
+        self.assertFalse(calibrator.navigator.is_safe_z_enabled())
+        self.assertTrue(calibrator.navigator.carto_speedup)
+
+    def test_cartographer_touch_no_global_safe_z_lift_when_disabled(self):
+        """Cartographer Z-only does not perform global safe Z lift at each touch when safe_z is disabled."""
+        cfg_data = dict(self.config_data)
+        cfg_data["safe_z"] = None
+        cfg_data["allow_shuttle_z"] = True
+        cfg = DummyConfig(self.printer, cfg_data)
+        calibrator = ToolCalibrator(cfg)
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={
+            "contact_z": 0.05, "source": "cartographer", "probe_xy": (150.0, 150.0)
+        })
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={
+            "suggested_z_offset": 0.08, "probe_xy": (150.0, 150.0)
+        })
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "TOOLS": "0,1"})
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        self.assertFalse(calibrator.navigator.is_safe_z_enabled())
         self.assertTrue(calibrator.navigator.carto_speedup)
 
     def test_cartographer_uses_declared_safe_z(self):

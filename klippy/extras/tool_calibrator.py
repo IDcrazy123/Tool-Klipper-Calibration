@@ -127,6 +127,11 @@ class ToolCalibrator:
         self.min_detection_confidence = config.getfloat("min_detection_confidence", 0.70, minval=0.10, maxval=1.0)
         self.min_nozzle_radius = config.getfloat("min_nozzle_radius", 10.0, minval=2.0, maxval=100.0)
         self.max_nozzle_radius = config.getfloat("max_nozzle_radius", 55.0, minval=5.0, maxval=200.0)
+        if self.min_nozzle_radius > self.max_nozzle_radius:
+            raise config.error(
+                f"[tool_calibrator] min_nozzle_radius ({self.min_nozzle_radius:.1f}px) cannot be greater than "
+                f"max_nozzle_radius ({self.max_nozzle_radius:.1f}px)"
+            )
         self.last_run_status = "UNINITIALIZED"
         self.cancel_requested = False
         self.run_record: Dict[str, Any] = {
@@ -239,31 +244,20 @@ class ToolCalibrator:
             if self.navigator.switch_approach_y is None and "approach_y" in switch_saved and switch_saved["approach_y"] not in ("None", ""):
                 self.navigator.switch_approach_y = float(switch_saved["approach_y"])
 
-        # Priority Logic for safe_z:
-        # 1. If safe_z is explicitly configured in [tool_calibrator], use the declared number:
-        #    ("còn nếu có khai báo thì sẽ dùng số của khai báo")
-        # 2. If safe_z is omitted / commented out:
-        #    - Cartographer Touch: Defaults to speed-up mode (0.0mm) without lifting Z.
-        #      ("tính năng bứt tốc Cartographer thay vì phải safe_z: 0.0 + force_safe_z: True chỉ cần comment chúng thì mặc định là.")
-        #    - Switch: Restores taught safe_z from saved station data, or fallback to 35.0mm.
-        loaded_safe_zs = []
-        if cam_saved and "safe_z" in cam_saved and cam_saved["safe_z"] not in ("None", ""):
-            loaded_safe_zs.append(float(cam_saved["safe_z"]))
-        if switch_saved and "safe_z" in switch_saved and switch_saved["safe_z"] not in ("None", ""):
-            loaded_safe_zs.append(float(switch_saved["safe_z"]))
-
-        if self.force_safe_z and getattr(self.navigator, "configured_safe_z", None) is not None:
-            self.navigator.safe_z = self.navigator.configured_safe_z
-            logger.info(f"[tool_calibrator] force_safe_z is True: strictly enforcing configured safe_z=Z{self.navigator.safe_z:.3f}")
-        elif loaded_safe_zs:
-            self.navigator.safe_z = max(loaded_safe_zs)
-            logger.info(f"[tool_calibrator] Loaded safe_z from saved stations: Z{self.navigator.safe_z:.3f}")
-        elif getattr(self.navigator, "configured_safe_z", None) is not None:
-            self.navigator.safe_z = self.navigator.configured_safe_z
-            logger.info(f"[tool_calibrator] Declared safe_z in configuration: Z{self.navigator.safe_z:.3f}")
+        # Strict Precedence & State Rules for safe_z:
+        # 1. safe_z > 0 declared in configuration: ENABLED and strictly respects the declared value.
+        #    Old saved station data CANNOT overwrite it.
+        # 2. safe_z = 0, commented out, or omitted: DISABLED completely.
+        #    Old saved station data CANNOT reactivate safe_z.
+        cfg_sz = getattr(self.navigator, "configured_safe_z", None)
+        if cfg_sz is not None and cfg_sz > 0.0:
+            self.navigator.safe_z = cfg_sz
+            self.navigator.safe_z_enabled = True
+            logger.info(f"[tool_calibrator] Declared safe_z in configuration: Z{self.navigator.safe_z:.3f} (ENABLED)")
         else:
-            self.navigator.safe_z = 35.0
-            logger.info(f"[tool_calibrator] Default safe_z applied: Z{self.navigator.safe_z:.3f}")
+            self.navigator.safe_z = None
+            self.navigator.safe_z_enabled = False
+            logger.info("[tool_calibrator] safe_z is 0, commented out, or omitted: DISABLED (no global safe_z lifts, old saved safe_z ignored)")
 
         self._sync_switch_location_from_tools_calibrate()
 
@@ -794,9 +788,12 @@ class ToolCalibrator:
                     raise SafeNavigatorException(
                         f"[ERR_TOOL_NOT_FOUND] Tool T{t} does not exist in printer configuration. Available tools: {sorted(known_tools)}"
                     )
-            if self.reference_tool not in selected:
-                return [self.reference_tool] + selected
-            return [self.reference_tool] + [t for t in selected if t != self.reference_tool]
+            # Deduplicate while preserving order
+            seen = set()
+            deduped = [t for t in selected if not (t in seen or seen.add(t))]
+            if self.reference_tool not in deduped:
+                return [self.reference_tool] + deduped
+            return deduped
 
         # Configured tools in [tool_calibrator]
         if self.configured_tools_str:
@@ -808,7 +805,9 @@ class ToolCalibrator:
                             raise SafeNavigatorException(
                                 f"[ERR_TOOL_NOT_FOUND] Configured Tool T{t} does not exist in printer configuration. Available tools: {sorted(known_tools)}"
                             )
-                    return [self.reference_tool] + [t for t in sorted(set(cfg_tools)) if t != self.reference_tool]
+                    seen_cfg = set()
+                    deduped_cfg = [t for t in cfg_tools if not (t in seen_cfg or seen_cfg.add(t))]
+                    return [self.reference_tool] + [t for t in deduped_cfg if t != self.reference_tool]
             except ValueError:
                 pass
 
@@ -864,8 +863,12 @@ class ToolCalibrator:
         except Exception as ex:
             logger.debug(f"[tool_calibrator] Lighting control error: {ex}")
 
-    def _get_active_tool_no(self) -> int:
-        """Determines the active tool number from toolchanger or toolhead extruder."""
+    def _get_active_tool_no(self) -> Optional[int]:
+        """
+        Determines the active tool number from toolchanger if initialized.
+        Strictly returns None if the toolchanger is uninitialized, unmounted (-1), or unknown.
+        Does NOT guess T0 or extrapolate from extruder name.
+        """
         tc = self.printer.lookup_object("toolchanger", None)
         if tc is not None:
             # 1. Primary check: toolchanger.tool_number
@@ -881,46 +884,32 @@ class ToolCalibrator:
             # 2. Check tc.active_tool
             active_tool = getattr(tc, "active_tool", None)
             if active_tool is not None and not hasattr(active_tool, "_mock_name"):
-                if isinstance(active_tool, int):
+                if isinstance(active_tool, int) and active_tool >= 0:
                     return active_tool
                 t_num = getattr(active_tool, "tool_number", None)
                 if t_num is not None and not hasattr(t_num, "_mock_name"):
                     try:
-                        return int(t_num)
+                        val = int(t_num)
+                        if val >= 0:
+                            return val
                     except (ValueError, TypeError):
                         pass
-                if hasattr(active_tool, "name") and isinstance(active_tool.name, str):
-                    m = re.search(r"(\d+)", active_tool.name)
-                    if m:
-                        return int(m.group(1))
 
-        try:
-            toolhead = self.printer.lookup_object("toolhead", None)
-            if toolhead is not None and hasattr(toolhead, "get_extruder"):
-                ext = toolhead.get_extruder()
-                if ext is not None:
-                    ext_name = getattr(ext, "name", "") or (ext.get_name() if hasattr(ext, "get_name") else "")
-                    m = re.match(r"^extruder(\d+)$", ext_name)
-                    if m:
-                        return int(m.group(1))
-                    if ext_name == "extruder":
-                        return 0
-        except Exception:
-            pass
+        return None
 
-        return self.reference_tool
-
-    def _reconcile_toolchanger_state(self, initial_tool: int, gcmd=None) -> None:
+    def _reconcile_toolchanger_state(self, initial_tool: Optional[int] = None, gcmd=None) -> None:
         """
         Reconciles toolchanger logical state to the physically active/detected tool
         upon failure or aborted runs to prevent uninitialized toolchanger state (-1).
+        Only reconciles when reliable physical sensor detection is available.
+        Never executes a Tn physical tool change command as cleanup.
         """
         try:
             tc = self.printer.lookup_object("toolchanger", None)
             if tc is None:
                 return
 
-            target_tool = None
+            target_tool: Optional[int] = None
 
             # 1. Query physical sensor detection if available on toolchanger
             for det_method in ("detect_tool", "get_detected_tool"):
@@ -929,53 +918,89 @@ class ToolCalibrator:
                     try:
                         detected = meth()
                         if detected is not None and detected != -1:
-                            if isinstance(detected, int):
-                                target_tool = detected
-                            elif hasattr(detected, "tool_number"):
+                            if hasattr(detected, "tool_number"):
                                 target_tool = int(detected.tool_number)
+                            elif isinstance(detected, int) and detected >= 0:
+                                target_tool = detected
                             break
                     except Exception:
                         pass
 
             # 2. Check sensor attributes on tc
             if target_tool is None:
-                for attr in ("detected_tool", "physical_tool", "current_tool"):
+                for attr in ("detected_tool", "detected_tool_number", "physical_tool", "current_tool"):
                     val = getattr(tc, attr, None)
                     if val is not None and val != -1:
-                        try:
-                            target_tool = int(val)
+                        if hasattr(val, "tool_number"):
+                            try:
+                                target_tool = int(val.tool_number)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                        elif isinstance(val, int) and val >= 0:
+                            target_tool = val
                             break
-                        except (ValueError, TypeError):
-                            pass
+                        else:
+                            try:
+                                parsed_val = int(val)
+                                if parsed_val >= 0:
+                                    target_tool = parsed_val
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+            # Check get_status for detected_tool
+            if target_tool is None:
+                get_status_fn = getattr(tc, "get_status", None)
+                if callable(get_status_fn):
+                    try:
+                        status_data = get_status_fn(None)
+                        if isinstance(status_data, dict):
+                            det = status_data.get("detected_tool")
+                            if det is not None and det != -1:
+                                if hasattr(det, "tool_number"):
+                                    target_tool = int(det.tool_number)
+                                elif isinstance(det, int) and det >= 0:
+                                    target_tool = det
+                    except Exception:
+                        pass
 
             # 3. Check toollock object if present
             if target_tool is None:
                 toollock = self.printer.lookup_object("toollock", None)
                 if toollock is not None:
-                    for attr in ("detected_tool", "current_tool", "tool_current"):
+                    for attr in ("detected_tool", "detected_tool_number", "current_tool", "tool_current"):
                         val = getattr(toollock, attr, None)
                         if val is not None and val != -1:
-                            try:
-                                target_tool = int(val)
+                            if hasattr(val, "tool_number"):
+                                try:
+                                    target_tool = int(val.tool_number)
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+                            elif isinstance(val, int) and val >= 0:
+                                target_tool = val
                                 break
-                            except (ValueError, TypeError):
-                                pass
+                            else:
+                                try:
+                                    parsed_val = int(val)
+                                    if parsed_val >= 0:
+                                        target_tool = parsed_val
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
 
-            # 4. Fallback to run_record or initial_tool
+            # Only reconcile when sensor data is reliable. DO NOT guess T0 or extrapolate without sensors!
             if target_tool is None:
-                rec_tool = self.run_record.get("physical_tool")
-                if rec_tool is None:
-                    rec_tool = self.run_record.get("calibrating_tool")
-                if rec_tool is not None:
-                    try:
-                        target_tool = int(rec_tool)
-                    except (ValueError, TypeError):
-                        pass
-                if target_tool is None:
-                    try:
-                        target_tool = int(initial_tool)
-                    except (ValueError, TypeError):
-                        target_tool = self.reference_tool
+                warn_msg = (
+                    "Warning: Toolchanger state reconciliation cannot proceed automatically: "
+                    "no physical tool sensor detection was available. "
+                    "Manual INITIALIZE_TOOLCHANGER or operator recovery is required."
+                )
+                if gcmd is not None:
+                    gcmd.respond_info(warn_msg)
+                logger.warning(warn_msg)
+                return
 
             tc_status = getattr(tc, "status", None)
             tc_tool_num = getattr(tc, "tool_number", None)
@@ -987,44 +1012,29 @@ class ToolCalibrator:
                 or tc_active is None
             )
 
-            if needs_reconciliation and target_tool is not None:
+            if needs_reconciliation:
                 logger.info(f"[tool_calibrator] Reconciling uninitialized toolchanger state to T{target_tool}")
                 registered_cmds = getattr(self.gcode, "commands", {})
                 if "INITIALIZE_TOOLCHANGER" in registered_cmds:
                     try:
                         self.gcode.run_script_from_command(f"INITIALIZE_TOOLCHANGER T={target_tool}")
-                        logger.info(f"[tool_calibrator] Attempted INITIALIZE_TOOLCHANGER T={target_tool}")
+                        logger.info(f"[tool_calibrator] Executed INITIALIZE_TOOLCHANGER T={target_tool}")
                     except Exception as cmd_err:
                         logger.warning(f"[tool_calibrator] INITIALIZE_TOOLCHANGER T={target_tool} failed: {cmd_err}")
 
-                    cur_st = getattr(tc, "status", None)
-                    cur_num = getattr(tc, "tool_number", None)
-                    if cur_st == "uninitialized" or cur_num == -1:
-                        try:
-                            self.gcode.run_script_from_command(f"INITIALIZE_TOOLCHANGER TOOL={target_tool}")
-                            logger.info(f"[tool_calibrator] Attempted INITIALIZE_TOOLCHANGER TOOL={target_tool}")
-                        except Exception as cmd_err2:
-                            logger.warning(f"[tool_calibrator] INITIALIZE_TOOLCHANGER TOOL={target_tool} failed: {cmd_err2}")
-
                 cur_st = getattr(tc, "status", None)
                 cur_num = getattr(tc, "tool_number", None)
-                if (cur_st == "uninitialized" or cur_num == -1) and hasattr(tc, "initialize_to_tool"):
+                if (cur_st == "uninitialized" or cur_num == -1) and hasattr(tc, "initialize"):
                     tools_dict = getattr(tc, "tools", {})
                     tool_obj = tools_dict.get(target_tool) if isinstance(tools_dict, dict) else None
                     if tool_obj is not None:
                         try:
-                            tc.initialize_to_tool(tool_obj)
-                            logger.info(f"[tool_calibrator] Initialized toolchanger via tc.initialize_to_tool(tool_obj)")
+                            tc.initialize(tool_obj)
+                            logger.info(f"[tool_calibrator] Initialized toolchanger via tc.initialize(tool_obj)")
                         except Exception as obj_err:
-                            logger.warning(f"[tool_calibrator] tc.initialize_to_tool failed: {obj_err}")
+                            logger.warning(f"[tool_calibrator] tc.initialize failed: {obj_err}")
 
-                cur_st = getattr(tc, "status", None)
-                cur_num = getattr(tc, "tool_number", None)
-                if cur_st == "uninitialized" or cur_num == -1:
-                    try:
-                        self.gcode.run_script_from_command(f"T{target_tool}")
-                    except Exception as t_err:
-                        logger.warning(f"[tool_calibrator] Fallback T{target_tool} failed: {t_err}")
+                # Note: NEVER issue a Tn command during failure cleanup to avoid unintended physical moves!
 
                 post_status = getattr(tc, "status", None)
                 post_tool_num = getattr(tc, "tool_number", None)
@@ -1178,37 +1188,39 @@ class ToolCalibrator:
         1. In-memory cached_offsets from previous calibration runs
         2. Persisted tool_offsets from tool_offsets.cfg
         3. Live Klipper [tool Tn] objects or toolchanger runtime
+        Preserves valid 0.0 offsets independently on each axis without confusing 0.0 with missing data.
         """
-        x = 0.0
-        y = 0.0
+        x: Optional[float] = None
+        y: Optional[float] = None
+
         # Tier 1: in-memory cache
         cached = self.cached_offsets.get(tool_no, {})
-        if "x" in cached:
+        if "x" in cached and cached["x"] is not None:
             try:
                 x = float(cached["x"])
             except (ValueError, TypeError):
                 pass
-        if "y" in cached:
+        if "y" in cached and cached["y"] is not None:
             try:
                 y = float(cached["y"])
             except (ValueError, TypeError):
                 pass
 
         # Tier 2: Persisted tool_offsets
-        if x == 0.0 or y == 0.0:
+        if x is None or y is None:
             to_obj = self.printer.lookup_object("tool_offsets", None)
             if to_obj is not None and hasattr(to_obj, "parse_tool_offsets"):
                 try:
                     saved = to_obj.parse_tool_offsets().get(tool_no, {})
-                    if x == 0.0 and "x" in saved:
+                    if x is None and "x" in saved and saved["x"] is not None:
                         x = float(saved["x"])
-                    if y == 0.0 and "y" in saved:
+                    if y is None and "y" in saved and saved["y"] is not None:
                         y = float(saved["y"])
                 except Exception:
                     pass
 
         # Tier 3: Klipper [tool Tn] objects or toolchanger runtime
-        if x == 0.0 or y == 0.0:
+        if x is None or y is None:
             tool_obj = None
             for lookup_name in [f"tool {tool_no}", f"tool T{tool_no}", f"tool t{tool_no}"]:
                 tool_obj = self.printer.lookup_object(lookup_name, None)
@@ -1222,9 +1234,9 @@ class ToolCalibrator:
                         tool_obj = tc_tools.get(tool_no) or tc_tools.get(f"T{tool_no}")
 
             if tool_obj is not None:
-                if x == 0.0:
+                if x is None:
                     gx = getattr(tool_obj, "gcode_x_offset", None)
-                    if isinstance(gx, (int, float)) or (isinstance(gx, str) and gx.strip()):
+                    if isinstance(gx, (int, float)) or (isinstance(gx, str) and str(gx).strip()):
                         try:
                             x = float(gx)
                         except (ValueError, TypeError):
@@ -1238,9 +1250,9 @@ class ToolCalibrator:
                                     x = float(elem)
                                 except (ValueError, TypeError):
                                     pass
-                if y == 0.0:
+                if y is None:
                     gy = getattr(tool_obj, "gcode_y_offset", None)
-                    if isinstance(gy, (int, float)) or (isinstance(gy, str) and gy.strip()):
+                    if isinstance(gy, (int, float)) or (isinstance(gy, str) and str(gy).strip()):
                         try:
                             y = float(gy)
                         except (ValueError, TypeError):
@@ -1255,7 +1267,7 @@ class ToolCalibrator:
                                 except (ValueError, TypeError):
                                     pass
 
-        return x, y
+        return (0.0 if x is None else x), (0.0 if y is None else y)
 
     def _execute_z_calibration(self, tool_no: int, toolhead, gcode_move, gcmd, reference_z_result: Dict[str, Any], tool_offsets: Dict[str, float]) -> Dict[str, Any]:
         """Executes Z probing alignment for a single tool with XY offset compensation."""
@@ -1270,13 +1282,18 @@ class ToolCalibrator:
             )
 
         # Derive XY compensation for secondary tool so nozzle hits exact center
-        offset_x = tool_offsets.get("x", 0.0)
-        offset_y = tool_offsets.get("y", 0.0)
-        if tool_no != self.reference_tool:
+        # Check presence per-axis: 0.0 is a valid calibrated offset and must NOT be replaced by fallback!
+        has_x = "x" in tool_offsets and tool_offsets["x"] is not None
+        has_y = "y" in tool_offsets and tool_offsets["y"] is not None
+
+        offset_x = float(tool_offsets["x"]) if has_x else 0.0
+        offset_y = float(tool_offsets["y"]) if has_y else 0.0
+
+        if tool_no != self.reference_tool and (not has_x or not has_y):
             fallback_x, fallback_y = self._lookup_tool_xy_offset(tool_no)
-            if offset_x == 0.0 and fallback_x != 0.0:
+            if not has_x:
                 offset_x = fallback_x
-            if offset_y == 0.0 and fallback_y != 0.0:
+            if not has_y:
                 offset_y = fallback_y
 
         offset_xy = (offset_x, offset_y) if (tool_no != self.reference_tool and (offset_x != 0.0 or offset_y != 0.0)) else None
@@ -1286,8 +1303,8 @@ class ToolCalibrator:
         if self.z_backend_type == "switch":
             self.navigator.approach_switch(toolhead, gcode_move, offset_xy=offset_xy)
         else:
-            if getattr(self.navigator, "carto_speedup", False):
-                logger.info(f"[T{tool_no}] Cartographer speed-up active (safe_z omitted): fast local Z-probing without redundant safe_z lift.")
+            if getattr(self.navigator, "carto_speedup", False) or not self.navigator.is_safe_z_enabled():
+                logger.info(f"[T{tool_no}] Cartographer speed-up active (safe_z omitted/disabled): fast local Z-probing without redundant safe_z lift.")
                 cur_pos = toolhead.get_position()
                 if cur_pos[2] < 2.0:
                     toolhead.manual_move([None, None, 2.0], self.navigator.z_speed)
@@ -1380,6 +1397,18 @@ class ToolCalibrator:
                 self.navigator.depart_station(toolhead, gcode_move)
             return active_ref
 
+    def _parse_bool_param(self, gcmd, param_name: str, default: bool) -> bool:
+        val = gcmd.get(param_name, None)
+        if val is None:
+            return default
+        val_str = str(val).strip().lower()
+        if val_str in ("1", "true", "yes", "on"):
+            return True
+        elif val_str in ("0", "false", "no", "off"):
+            return False
+        else:
+            raise gcmd.error(f"[tool_calibrator] Invalid boolean value for {param_name}='{val}'. Expected 0, 1, True, or False.")
+
     def cmd_CALIBRATE_TOOL_OFFSETS(self, gcmd) -> None:
         """
         Full 1-Click End-to-End Calibration Command.
@@ -1395,21 +1424,26 @@ class ToolCalibrator:
             SAMPLES (int): Number of burst sampling frames per centering step (default: 3)
             WIGGLE (int): 1 to enable adaptive wiggle recovery, 0 to disable (default: 1)
         """
-        calibrate_xy = gcmd.get_int("CALIBRATE_XY", 1) == 1
-        calibrate_z = gcmd.get_int("CALIBRATE_Z", 1) == 1
-        save_config = gcmd.get_int("SAVE_CONFIG", 1) == 1
-        dry_run = gcmd.get_int("DRY_RUN", 0) == 1
-        clean_nozzle = gcmd.get_int("CLEAN_NOZZLE", 0) == 1
+        calibrate_xy = self._parse_bool_param(gcmd, "CALIBRATE_XY", True)
+        calibrate_z = self._parse_bool_param(gcmd, "CALIBRATE_Z", True)
+        save_config = self._parse_bool_param(gcmd, "SAVE_CONFIG", True)
+        dry_run = self._parse_bool_param(gcmd, "DRY_RUN", False)
+        clean_nozzle = self._parse_bool_param(gcmd, "CLEAN_NOZZLE", False)
         order = gcmd.get("ORDER", "XY_FIRST").upper()
-        compensate_focal_z = gcmd.get_int("COMPENSATE_FOCAL_Z", 0) == 1
-        continue_on_error = gcmd.get_int("CONTINUE_ON_ERROR", 0) == 1
-        restore_tool = gcmd.get_int("RESTORE_TOOL", 1) == 1
+        if order not in ("XY_FIRST", "Z_FIRST"):
+            raise gcmd.error(f"[tool_calibrator] Invalid ORDER='{order}'. Valid options are 'XY_FIRST' or 'Z_FIRST'.")
+        compensate_focal_z = self._parse_bool_param(gcmd, "COMPENSATE_FOCAL_Z", False)
+        continue_on_error = self._parse_bool_param(gcmd, "CONTINUE_ON_ERROR", False)
+        restore_tool = self._parse_bool_param(gcmd, "RESTORE_TOOL", True)
         tools_param = gcmd.get("TOOLS", None)
         samples_param = gcmd.get_int("SAMPLES", self.centering_samples)
         if samples_param < 3:
             gcmd.respond_info(f"[tool_calibrator] Notice: Clamping SAMPLES from {samples_param} to 3 for calibration reliability.")
             samples_param = 3
-        wiggle_param = gcmd.get_int("WIGGLE", 1 if self.wiggle_on_failure else 0) == 1
+        elif samples_param > 20:
+            gcmd.respond_info(f"[tool_calibrator] Notice: Clamping SAMPLES from {samples_param} to 20 for calibration reliability.")
+            samples_param = 20
+        wiggle_param = self._parse_bool_param(gcmd, "WIGGLE", self.wiggle_on_failure)
 
         toolhead = self.printer.lookup_object("toolhead")
         gcode_move = self.printer.lookup_object("gcode_move")
@@ -1478,7 +1512,7 @@ class ToolCalibrator:
             is_experimental_shuttle_z = False
             if calibrate_z and not dry_run:
                 meas_ref = getattr(self.z_backend, "measurement_reference", "nozzle")
-                allow_shuttle = self.allow_shuttle_z or (gcmd.get_int("ALLOW_SHUTTLE_Z", 0) == 1)
+                allow_shuttle = self.allow_shuttle_z or self._parse_bool_param(gcmd, "ALLOW_SHUTTLE_Z", False)
                 if meas_ref != "nozzle":
                     if not allow_shuttle:
                         raise gcmd.error(
@@ -1715,7 +1749,11 @@ class ToolCalibrator:
             self.run_record["valid"] = False
             self.run_record["error"] = str(ex)
             self.last_run_status = f"{term_state}: {ex}"
-            self.navigator.depart_station(toolhead, gcode_move)
+            try:
+                self.navigator.depart_station(toolhead, gcode_move)
+            except Exception as cleanup_ex:
+                logger.warning(f"Secondary error in depart_station during failure handling: {cleanup_ex}")
+                gcmd.respond_info(f"!! [tool_calibrator] Note: Station departure cleanup reported: {cleanup_ex}")
             gcmd.respond_info(f"!! [tool_calibrator] Calibration {term_state.capitalize()}: {ex}")
             active_t = self.run_record.get("physical_tool")
             if active_t is None:
@@ -1737,10 +1775,13 @@ class ToolCalibrator:
                     self.run_record["duration_sec"] = 0.0
 
             # Reconcile toolchanger state to avoid uninitialized state on failure
-            active_recon = self.run_record.get("physical_tool")
-            if active_recon is None:
-                active_recon = self.run_record.get("calibrating_tool")
-            self._reconcile_toolchanger_state(active_recon, gcmd)
+            try:
+                active_recon = self.run_record.get("physical_tool")
+                if active_recon is None:
+                    active_recon = self.run_record.get("calibrating_tool")
+                self._reconcile_toolchanger_state(active_recon, gcmd)
+            except Exception as recon_ex:
+                logger.warning(f"Error during _reconcile_toolchanger_state in finally: {recon_ex}")
 
             if session_token:
                 try:

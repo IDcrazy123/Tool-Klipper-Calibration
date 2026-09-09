@@ -67,9 +67,9 @@ class PinAdapterConfig:
 
     def getint(self, option: str, default: Any = None, **kwargs) -> Any:
         if option in ("samples", "switch_samples"):
-            val = self._config.getint("switch_samples", None)
+            val = self._config.getint("switch_samples", None, minval=1, maxval=20)
             if val is None:
-                val = self._config.getint("samples", None)
+                val = self._config.getint("samples", None, minval=1, maxval=20)
             if val is not None:
                 return val
         return self._config.getint(option, default, **kwargs)
@@ -86,9 +86,9 @@ class SwitchBackend(BaseZBackend):
     def __init__(self, config) -> None:
         super().__init__(config)
         self.measurement_reference = "nozzle"
-        self.samples = config.getint("switch_samples", None)
+        self.samples = config.getint("switch_samples", None, minval=1, maxval=20)
         if self.samples is None:
-            self.samples = config.getint("samples", 3, minval=1, maxval=10)
+            self.samples = config.getint("samples", 3, minval=1, maxval=20)
         self.switch_pin = config.get("switch_pin", config.get("pin", None))
         self.probing_speed = config.getfloat("probing_speed", 3.0, above=0.0)
         self.lift_speed = config.getfloat("lift_speed", 5.0, above=0.0)

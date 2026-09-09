@@ -38,26 +38,28 @@ class SafeNavigator:
             self.z_speed /= 60.0
 
         # Global Safe Z Clearance Altitude (configured_safe_z is None if omitted/commented out)
-        # Cartographer Speed-Up Mode: When safe_z is omitted/commented out, Cartographer Z-probing
-        # executes in fast mode without redundant high-Z lifts between touch probes.
-        # Camera station, station departure, and toolchange safe clearance remain protected at station_safe_z.
-        # If safe_z is explicitly configured with a number, that declared number is strictly respected everywhere.
+        # Precedence & State Rules:
+        # 1. safe_z > 0 declared: ENABLED and strictly respects the declared value.
+        # 2. safe_z = 0, commented out, or omitted: DISABLED (no safe_z lift, no restoration from old state).
+        # 3. Old saved data CANNOT reactivate safe_z or override a declared safe_z.
         configured_sz = config.getfloat("safe_z", None, minval=0.0)
         self.configured_safe_z = configured_sz
         self.z_backend_type = config.get("z_backend", "switch").strip().lower()
         self.force_safe_z = config.getboolean("force_safe_z", False) if hasattr(config, "getboolean") else bool(config.get("force_safe_z", False))
 
+        if configured_sz is not None and configured_sz > 0.0:
+            self.safe_z = configured_sz
+            self.safe_z_enabled = True
+        else:
+            self.safe_z = None
+            self.safe_z_enabled = False
+
         # Cartographer speed-up mode applies strictly to local Cartographer Z measurement
         self.carto_speedup = (
             self.z_backend_type == "cartographer"
-            and (self.configured_safe_z is None or self.configured_safe_z <= 0.0)
+            and not self.safe_z_enabled
             and not self.force_safe_z
         )
-
-        if configured_sz is not None and configured_sz > 0.0:
-            self.safe_z = configured_sz
-        else:
-            self.safe_z = 35.0
 
         # Camera Station Waypoints (supports camera_target_x and camera_x aliases)
         self.cam_approach_x = config.getfloat("camera_approach_x", None)
@@ -215,17 +217,24 @@ class SafeNavigator:
         homed_axes = status.get("homed_axes", "")
         return "x" in homed_axes and "y" in homed_axes and "z" in homed_axes
 
+    def is_safe_z_enabled(self) -> bool:
+        """Returns True only when safe_z is actively enabled with a positive value."""
+        return bool(getattr(self, "safe_z_enabled", False) and self.safe_z is not None and self.safe_z > 0.0)
+
     def move_to_safe_z(self, toolhead, gcode_move) -> None:
         """
-        Elevates Z vertically to safe_z if currently lower.
+        Elevates Z vertically to safe_z if currently lower and safe_z is enabled.
         Clamps safe_z against the user's physical frame max_z to avoid Move out of range.
         Always waits for moves to finish before returning.
-        Enforces a minimum safe height of 10.0mm if safe_z <= 0 to guarantee motion safety.
+        If safe_z is disabled (None or <= 0.0), no motion is performed.
         """
+        if not self.is_safe_z_enabled():
+            return
+
         toolhead.wait_moves()
         cur_pos = toolhead.get_position()
 
-        target_clearance = self.safe_z if self.safe_z > 0.0 else 10.0
+        target_clearance = self.safe_z
 
         limits = self.get_axis_limits()
         max_z = limits["z"][1]
@@ -240,7 +249,7 @@ class SafeNavigator:
     def approach_camera(self, toolhead, gcode_move, target_z: Optional[float] = None) -> None:
         """
         Executes 3-tier safe transition into the Camera Station:
-        1. Raise Z to Safe_Z.
+        1. Raise Z to Safe_Z if enabled.
         2. Rapid XY travel to Camera Safe Approach point.
         3. Descend Z to focal height (or compensated focal altitude for secondary tools).
         4. Slow creep XY into Camera optical center.
@@ -263,8 +272,9 @@ class SafeNavigator:
         self.validate_coordinate_safety(x=app_x, y=app_y)
         self.validate_coordinate_safety(x=self.cam_target_x, y=self.cam_target_y, z=effective_focal_z)
 
-        # Step 1: Vertical lift to safe clearance
-        self.move_to_safe_z(toolhead, gcode_move)
+        # Step 1: Vertical lift to safe clearance if enabled
+        if self.is_safe_z_enabled():
+            self.move_to_safe_z(toolhead, gcode_move)
 
         # Step 2: Lateral XY travel to approach waypoint outside shroud
         toolhead.manual_move([app_x, app_y, None], self.travel_speed)
@@ -309,8 +319,9 @@ class SafeNavigator:
         self.validate_coordinate_safety(x=app_x, y=app_y)
         self.validate_coordinate_safety(x=eff_target_x, y=eff_target_y)
 
-        # Step 1: Raise to Safe_Z
-        self.move_to_safe_z(toolhead, gcode_move)
+        # Step 1: Raise to Safe_Z if enabled
+        if self.is_safe_z_enabled():
+            self.move_to_safe_z(toolhead, gcode_move)
 
         # Step 2: Move to Approach XY
         toolhead.manual_move([app_x, app_y, None], self.travel_speed)
@@ -321,8 +332,10 @@ class SafeNavigator:
             target_z = self.switch_approach_z
         elif self.switch_target_z is not None:
             target_z = self.switch_target_z + z_clearance
-        else:
+        elif self.is_safe_z_enabled():
             target_z = max(5.0, self.safe_z)
+        else:
+            target_z = 5.0
         toolhead.manual_move([None, None, target_z], self.z_speed)
         toolhead.wait_moves()
 
@@ -333,6 +346,7 @@ class SafeNavigator:
 
     def depart_station(self, toolhead, gcode_move) -> None:
         """
-        Safely departs any station by elevating Z back to safe_z.
+        Safely departs any station by elevating Z back to safe_z if safe_z is enabled.
         """
-        self.move_to_safe_z(toolhead, gcode_move)
+        if self.is_safe_z_enabled():
+            self.move_to_safe_z(toolhead, gcode_move)

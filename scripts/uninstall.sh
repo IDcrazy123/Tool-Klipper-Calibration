@@ -16,7 +16,7 @@ echo -e "${YELLOW}    Tool-Klipper-Calibration Safe Uninstaller       ${NC}"
 echo -e "${YELLOW}====================================================${NC}"
 
 # Parse optional arguments
-KEEP_DATA=true
+KEEP_DATA=""
 CONFIG_SUBDIR=""
 PURGE_REPO=false
 PURGE_CONFIG=false
@@ -54,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --config-subdir)
+            if [ $# -lt 2 ]; then
+                echo -e "${RED}[ERR] Thiếu đối số cho --config-subdir!${NC}"
+                exit 1
+            fi
             CONFIG_SUBDIR="$2"
             shift 2
             ;;
@@ -79,7 +83,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Interactive mode: if run in terminal without explicit flags, prompt user for clean uninstallation
-if [ -t 0 ] && [ "${PURGE_ALL}" = false ] && [ "${KEEP_DATA}" = false ] && [ "${PURGE_REPO}" = false ] && [ "${PURGE_CONFIG}" = false ] && [ "${PURGE_BACKUPS}" = false ]; then
+if [ -t 0 ] && [ "${PURGE_ALL}" = false ] && [ -z "${KEEP_DATA}" ] && [ "${PURGE_REPO}" = false ] && [ "${PURGE_CONFIG}" = false ] && [ "${PURGE_BACKUPS}" = false ]; then
     echo -e "\n${CYAN}====================================================${NC}"
     echo -e "${CYAN}    TÙY CHỌN DỌN DẸP SẠCH SẼ (CLEAN UNINSTALL)      ${NC}"
     echo -e "${CYAN}====================================================${NC}"
@@ -100,7 +104,19 @@ if [ -t 0 ] && [ "${PURGE_ALL}" = false ] && [ "${KEEP_DATA}" = false ] && [ "${
     if [[ ! "${ans_repo}" =~ ^[Nn] ]]; then
         PURGE_REPO=true
     fi
+
+    read -rp "4. Bạn có muốn bảo tồn dữ liệu toạ độ tool_offsets.cfg? [Y/n]: " ans_data
+    if [[ ! "${ans_data}" =~ ^[Nn] ]]; then
+        KEEP_DATA=true
+    else
+        KEEP_DATA=false
+    fi
     echo ""
+fi
+
+# Fallback default if not specified interactively or via flags
+if [ -z "${KEEP_DATA}" ]; then
+    KEEP_DATA=true
 fi
 
 # 0. Check user permissions (Do NOT run as root/sudo directly)
@@ -531,10 +547,18 @@ fi
 if [ "${PURGE_REPO}" = true ]; then
     echo -e "\n${YELLOW}[!] Đang xóa sạch hoàn toàn thư mục repository clone từ git (--purge-repo)...${NC}"
     TARGET_REPO="${REPO_DIR}"
-    cd "${HOME}"
-    rm -rf "${TARGET_REPO}"
-    echo -e "${GREEN}[✔] Đã xóa hoàn toàn thư mục git clone: ${TARGET_REPO}${NC}"
-    echo -e "${GREEN}    Bây giờ bạn có thể thực hiện 'git clone' mới mà không bị lỗi 'already exists'!${NC}"
+    if [ -n "${TARGET_REPO}" ] && [ -d "${TARGET_REPO}" ] && [ "${TARGET_REPO}" != "/" ] && [ "${TARGET_REPO}" != "${HOME}" ]; then
+        if [ -f "${TARGET_REPO}/klippy/extras/tool_calibrator.py" ] && [ -f "${TARGET_REPO}/server/tool_calibrator_server.py" ]; then
+            cd "${HOME}"
+            rm -rf "${TARGET_REPO}"
+            echo -e "${GREEN}[✔] Đã xóa hoàn toàn thư mục git clone: ${TARGET_REPO}${NC}"
+            echo -e "${GREEN}    Bây giờ bạn có thể thực hiện 'git clone' mới mà không bị lỗi 'already exists'!${NC}"
+        else
+            echo -e "${RED}[ERR] Xác minh an toàn thất bại: ${TARGET_REPO} không phải là thư mục repo Tool-Klipper-Calibration hợp lệ. Bỏ qua xóa repo!${NC}"
+        fi
+    else
+        echo -e "${RED}[ERR] Đường dẫn repository không an toàn: ${TARGET_REPO}. Bỏ qua xóa repo!${NC}"
+    fi
 fi
 
 echo -e "\n${GREEN}====================================================${NC}"

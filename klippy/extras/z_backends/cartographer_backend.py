@@ -104,7 +104,7 @@ class CartographerBackend(BaseZBackend):
         raw = self._resolve_touch_cmd(
             self.configured_touch_home_gcode,
             "CARTOGRAPHER_TOUCH_HOME",
-            ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
+            ("SCANNER_TOUCH_HOME", "CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
         )
         return self._build_home_cmd(raw)
 
@@ -113,7 +113,7 @@ class CartographerBackend(BaseZBackend):
         raw = self._resolve_touch_cmd(
             self.configured_touch_probe_gcode,
             "CARTOGRAPHER_TOUCH_PROBE",
-            ("SCANNER_TOUCH_PROBE", "CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
+            ("SCANNER_TOUCH_PROBE",)
         )
         return self._build_probe_cmd(raw)
 
@@ -332,6 +332,14 @@ class CartographerBackend(BaseZBackend):
         toolhead.wait_moves()
 
         cmd = self.touch_probe_gcode
+        cmd_base = cmd.split()[0].upper()
+        if cmd_base in ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH") or "HOME" in cmd_base:
+            raise gcmd.error(
+                f"[ERR_Z_004] Cartographer Touch non-homing probe API (CARTOGRAPHER_TOUCH_PROBE / SCANNER_TOUCH_PROBE) "
+                f"is required for secondary tool probing, but got homing command '{cmd_base}'. "
+                "Secondary tool touch cannot silently use homing routines as they redefine the coordinate origin. "
+                "Please update Cartographer plugin or configure a valid touch_probe_gcode."
+            )
         gcmd.respond_info(f"[T{tool_number}] Running {cmd}...")
         self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()

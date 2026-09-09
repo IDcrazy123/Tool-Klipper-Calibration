@@ -270,38 +270,86 @@ class ConfigManager:
         logger.info(f"Successfully committed all tool offsets to {self.config_path} in single atomic transaction")
 
 
+    def _get_valid_backup_roots(self) -> List[str]:
+        """Returns list of allowed canonical directory roots for configuration backups."""
+        roots = [
+            self.backup_dir,
+            os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets"),
+            os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets"),
+            self.config_dir,
+        ]
+        return [os.path.realpath(r) for r in roots if r]
+
     def rollback(self, target_backup: Optional[str] = None) -> str:
         """
         Restores a specific timestamped backup copy or the newest available backup.
+        Validates backup location within allowed backup roots, validates content integrity,
+        creates a pre-rollback backup, and atomically writes to config_path.
 
         Args:
             target_backup: Optional specific backup filename or path to restore.
 
         Returns:
-            str: Name of the restored backup file.
+            str: Name/path of the restored backup file.
         """
         backups = self._get_all_backups()
+        valid_roots = self._get_valid_backup_roots()
 
         if target_backup:
-            # Check direct path, inside tool_calibrator/backups, legacy backup dir, or config dir
             candidate = os.path.expanduser(target_backup)
-            if not os.path.exists(candidate):
-                candidate = os.path.join(self.backup_dir, os.path.basename(target_backup))
-            if not os.path.exists(candidate):
-                candidate = os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets", os.path.basename(target_backup))
-            if not os.path.exists(candidate):
-                candidate = os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets", os.path.basename(target_backup))
-            if not os.path.exists(candidate):
-                candidate = os.path.join(self.config_dir, os.path.basename(target_backup))
+            if not os.path.isabs(candidate):
+                found = None
+                for root in valid_roots:
+                    test_path = os.path.join(root, os.path.basename(candidate))
+                    if os.path.exists(test_path):
+                        found = test_path
+                        break
+                if found:
+                    candidate = found
 
             if not os.path.exists(candidate):
                 raise ConfigManagerException(f"Specified backup file not found: {target_backup}")
-            chosen_backup = candidate
+
+            chosen_backup = os.path.abspath(candidate)
+            chosen_real = os.path.realpath(candidate)
+            # Security check: backup file must strictly reside inside an allowed backup root
+            is_allowed = False
+            for root in valid_roots:
+                try:
+                    if os.path.commonpath([root, chosen_real]) == root:
+                        is_allowed = True
+                        break
+                except (ValueError, OSError):
+                    pass
+            if not is_allowed:
+                raise ConfigManagerException(f"Unauthorized backup file location outside backup roots: {target_backup}")
         else:
             if not backups:
                 raise ConfigManagerException("No historical backups found to restore.")
             chosen_backup = backups[-1]
 
-        shutil.copy2(chosen_backup, self.config_path)
+        # Validate content before applying
+        try:
+            with open(chosen_backup, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "\x00" in content:
+                raise ConfigManagerException("Backup file contains null bytes (binary corruption).")
+            lines = [l + "\n" for l in content.splitlines()]
+            if content and not lines:
+                lines = [content]
+        except Exception as e:
+            if isinstance(e, ConfigManagerException):
+                raise
+            raise ConfigManagerException(f"Failed to read/validate backup file {chosen_backup}: {e}")
+
+        # Create pre-rollback backup of current config if it exists
+        if os.path.exists(self.config_path):
+            try:
+                self.create_backup()
+            except Exception as e:
+                logger.warning(f"Could not create pre-rollback backup: {e}")
+
+        # Atomic replacement with fsync
+        self._write_lines_atomically(lines)
         logger.info(f"Restored configuration from: {chosen_backup}")
         return chosen_backup

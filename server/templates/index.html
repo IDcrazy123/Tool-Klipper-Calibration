@@ -553,6 +553,19 @@
                     <button id="btn-save-cam-url" class="btn btn-secondary">Save Camera Snapshot URL</button>
                 </div>
             </div>
+
+            <!-- API Authentication Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <span>🔒</span> API Security & Authentication
+                    </h2>
+                </div>
+                <div class="controls-group">
+                    <input id="input-api-token" type="password" class="input-text" placeholder="CALIBRATION_API_TOKEN (if required)">
+                    <button id="btn-save-token" class="btn btn-secondary">Save Token</button>
+                </div>
+            </div>
         </section>
     </main>
 
@@ -560,9 +573,30 @@
         let currentZoom = 1.0;
         let lastDetectedUV = null;
 
+        function getAuthHeaders() {
+            const headers = {};
+            const token = (document.getElementById("input-api-token")?.value || localStorage.getItem("calib_api_token") || "").trim();
+            if (token) {
+                headers["X-API-Token"] = token;
+            }
+            const sessionToken = sessionStorage.getItem("calib_session_token");
+            if (sessionToken) {
+                headers["X-Session-Token"] = sessionToken;
+            }
+            return headers;
+        }
+
+        async function apiFetch(url, options = {}) {
+            options.headers = {
+                ...getAuthHeaders(),
+                ...(options.headers || {})
+            };
+            return fetch(url, options);
+        }
+
         async function fetchHealth() {
             try {
-                const res = await fetch("/health");
+                const res = await apiFetch("/health");
                 const data = await res.json();
                 document.getElementById("val-mpp").textContent = data.calibrated_mpp ? (data.calibrated_mpp.toFixed(5) + " mm/px") : "Uncalibrated";
                 document.getElementById("val-matrix").textContent = data.matrix_solved ? "YES (Active)" : "Pending";
@@ -577,7 +611,7 @@
 
         async function loadSampleList() {
             try {
-                const res = await fetch("/api/samples");
+                const res = await apiFetch("/api/samples");
                 const data = await res.json();
                 const sel = document.getElementById("select-sample");
                 if (data.samples && data.samples.length > 0) {
@@ -646,7 +680,7 @@
             statusEl.textContent = "Executing curvature and cascade sweep...";
             statusEl.style.color = "var(--accent-cyan)";
             try {
-                const res = await fetch("/detect_nozzle", {
+                const res = await apiFetch("/detect_nozzle", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ min_matches: 1, timeout: 3.0 })
@@ -669,7 +703,7 @@
             statusEl.textContent = `Analyzing ${sampleName}...`;
             statusEl.style.color = "var(--accent-cyan)";
             try {
-                const res = await fetch("/api/test_sample", {
+                const res = await apiFetch("/api/test_sample", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ sample_name: sampleName })
@@ -686,17 +720,30 @@
             const url = document.getElementById("input-cam-url").value.trim();
             if (!url) return;
             try {
-                const res = await fetch("/set_camera", {
+                const res = await apiFetch("/set_camera", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ camera_url: url })
                 });
                 const data = await res.json();
-                alert(data.success ? "Camera URL updated successfully!" : "Failed to update URL");
+                alert(data.success ? "Camera URL updated successfully!" : ("Failed to update URL: " + (data.error || "Unknown error")));
                 fetchHealth();
             } catch (err) {
                 alert("Error: " + err.message);
             }
+        });
+
+        const tokenInput = document.getElementById("input-api-token");
+        const savedToken = localStorage.getItem("calib_api_token") || "";
+        if (tokenInput && savedToken) {
+            tokenInput.value = savedToken;
+        }
+        document.getElementById("btn-save-token")?.addEventListener("click", () => {
+            const tok = tokenInput.value.trim();
+            localStorage.setItem("calib_api_token", tok);
+            alert("API token saved in browser session.");
+            fetchHealth();
+            refreshStream();
         });
 
         const streamImg = document.getElementById("stream-img");
@@ -707,7 +754,9 @@
                 clearTimeout(streamReconnectTimer);
                 streamReconnectTimer = null;
             }
-            streamImg.src = "/preview?t=" + Date.now();
+            const token = (document.getElementById("input-api-token")?.value || localStorage.getItem("calib_api_token") || "").trim();
+            const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+            streamImg.src = `/preview?t=${Date.now()}${tokenParam}`;
         }
 
         streamImg.onerror = function() {
@@ -777,7 +826,7 @@
             }
 
             try {
-                const res = await fetch("/calculate_tool_delta", {
+                const res = await apiFetch("/calculate_tool_delta", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({

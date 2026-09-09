@@ -30,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --config-subdir)
+            if [ $# -lt 2 ]; then
+                echo -e "${RED}[ERR] Tùy chọn --config-subdir yêu cầu một đối số!${NC}"
+                exit 1
+            fi
             CONFIG_SUBDIR="$2"
             shift 2
             ;;
@@ -166,21 +170,59 @@ echo -e "${GREEN}[+] Config directory:        ${TARGET_CONFIG_DIR}${NC}"
 echo -e "${GREEN}[+] Python virtualenv:       ${VENV_DIR}${NC}"
 echo -e "${GREEN}[+] Service mode:            ${SERVICE_MODE}${NC}"
 
-# Setup Transactional Rollback Journal
-rm -f "${JOURNAL_FILE}"
+# Setup Transactional Rollback Journal & Backup directory
+JOURNAL_FILE="${REPO_DIR}/.install_manifest.txt"
+INSTALL_BACKUP_DIR="${REPO_DIR}/.install_backup"
+rm -rf "${INSTALL_BACKUP_DIR}" "${JOURNAL_FILE}"
+mkdir -p "${INSTALL_BACKUP_DIR}"
 touch "${JOURNAL_FILE}"
 
 cleanup_on_error() {
     local exit_code=$?
     echo -e "\n${RED}[ERR] Quá trình cài đặt bị gián đoạn (Exit code: ${exit_code})! Đang hoàn tác theo thứ tự ngược lại...${NC}"
     if [ -f "${JOURNAL_FILE}" ]; then
-        # Rollback in reverse order
         (tac "${JOURNAL_FILE}" 2>/dev/null || cat "${JOURNAL_FILE}") | while IFS= read -r line || [ -n "${line}" ]; do
             key="$(echo "${line}" | cut -d'=' -f1)"
             val="$(echo "${line}" | cut -d'=' -f2-)"
             case "${key}" in
-                SYMLINK)
+                NEW_SYMLINK)
                     [ -L "${val}" ] && rm -f "${val}"
+                    ;;
+                SYMLINK_BACKUP)
+                    dst="$(echo "${val}" | cut -d':' -f1)"
+                    orig_target="$(echo "${val}" | cut -d':' -f2)"
+                    rm -f "${dst}"
+                    [ -n "${orig_target}" ] && ln -s "${orig_target}" "${dst}"
+                    ;;
+                FILE_BACKUP)
+                    dst="$(echo "${val}" | cut -d':' -f1)"
+                    orig_file="$(echo "${val}" | cut -d':' -f2)"
+                    rm -f "${dst}"
+                    [ -f "${orig_file}" ] && cp -a "${orig_file}" "${dst}" && rm -f "${orig_file}"
+                    ;;
+                SYMLINK_CONVERTED)
+                    dst="$(echo "${val}" | cut -d':' -f1)"
+                    orig_target="$(echo "${val}" | cut -d':' -f2)"
+                    rm -f "${dst}"
+                    [ -n "${orig_target}" ] && ln -s "${orig_target}" "${dst}"
+                    ;;
+                SERVICE_INSTALLED)
+                    sfile="$(echo "${val}" | cut -d':' -f1)"
+                    smode="$(echo "${val}" | cut -d':' -f2)"
+                    if [ "${smode}" = "system" ]; then
+                        sudo systemctl stop tool_calibrator.service 2>/dev/null || true
+                        sudo systemctl disable tool_calibrator.service 2>/dev/null || true
+                        [ -f "${sfile}" ] && sudo rm -f "${sfile}"
+                        sudo systemctl daemon-reload 2>/dev/null || true
+                    else
+                        systemctl --user stop tool_calibrator.service 2>/dev/null || true
+                        systemctl --user disable tool_calibrator.service 2>/dev/null || true
+                        [ -f "${sfile}" ] && rm -f "${sfile}"
+                        systemctl --user daemon-reload 2>/dev/null || true
+                    fi
+                    ;;
+                ASVC_ENTRY_ADDED)
+                    [ -f "${val}" ] && sed -i '/^tool_calibrator$/d' "${val}" 2>/dev/null || true
                     ;;
                 FILE)
                     [ -f "${val}" ] && rm -f "${val}"
@@ -195,12 +237,31 @@ cleanup_on_error() {
                     ;;
             esac
         done
-        rm -f "${JOURNAL_FILE}"
+        rm -rf "${INSTALL_BACKUP_DIR}" "${JOURNAL_FILE}" 2>/dev/null || true
     fi
     echo -e "${YELLOW}[!] Đã hoàn tác các thay đổi tạm thời. Vui lòng kiểm tra lỗi trước khi thử lại.${NC}"
     exit "${exit_code}"
 }
 trap cleanup_on_error ERR
+
+create_symlink_with_journal() {
+    local src="$1"
+    local dst="$2"
+    if [ -L "${dst}" ]; then
+        local link_target
+        link_target="$(readlink "${dst}")"
+        echo "SYMLINK_BACKUP=${dst}:${link_target}" >> "${JOURNAL_FILE}"
+    elif [ -e "${dst}" ]; then
+        local base
+        base="$(basename "${dst}")"
+        local bk_file="${INSTALL_BACKUP_DIR}/${base}.orig_$(date +%s%N)"
+        cp -a "${dst}" "${bk_file}"
+        echo "FILE_BACKUP=${dst}:${bk_file}" >> "${JOURNAL_FILE}"
+    else
+        echo "NEW_SYMLINK=${dst}" >> "${JOURNAL_FILE}"
+    fi
+    ln -sf "${src}" "${dst}"
+}
 
 # 2. Preflight Check: System dependencies & Python
 echo -e "\n${BLUE}[1/6] Kiểm tra môi trường hệ thống & Python...${NC}"
@@ -276,16 +337,14 @@ mkdir -p "${KLIPPY_EXTRAS}/z_backends"
 for file in "tool_calibrator.py" "tool_calibrator_station.py" "tool_offsets.py" "safe_navigator.py" "config_manager.py"; do
     TARGET="${KLIPPY_EXTRAS}/${file}"
     SOURCE="${REPO_DIR}/klippy/extras/${file}"
-    ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
+    create_symlink_with_journal "${SOURCE}" "${TARGET}"
     echo -e "${GREEN}    Linked ${file} -> ${KLIPPY_EXTRAS}/${NC}"
 done
 
 for zb_file in "__init__.py" "base_z.py" "switch_backend.py" "cartographer_backend.py"; do
     TARGET="${KLIPPY_EXTRAS}/z_backends/${zb_file}"
     SOURCE="${REPO_DIR}/klippy/extras/z_backends/${zb_file}"
-    ln -sf "${SOURCE}" "${TARGET}"
-    echo "SYMLINK=${TARGET}" >> "${JOURNAL_FILE}"
+    create_symlink_with_journal "${SOURCE}" "${TARGET}"
     echo -e "${GREEN}    Linked z_backends/${zb_file} -> ${KLIPPY_EXTRAS}/z_backends/${NC}"
 done
 
@@ -300,6 +359,8 @@ SOURCE="${REPO_DIR}/macros/tool_calibrator.cfg"
 
 if [ -L "${TARGET}" ]; then
     echo -e "${CYAN}[+] Chuyển đổi symlink thành tệp cấu hình thực tế để cho phép chỉnh sửa trên Mainsail/Fluidd...${NC}"
+    orig_target="$(readlink "${TARGET}")"
+    echo "SYMLINK_CONVERTED=${TARGET}:${orig_target}" >> "${JOURNAL_FILE}"
     rm -f "${TARGET}"
     cp "${SOURCE}" "${TARGET}"
     chmod 664 "${TARGET}"
@@ -391,9 +452,12 @@ for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/t
     if [ -d "${legacy_bk}" ]; then
         echo -e "${CYAN}[+] Di chuyển các bản sao lưu cũ vào thư mục tập trung: ${MACRO_DIR}/backups/...${NC}"
         mkdir -p "${MACRO_DIR}/backups"
-        cp -rn "${legacy_bk}"/* "${MACRO_DIR}/backups/" 2>/dev/null || true
-        rm -rf "${legacy_bk}"
-        echo -e "${GREEN}[✔] Đã dọn sạch thư mục sao lưu bên ngoài (${legacy_bk}).${NC}"
+        if cp -rn "${legacy_bk}"/* "${MACRO_DIR}/backups/" 2>/dev/null; then
+            rm -rf "${legacy_bk}"
+            echo -e "${GREEN}[✔] Đã dọn sạch thư mục sao lưu bên ngoài (${legacy_bk}).${NC}"
+        else
+            echo -e "${YELLOW}[!] Không thể sao chép hoàn toàn từ ${legacy_bk}, giữ nguyên thư mục nguồn.${NC}"
+        fi
     fi
 done
 
@@ -402,8 +466,13 @@ SYS_BK_DIR="${MACRO_DIR}/backups/system_configs"
 for loose_bak in "${CONFIG_DIR}"/printer.cfg.tkc_bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.tkc_bak_* "${CONFIG_DIR}"/printer.cfg.uninstall.bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.uninstall.bak_*; do
     if [ -f "${loose_bak}" ] && [ ! -L "${loose_bak}" ]; then
         mkdir -p "${SYS_BK_DIR}"
-        mv -f "${loose_bak}" "${SYS_BK_DIR}/" 2>/dev/null || true
-        echo -e "${GREEN}[✔] Đã gom bản sao lưu (${loose_bak##*/}) vào ${SYS_BK_DIR}/${NC}"
+        dest_name="${loose_bak##*/}"
+        dest_file="${SYS_BK_DIR}/${dest_name}"
+        if [ -f "${dest_file}" ]; then
+            dest_file="${SYS_BK_DIR}/${dest_name}_$(date +%s%N 2>/dev/null || date +%s)"
+        fi
+        mv "${loose_bak}" "${dest_file}" 2>/dev/null || true
+        echo -e "${GREEN}[✔] Đã gom bản sao lưu (${dest_file##*/}) vào ${SYS_BK_DIR}/${NC}"
     fi
 done
 
@@ -428,6 +497,7 @@ if [ -d "${HOME}/printer_data" ]; then
     if ! grep -q "^tool_calibrator$" "${ASVC_FILE}" 2>/dev/null; then
         [ -s "${ASVC_FILE}" ] && echo "" >> "${ASVC_FILE}"
         echo "tool_calibrator" >> "${ASVC_FILE}"
+        echo "ASVC_ENTRY_ADDED=${ASVC_FILE}" >> "${JOURNAL_FILE}"
         echo -e "${GREEN}[✔] Đã thêm 'tool_calibrator' vào ${ASVC_FILE}${NC}"
     fi
 fi
@@ -447,6 +517,7 @@ if [ "${SERVICE_MODE}" = "system" ]; then
     sudo mv "${TEMP_SERVICE}" "${SERVICE_FILE}"
     sudo chown root:root "${SERVICE_FILE}"
     sudo chmod 644 "${SERVICE_FILE}"
+    echo "SERVICE_INSTALLED=${SERVICE_FILE}:system" >> "${JOURNAL_FILE}"
 
     echo -e "${GREEN}[+] Reloading systemd daemon và kích hoạt system service...${NC}"
     sudo systemctl daemon-reload
@@ -462,6 +533,7 @@ else
         -e "s|%REPO_DIR%|${REPO_DIR}|g" \
         -e "s|%VENV_DIR%|${VENV_DIR}|g" \
         "${REPO_DIR}/scripts/tool_calibrator.service" > "${USER_SERVICE_FILE}"
+    echo "SERVICE_INSTALLED=${USER_SERVICE_FILE}:user" >> "${JOURNAL_FILE}"
 
     echo -e "${GREEN}[+] Reloading systemd user daemon và kích hoạt user service...${NC}"
     systemctl --user daemon-reload
@@ -504,29 +576,35 @@ fi
 # 7. Verify Service Health
 echo -e "\n${BLUE}[6/6] Kiểm tra trạng thái Vision Server daemon...${NC}"
 HEALTH_SUCCESS=false
-HEALTH_OUTPUT=""
+VER=""
+CMT=""
+PROC=""
+CAM=""
+SCALE=""
+MAT=""
 
 for i in {1..10}; do
     HEALTH_RESP=$(curl -sS --fail --max-time 3 http://127.0.0.1:8090/health 2>/dev/null || true)
     if [ -n "${HEALTH_RESP}" ]; then
-        HEALTH_OUTPUT=$(python3 -c "
+        PARSED_HEALTH=$(printf '%s' "${HEALTH_RESP}" | python3 -c "
 import sys, json
 try:
-    data = json.loads('''${HEALTH_RESP}''')
+    data = json.load(sys.stdin)
     if data.get('status') == 'ok' and data.get('service') == 'tool_calibrator_server':
-        ver = data.get('version', 'unknown')
-        cmt = data.get('commit', 'unknown')[:7]
+        ver = str(data.get('version', 'unknown')).replace('\n', ' ')
+        cmt = str(data.get('commit', 'unknown'))[:7].replace('\n', ' ')
         proc = 'READY' if data.get('process_ready', True) else 'NOT_READY'
         cam = 'CONNECTED' if data.get('camera_ready') else 'PENDING/OFFLINE'
         scale = 'SOLVED' if data.get('scale_ready') else 'NOT_SET'
         mat = 'LOADED' if data.get('matrix_ready') else 'NOT_SET'
-        print(f'VER={ver}\nCMT={cmt}\nPROC={proc}\nCAM={cam}\nSCALE={scale}\nMAT={mat}')
+        print(f'{ver}\t{cmt}\t{proc}\t{cam}\t{scale}\t{mat}')
         sys.exit(0)
-except Exception as ex:
+except Exception:
     pass
 sys.exit(1)
 " 2>/dev/null || true)
-        if [ -n "${HEALTH_OUTPUT}" ]; then
+        if [ -n "${PARSED_HEALTH}" ]; then
+            IFS=$'\t' read -r VER CMT PROC CAM SCALE MAT <<< "${PARSED_HEALTH}"
             HEALTH_SUCCESS=true
             break
         fi
@@ -535,7 +613,6 @@ sys.exit(1)
 done
 
 if [ "${HEALTH_SUCCESS}" = true ]; then
-    eval "${HEALTH_OUTPUT}"
     echo -e "${GREEN}[✔] Tool Calibrator Vision Daemon đang HOẠT ĐỘNG trên cổng http://127.0.0.1:8090${NC}"
     echo -e "${GREEN}    [Layer 1: Dịch vụ lõi] Phiên bản: ${VER} (Commit: ${CMT}) | Daemon: ${PROC} | Port 8090: LISTENING${NC}"
     echo -e "${CYAN}    [Layer 2: Dữ liệu quang học] Camera: ${CAM} | Scale MPP: ${SCALE} | Affine Matrix: ${MAT}${NC}"

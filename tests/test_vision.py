@@ -387,7 +387,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertEqual(data["delta_uv"], [-2.42, -4.29])
         self.assertAlmostEqual(data["delta_xy"][0], 0.0303, delta=0.001)
         self.assertAlmostEqual(data["delta_xy"][1], 0.0536, delta=0.001)
-        self.assertIn("SET_TOOL_OFFSET TOOL=1", data["gcode_command"])
+        self.assertIn("SET_TOOL_PARAMETER T=1 PARAMETER=gcode_x_offset", data["gcode_command"])
         self.assertIn("[tool_offsets]", data["config_snippet"])
         self.assertIn("t1_x: 0.0302", data["config_snippet"])
 
@@ -549,22 +549,32 @@ class TestServerEndpoints(unittest.TestCase):
         orig_max_r = detector.max_radius
 
         dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        from server.nozzle_detector import DetectionResult
         with unittest.mock.patch.object(grabber, "grab_frame", return_value=(dummy_frame, None)):
             # Call /detect_nozzle with custom overrides
             with unittest.mock.patch.object(detector, "detect") as mock_detect:
-                mock_res = MagicMock()
-                mock_res.found = False
-                mock_res.center = None
-                mock_res.radius = 0.0
-                mock_res.confidence = 0.0
-                mock_res.diagnostics = {}
+                mock_res = DetectionResult(
+                    found=True,
+                    center_uv=(320.0, 240.0),
+                    radius=15.0,
+                    confidence=0.99,
+                    tier=1,
+                    combo=0,
+                    annotated_frame=dummy_frame
+                )
                 mock_detect.return_value = mock_res
 
-                client.post("/detect_nozzle", json={
+                res = client.post("/detect_nozzle", json={
                     "min_confidence": 0.99,
                     "min_radius": 25.0,
                     "max_radius": 80.0
                 })
+                self.assertEqual(res.status_code, 200)
+                data = res.get_json()
+                self.assertIn("success", data)
+                self.assertTrue(data["success"])
+                self.assertTrue(data["found"])
+                self.assertEqual(data.get("tier"), 1)
 
             # Assert detector instance attributes remained unchanged
             self.assertEqual(detector.min_confidence, orig_conf)
