@@ -68,15 +68,31 @@ class CartographerBackend(BaseZBackend):
                 "Contactless carriage/shuttle scan mode does not track individual nozzle tip lengths across tool changes."
             )
 
-    def _resolve_touch_cmd(self, configured: Optional[str], primary: str, fallbacks: Tuple[str, ...]) -> str:
-        """Finds the active command registered in Klipper gcode command registry."""
-        if configured:
-            return configured
+    def _get_registered_commands(self) -> Set[str]:
         registered = set()
         for attr in ("ready_gcode_handlers", "base_gcode_handlers", "gcode_handlers", "commands"):
             handlers = getattr(self.gcode, attr, None)
             if handlers and isinstance(handlers, dict):
-                registered.update(handlers.keys())
+                registered.update(k.upper() for k in handlers.keys())
+            elif handlers and isinstance(handlers, (set, list, tuple)):
+                registered.update(k.upper() for k in handlers)
+        return registered
+
+    def is_command_registered(self, cmd_name: str) -> bool:
+        cmd_base = cmd_name.strip().split()[0].upper()
+        return cmd_base in self._get_registered_commands()
+
+    def _resolve_touch_cmd(self, configured: Optional[str], primary: str, fallbacks: Tuple[str, ...]) -> str:
+        """Finds the active command registered in Klipper gcode command registry."""
+        if configured:
+            cmd_clean = configured.strip()
+            cmd_base = cmd_clean.split()[0].upper()
+            registered = self._get_registered_commands()
+            if registered and cmd_base not in registered:
+                logger.warning(f"Configured touch command '{cmd_clean}' is not registered in Klipper G-code handlers.")
+            return cmd_clean
+
+        registered = self._get_registered_commands()
         if registered:
             if primary in registered:
                 return primary
@@ -100,22 +116,27 @@ class CartographerBackend(BaseZBackend):
         return " ".join(parts)
 
     @property
-    def touch_home_gcode(self) -> str:
+    def touch_home_gcode(self) -> Optional[str]:
         raw = self._resolve_touch_cmd(
             self.configured_touch_home_gcode,
             "CARTOGRAPHER_TOUCH_HOME",
             ("SCANNER_TOUCH_HOME", "CARTOGRAPHER_TOUCH", "SCANNER_TOUCH")
         )
+        if raw is None:
+            return None
         return self._build_home_cmd(raw)
 
     @property
-    def touch_probe_gcode(self) -> str:
+    def touch_probe_gcode(self) -> Optional[str]:
         raw = self._resolve_touch_cmd(
             self.configured_touch_probe_gcode,
             "CARTOGRAPHER_TOUCH_PROBE",
             ("SCANNER_TOUCH_PROBE",)
         )
+        if raw is None:
+            return None
         return self._build_probe_cmd(raw)
+
 
     def _load_touch_model_offset(self) -> float:
         """Parses saved touch-model z_offset from the #*# auto-save section."""
@@ -288,6 +309,30 @@ class CartographerBackend(BaseZBackend):
         toolhead.wait_moves()
 
         cmd = self.touch_home_gcode
+        if not cmd:
+            raise gcmd.error("[ERR_Z_004] No valid Cartographer touch home command resolved.")
+        cmd_base = cmd.split()[0].upper()
+        registered = self._get_registered_commands()
+        if registered and cmd_base not in registered:
+            raise gcmd.error(
+                f"[ERR_Z_004] Cartographer touch home command '{cmd_base}' is not registered in Klipper G-code dispatcher."
+            )
+
+        # Reset last_z_result to None on touch object if available
+        touch_obj = None
+        for obj_name in ("cartographer", "scanner"):
+            o = self.printer.lookup_object(obj_name, None)
+            if o is not None:
+                touch_obj = getattr(o, "touch", getattr(o, "touch_mode", None))
+                if touch_obj is None and hasattr(o, "last_z_result"):
+                    touch_obj = o
+                break
+        if touch_obj is not None and hasattr(touch_obj, "last_z_result"):
+            try:
+                touch_obj.last_z_result = None
+            except Exception:
+                pass
+
         gcmd.respond_info(f"[T{tool_number}] Running {cmd}...")
         self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
@@ -332,6 +377,12 @@ class CartographerBackend(BaseZBackend):
         toolhead.wait_moves()
 
         cmd = self.touch_probe_gcode
+        if not cmd:
+            raise gcmd.error(
+                "[ERR_Z_004] Neither CARTOGRAPHER_TOUCH_PROBE nor SCANNER_TOUCH_PROBE is registered in Klipper G-code dispatcher. "
+                "Cartographer Touch non-homing probe API is missing. Cannot perform secondary tool probe. "
+                "Please update Cartographer plugin or configure a valid touch_probe_gcode."
+            )
         cmd_base = cmd.split()[0].upper()
         if cmd_base in ("CARTOGRAPHER_TOUCH", "SCANNER_TOUCH") or "HOME" in cmd_base:
             raise gcmd.error(
@@ -340,6 +391,27 @@ class CartographerBackend(BaseZBackend):
                 "Secondary tool touch cannot silently use homing routines as they redefine the coordinate origin. "
                 "Please update Cartographer plugin or configure a valid touch_probe_gcode."
             )
+        registered = self._get_registered_commands()
+        if registered and cmd_base not in registered:
+            raise gcmd.error(
+                f"[ERR_Z_004] Cartographer touch probe command '{cmd_base}' is not registered in Klipper G-code dispatcher."
+            )
+
+        # Reset last_z_result to None on touch object if available
+        touch_obj = None
+        for obj_name in ("cartographer", "scanner", "probe", "touch_probe"):
+            o = self.printer.lookup_object(obj_name, None)
+            if o is not None:
+                touch_obj = getattr(o, "touch", getattr(o, "touch_mode", None))
+                if touch_obj is None and hasattr(o, "last_z_result"):
+                    touch_obj = o
+                break
+        if touch_obj is not None and hasattr(touch_obj, "last_z_result"):
+            try:
+                touch_obj.last_z_result = None
+            except Exception:
+                pass
+
         gcmd.respond_info(f"[T{tool_number}] Running {cmd}...")
         self.gcode.run_script_from_command(cmd)
         toolhead.wait_moves()
@@ -347,6 +419,7 @@ class CartographerBackend(BaseZBackend):
         measured_z = self._get_last_z_result()
         if measured_z is None:
             raise gcmd.error(f"[tool_calibrator] Failed to read contact Z result from Cartographer touch on Secondary Tool T{tool_number}")
+
 
         # Immediate safe liftoff from the bed surface
         cur_pos = toolhead.get_position()

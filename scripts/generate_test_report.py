@@ -87,7 +87,18 @@ def annotate_zoomed_crop(img, u, v, r, idx, tool, light, frame):
     return combined
 
 
-def main():
+import argparse
+import json
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Automated Test Suite & Visual Verification Report Generator")
+    parser.add_argument("--mpp", type=float, default=None, help="Calibrated mm-per-pixel (e.g. 0.0125)")
+    parser.add_argument("--matrix-file", type=str, default=None, help="Path to JSON file containing transform matrix")
+    parser.add_argument("--calib-data", type=str, default=None, help="Path to JSON file containing mpp/matrix data")
+    parser.add_argument("--output", type=str, default=None, help="Output markdown report path")
+    args = parser.parse_args(argv)
+
     detector = NozzleDetector()
     pattern = os.path.join(os.path.dirname(__file__), "..", "Picture Screenshot", "*", "*", "*.jpg")
     raw_files = sorted(glob.glob(pattern))
@@ -96,6 +107,7 @@ def main():
         return
 
     print(f"Loaded {len(raw_files)} sweep frames.")
+
 
     # --- STEP 1: RANDOMIZED SHUFFLE TEST FOR ZERO ORDER BIAS ---
     print("--- Running randomized shuffle test ---")
@@ -247,11 +259,54 @@ def main():
 
     from server.affine_transform import TransformationSolver
     solver = TransformationSolver()
-    calib_mpp = solver.mpp if solver.mpp is not None else solver.default_mpp
-    has_matrix = solver.transform_matrix is not None
-    matrix_desc = "Affine Transformation Matrix" if has_matrix else f"Calibrated MPP = {calib_mpp:.5f} mm/px"
+    calib_mpp = None
+    has_matrix = False
+    is_calibrated = False
 
-    md.append(f'\n## 6. Bảng Độ Lệch Vật Lý Giữa Các Tool So Với T0 ({matrix_desc})\n')
+    # 1. Load from --calib-data
+    if args.calib_data and os.path.exists(args.calib_data):
+        try:
+            with open(args.calib_data, 'r', encoding='utf-8') as f_calib:
+                cdata = json.load(f_calib)
+            if "transform_matrix" in cdata and cdata["transform_matrix"]:
+                solver.load_transform_matrix(np.array(cdata["transform_matrix"]))
+                has_matrix = True
+                is_calibrated = True
+            if "mpp" in cdata and cdata["mpp"]:
+                calib_mpp = float(cdata["mpp"])
+                solver.set_mpp(calib_mpp)
+                is_calibrated = True
+        except Exception as ex:
+            print(f"Warning: Failed to load --calib-data: {ex}")
+
+    # 2. Load from --matrix-file
+    if args.matrix_file and os.path.exists(args.matrix_file):
+        try:
+            with open(args.matrix_file, 'r', encoding='utf-8') as f_mat:
+                mdata = json.load(f_mat)
+            matrix_arr = np.array(mdata.get("transform_matrix", mdata))
+            solver.load_transform_matrix(matrix_arr)
+            has_matrix = True
+            is_calibrated = True
+        except Exception as ex:
+            print(f"Warning: Failed to load --matrix-file: {ex}")
+
+    # 3. Load from --mpp
+    if args.mpp is not None and args.mpp > 0.0:
+        calib_mpp = float(args.mpp)
+        solver.set_mpp(calib_mpp)
+        is_calibrated = True
+
+    if has_matrix:
+        matrix_desc = "Affine Transformation Matrix"
+    elif is_calibrated and calib_mpp is not None:
+        matrix_desc = f"Calibrated MPP = {calib_mpp:.5f} mm/px"
+    else:
+        calib_mpp = solver.default_mpp
+        matrix_desc = f"Uncalibrated / Estimated (Default MPP = {calib_mpp:.5f} mm/px)"
+
+    calib_badge = "Đã hiệu chuẩn" if is_calibrated else "Chưa hiệu chuẩn (Ước lượng)"
+    md.append(f'\n## 6. Bảng Độ Lệch Vật Lý Giữa Các Tool So Với T0 ({matrix_desc}) [{calib_badge}]\n')
     t0_u, t0_v = tool_means['T0']
     md.append(f'Điểm neo quang học T0: U = {t0_u:.2f}px, V = {t0_v:.2f}px\n')
     md.append('| Công Cụ | Delta U (px) | Delta V (px) | Offset X (mm) | Offset Y (mm) | Mã G-Code Bù Trừ Klipper (Upstream viesturz) |')
@@ -268,9 +323,10 @@ def main():
             dy = -1.0 * dv * calib_mpp
         t_idx = t.replace('T', '')
         gcode_cmd = f"SET_TOOL_PARAMETER T={t_idx} PARAMETER=gcode_x_offset VALUE={dx:.6f}<br>SET_TOOL_PARAMETER T={t_idx} PARAMETER=gcode_y_offset VALUE={dy:.6f}"
-        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm** | **{dy:+.4f}mm** | `{gcode_cmd}` |')
+        note = "" if is_calibrated else " *(Ước tính)*"
+        md.append(f'| **{t}** | {du:+.2f}px | {dv:+.2f}px | **{dx:+.4f}mm**{note} | **{dy:+.4f}mm**{note} | `{gcode_cmd}` |')
 
-    readme_path = os.path.join(out_dir, "README.md")
+    readme_path = args.output if args.output else os.path.join(out_dir, "README.md")
     with open(readme_path, 'w', encoding='utf-8') as f_md:
         f_md.write('\n'.join(md))
     print(f"Saved {readme_path}")

@@ -17,6 +17,7 @@ from typing import Dict, Any, Tuple, Optional, List
 import cv2
 import numpy as np
 import requests
+import urllib.parse
 import urllib3
 
 import flask
@@ -168,6 +169,27 @@ def _get_git_commit() -> str:
     return "unknown"
 
 
+def _sanitize_camera_url(url: Optional[str]) -> Optional[str]:
+    """Strips username/password credentials from URL for safe display and telemetry."""
+    if not url:
+        return url
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.username or parsed.password:
+            host = parsed.hostname or ""
+            netloc = f"{host}:{parsed.port}" if parsed.port else host
+            return urllib.parse.urlunsplit((
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                parsed.query,
+                parsed.fragment
+            ))
+        return url
+    except Exception:
+        return "[redacted_url]"
+
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Service health and readiness check."""
@@ -179,6 +201,31 @@ def health_check():
     if request.args.get("check_camera") in ("1", "true", "yes"):
         frame, err = grabber.grab_frame()
         camera_ready = (frame is not None)
+
+    response_data = {
+        "status": "ok",
+        "service": "tool_calibrator_server",
+        "version": _get_git_version(),
+        "commit": _get_git_commit(),
+        "process_ready": True,
+        "camera_ready": camera_ready,
+        "scale_ready": scale_ready,
+        "matrix_ready": matrix_ready,
+    }
+
+    token_configured = bool(calibration_lock.get("token"))
+    is_authenticated = _check_auth(request)
+
+    # When token is configured and request is unauthenticated, return minimal public health
+    # without exposing camera URLs, credentials, or internal configuration
+    if token_configured and not is_authenticated:
+        response_data["camera_url"] = None
+        response_data["matrix_solved"] = matrix_ready
+        response_data["has_matrix"] = matrix_ready
+        response_data["calibrated_mpp"] = None
+        response_data["session_locked"] = calibration_lock["session_id"] is not None
+        response_data["abort_requested"] = calibration_lock.get("abort_requested", False)
+        return jsonify(response_data), 200
 
     try:
         import importlib.metadata
@@ -195,23 +242,17 @@ def health_check():
         "urllib3": str(urllib3.__version__)
     }
 
-    return jsonify({
-        "status": "ok",
-        "service": "tool_calibrator_server",
-        "version": _get_git_version(),
-        "commit": _get_git_commit(),
-        "process_ready": True,
-        "camera_ready": camera_ready,
-        "scale_ready": scale_ready,
-        "matrix_ready": matrix_ready,
-        "camera_url": grabber.camera_url,
+    response_data.update({
+        "camera_url": _sanitize_camera_url(grabber.camera_url),
         "matrix_solved": matrix_ready,
         "has_matrix": matrix_ready,
         "calibrated_mpp": solver.mpp,
         "dependencies": deps,
         "session_locked": calibration_lock["session_id"] is not None,
         "abort_requested": calibration_lock.get("abort_requested", False)
-    }), 200
+    })
+
+    return jsonify(response_data), 200
 
 
 @app.route("/abort_calibration", methods=["POST"])
@@ -306,7 +347,7 @@ def set_camera():
             return jsonify({"success": False, "error": "Missing 'camera_url' parameter"}), 400
 
         grabber.set_camera_url(new_url)
-        return jsonify({"success": True, "camera_url": grabber.camera_url}), 200
+        return jsonify({"success": True, "camera_url": _sanitize_camera_url(grabber.camera_url)}), 200
     except Exception as ex:
         logger.exception("Error in /set_camera")
         return jsonify({"success": False, "error": str(ex)}), 500
@@ -752,7 +793,7 @@ def main():
     cam_url = args.camera_url or os.environ.get("CAMERA_STREAM_URL")
     if cam_url:
         grabber.set_camera_url(cam_url)
-        logger.info(f"Initialized Camera URL: {grabber.camera_url}")
+        logger.info(f"Initialized Camera URL: {_sanitize_camera_url(grabber.camera_url)}")
 
     if args.mpp:
         solver.set_mpp(args.mpp)

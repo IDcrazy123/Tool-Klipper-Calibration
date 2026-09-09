@@ -17,6 +17,21 @@ import logging
 logger = logging.getLogger("tool_calibrator.tool_offsets")
 
 
+def is_command_registered(gcode, cmd_name: str) -> bool:
+    """Checks whether cmd_name is registered in Klipper gcode dispatcher handlers."""
+    if gcode is None:
+        return False
+    cmd_upper = cmd_name.strip().split()[0].upper()
+    registered = set()
+    for attr in ("ready_gcode_handlers", "base_gcode_handlers", "gcode_handlers", "commands"):
+        handlers = getattr(gcode, attr, None)
+        if handlers and isinstance(handlers, dict):
+            registered.update(k.upper() for k in handlers.keys())
+        elif handlers and isinstance(handlers, (set, list, tuple)):
+            registered.update(k.upper() for k in handlers)
+    return cmd_upper in registered
+
+
 class ToolOffsets:
     """
     Holds persistent calibrated tool offsets (e.g. t1_x, t1_y, t1_z)
@@ -40,7 +55,7 @@ class ToolOffsets:
                     err_fn = getattr(config, "error", None)
                     if callable(err_fn):
                         raise err_fn(f"Invalid float value for [{self.name}] option '{opt}': {e}")
-                    raise ValueError(f"Invalid float value for [{self.name}] option '{opt}': {e}")
+                    raise
             else:
                 try:
                     val = config.getfloat(opt, None)
@@ -51,58 +66,62 @@ class ToolOffsets:
 
         logger.info(f"Loaded [tool_offsets] parameters: {self.offsets}")
 
-        # Register ready event to apply offsets to tools on startup
+        # Register gcode command
+        gcode = self.printer.lookup_object("gcode")
+        gcode.register_command("APPLY_TOOL_OFFSETS", self.cmd_APPLY_TOOL_OFFSETS,
+                               desc="Applies calibrated offsets to active toolchanger tools")
+
+        # Register ready event to apply on startup
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
 
-        # Register APPLY_TOOL_OFFSETS command
-        self.gcode = self.printer.lookup_object("gcode", None)
-        if self.gcode is not None:
-            self.gcode.register_command(
-                "APPLY_TOOL_OFFSETS",
-                self.cmd_APPLY_TOOL_OFFSETS,
-                desc="Apply calibrated offsets to toolchanger tools at runtime",
-            )
-
     def _handle_ready(self) -> None:
-        """Called when Klipper enters ready state: apply offsets to tools."""
-        try:
-            self.apply_tool_offsets()
-        except Exception as e:
-            logger.warning(f"Error applying tool offsets on ready: {e}")
+        """Klippy ready hook to push configured offsets into active toolchanger tools."""
+        self.apply_tool_offsets()
 
-    def parse_tool_offsets(self) -> Dict[int, Dict[str, float]]:
-        """Parses self.offsets into structured {tool_num: {'x': float, 'y': float, 'z': float}}."""
-        tools: Dict[int, Dict[str, float]] = {}
-        pattern = re.compile(r"^t(\d+)_(x|y|z)$", re.IGNORECASE)
+    def get_tool_offsets(self, tool_number: int) -> Dict[str, Optional[float]]:
+        """Returns the dictionary of offsets (x, y, z) for the given tool."""
+        return {
+            "x": self.offsets.get(f"t{tool_number}_x"),
+            "y": self.offsets.get(f"t{tool_number}_y"),
+            "z": self.offsets.get(f"t{tool_number}_z"),
+        }
+
+    def get_all_tool_offsets(self) -> Dict[int, Dict[str, Optional[float]]]:
+        """Groups offsets by tool number."""
+        tools: Dict[int, Dict[str, Optional[float]]] = {}
         for key, val in self.offsets.items():
-            m = pattern.match(key)
+            m = re.match(r"^t(\d+)_([xyz])$", key)
             if m:
-                tool_num = int(m.group(1))
-                axis = m.group(2).lower()
-                if tool_num not in tools:
-                    tools[tool_num] = {}
-                tools[tool_num][axis] = float(val)
+                t_num = int(m.group(1))
+                axis = m.group(2)
+                if t_num not in tools:
+                    tools[t_num] = {"x": None, "y": None, "z": None}
+                tools[t_num][axis] = val
         return tools
 
-    def apply_tool_offsets(self, target_tool: Optional[int] = None) -> Dict[int, Dict[str, float]]:
+    def apply_tool_offsets(self, target_tool: Optional[int] = None) -> Dict[int, Dict[str, Optional[float]]]:
         """
-        Applies offsets to Klipper tool objects and toolchanger runtime.
-        Returns the dictionary of applied tools and their offsets.
-        Only marks offsets as applied if an actual mechanism succeeded.
+        Pushes loaded offsets into Klipper's toolchanger tool objects.
+        If target_tool is provided, only that specific tool's offsets are applied.
         """
-        parsed = self.parse_tool_offsets()
-        applied: Dict[int, Dict[str, float]] = {}
+        all_tools = self.get_all_tool_offsets()
         tc = self.printer.lookup_object("toolchanger", None)
-        gcode = self.gcode or self.printer.lookup_object("gcode", None)
+        gcode = self.printer.lookup_object("gcode", None)
 
-        for t_num, axes in parsed.items():
+        applied = {}
+
+        for t_num, axes in all_tools.items():
             if target_tool is not None and t_num != target_tool:
                 continue
 
             x = axes.get("x")
             y = axes.get("y")
             z = axes.get("z")
-            applied_via_mechanism = False
+            requested_axes = {axis for axis, val in [("x", x), ("y", y), ("z", z)] if val is not None}
+            if not requested_axes:
+                continue
+
+            applied_axes = set()
 
             # 1. Look for Tool object in printer: [tool 1], [tool T1], etc.
             tool_obj = None
@@ -112,7 +131,6 @@ class ToolOffsets:
                     break
 
             if tool_obj is None and tc is not None:
-                # Check inside toolchanger.tools dict
                 tc_tools = getattr(tc, "tools", None)
                 if isinstance(tc_tools, dict):
                     tool_obj = tc_tools.get(t_num) or tc_tools.get(f"T{t_num}")
@@ -121,61 +139,63 @@ class ToolOffsets:
                 if hasattr(tool_obj, "set_offset") and callable(tool_obj.set_offset):
                     try:
                         tool_obj.set_offset(x=x, y=y, z=z)
-                        applied_via_mechanism = True
+                        applied_axes.update(requested_axes)
                     except Exception as e:
                         logger.warning(f"Failed to call set_offset on tool {t_num}: {e}")
                 if hasattr(tool_obj, "gcode_x_offset") and x is not None:
                     tool_obj.gcode_x_offset = x
-                    applied_via_mechanism = True
+                    applied_axes.add("x")
                 if hasattr(tool_obj, "gcode_y_offset") and y is not None:
                     tool_obj.gcode_y_offset = y
-                    applied_via_mechanism = True
+                    applied_axes.add("y")
                 if hasattr(tool_obj, "gcode_z_offset") and z is not None:
                     tool_obj.gcode_z_offset = z
-                    applied_via_mechanism = True
+                    applied_axes.add("z")
 
             # 2. If toolchanger has set_tool_offset method
             if tc is not None and hasattr(tc, "set_tool_offset") and callable(tc.set_tool_offset):
-                try:
-                    tc.set_tool_offset(t_num, x=x, y=y, z=z)
-                    applied_via_mechanism = True
-                except Exception as e:
-                    logger.debug(f"tc.set_tool_offset exception for T{t_num}: {e}")
+                missing_from_tc = requested_axes - applied_axes
+                if missing_from_tc:
+                    try:
+                        tc.set_tool_offset(t_num, x=x, y=y, z=z)
+                        applied_axes.update(requested_axes)
+                    except Exception as e:
+                        logger.debug(f"tc.set_tool_offset exception for T{t_num}: {e}")
 
             # 3. Call SET_TOOL_PARAMETER (upstream viesturz standard) or fallback to SET_TOOL_OFFSET if registered
-            if gcode is not None and hasattr(gcode, "commands"):
-                if "SET_TOOL_PARAMETER" in gcode.commands:
-                    for axis_name, axis_val in [("gcode_x_offset", x), ("gcode_y_offset", y), ("gcode_z_offset", z)]:
-                        if axis_val is not None:
+            if gcode is not None:
+                if is_command_registered(gcode, "SET_TOOL_PARAMETER"):
+                    for axis_name, axis_key, axis_val in [("gcode_x_offset", "x", x), ("gcode_y_offset", "y", y), ("gcode_z_offset", "z", z)]:
+                        if axis_key in requested_axes and axis_val is not None:
                             try:
                                 gcode.run_script_from_command(
                                     f"SET_TOOL_PARAMETER T={t_num} PARAMETER={axis_name} VALUE={axis_val:.6f}"
                                 )
-                                applied_via_mechanism = True
+                                applied_axes.add(axis_key)
                             except Exception as e:
-                                logger.warning(f"Failed to run SET_TOOL_PARAMETER for T{t_num}: {e}")
-                elif "SET_TOOL_OFFSET" in gcode.commands:
+                                logger.warning(f"Failed to run SET_TOOL_PARAMETER for T{t_num} {axis_name}: {e}")
+                elif is_command_registered(gcode, "SET_TOOL_OFFSET"):
                     cmd_parts = [f"SET_TOOL_OFFSET TOOL={t_num}"]
-                    if x is not None:
+                    if "x" in requested_axes and x is not None:
                         cmd_parts.append(f"X={x:.4f}")
-                    if y is not None:
+                    if "y" in requested_axes and y is not None:
                         cmd_parts.append(f"Y={y:.4f}")
-                    if z is not None:
+                    if "z" in requested_axes and z is not None:
                         cmd_parts.append(f"Z={z:.4f}")
                     cmd_str = " ".join(cmd_parts)
                     try:
                         gcode.run_script_from_command(cmd_str)
-                        applied_via_mechanism = True
+                        applied_axes.update(requested_axes)
                     except Exception as e:
                         logger.warning(f"Failed to run script '{cmd_str}': {e}")
 
-            if applied_via_mechanism:
+            if applied_axes >= requested_axes:
                 applied[t_num] = axes
                 logger.info(f"Applied offsets for Tool {t_num}: X={x} Y={y} Z={z}")
             else:
                 logger.warning(
-                    f"Could not apply offsets for Tool {t_num}: no corresponding Tool object, "
-                    "toolchanger method, or G-Code command found."
+                    f"Could not fully apply offsets for Tool {t_num}: requested={requested_axes}, "
+                    f"applied={applied_axes}. No corresponding Tool object, toolchanger method, or G-Code handler succeeded."
                 )
 
         return applied

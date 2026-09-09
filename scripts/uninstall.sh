@@ -267,8 +267,18 @@ clean_macro_dir() {
                 rm -f "${dir}/${mf}"
                 echo -e "${GREEN}    Đã gỡ symlink ${dir}/${mf}${NC}"
             elif [ "${PURGE_CONFIG}" = true ] && [ -f "${dir}/${mf}" ]; then
-                rm -f "${dir}/${mf}"
-                echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
+                # Protect user's own macros.cfg if it doesn't belong to TKC
+                if [ "${mf}" = "macros.cfg" ]; then
+                    if grep -qiE "(Tool-Klipper-Calibration|tool_calibrator)" "${dir}/${mf}" 2>/dev/null; then
+                        rm -f "${dir}/${mf}"
+                        echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
+                    else
+                        echo -e "${YELLOW}    Bỏ qua ${dir}/${mf} (không phải file của Tool-Klipper-Calibration)${NC}"
+                    fi
+                else
+                    rm -f "${dir}/${mf}"
+                    echo -e "${GREEN}    Đã xóa ${dir}/${mf}${NC}"
+                fi
             fi
         done
         # If tool_offsets.cfg is a symlink, remove the symlink only
@@ -301,9 +311,57 @@ for legacy_bk in "${CONFIG_DIR}/tool_calibrator_backups" "${TARGET_CONFIG_DIR}/t
     if [ -d "${legacy_bk}" ]; then
         if [ "${PURGE_BACKUPS}" = false ]; then
             mkdir -p "${TKC_BACKUP_DIR}"
-            cp -rn "${legacy_bk}"/* "${TKC_BACKUP_DIR}/" 2>/dev/null || true
+            python3 -c "
+import sys, os, shutil, hashlib
+
+src_dir = sys.argv[1]
+dest_dir = sys.argv[2]
+if not os.path.isdir(src_dir):
+    sys.exit(0)
+os.makedirs(dest_dir, exist_ok=True)
+
+def file_hash(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+all_success = True
+for root, dirs, files in os.walk(src_dir):
+    rel_path = os.path.relpath(root, src_dir)
+    target_subdir = os.path.join(dest_dir, rel_path) if rel_path != '.' else dest_dir
+    os.makedirs(target_subdir, exist_ok=True)
+    for fname in files:
+        src_file = os.path.join(root, fname)
+        target_file = os.path.join(target_subdir, fname)
+        try:
+            if os.path.exists(target_file):
+                if file_hash(src_file) != file_hash(target_file):
+                    base, ext = os.path.splitext(fname)
+                    unique_name = f'{base}_migrated_{int(os.path.getmtime(src_file))}{ext}'
+                    target_file = os.path.join(target_subdir, unique_name)
+                    shutil.copy2(src_file, target_file)
+            else:
+                shutil.copy2(src_file, target_file)
+            if not os.path.exists(target_file) or file_hash(src_file) != file_hash(target_file):
+                all_success = False
+        except Exception:
+            all_success = False
+
+if all_success:
+    shutil.rmtree(src_dir)
+    print('MIGRATED_OK')
+else:
+    sys.exit(1)
+" "${legacy_bk}" "${TKC_BACKUP_DIR}" 2>/dev/null && {
+                echo -e "${GREEN}[✔] Đã di chuyển an toàn ${legacy_bk} vào ${TKC_BACKUP_DIR}/${NC}"
+            } || {
+                echo -e "${YELLOW}[!] Không thể chuyển toàn bộ dữ liệu từ ${legacy_bk}, giữ nguyên thư mục nguồn.${NC}"
+            }
+        else
+            rm -rf "${legacy_bk}"
         fi
-        rm -rf "${legacy_bk}"
     fi
 done
 
@@ -313,8 +371,13 @@ if [ "${PURGE_BACKUPS}" = false ]; then
     for loose_bak in "${CONFIG_DIR}"/printer.cfg.tkc_bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.tkc_bak_* "${CONFIG_DIR}"/printer.cfg.uninstall.bak_* "${TARGET_CONFIG_DIR}"/printer.cfg.uninstall.bak_*; do
         if [ -f "${loose_bak}" ] && [ ! -L "${loose_bak}" ]; then
             mkdir -p "${SYSTEM_BK_DIR}"
-            mv -f "${loose_bak}" "${SYSTEM_BK_DIR}/" 2>/dev/null || true
-            echo -e "${GREEN}[✔] Đã chuyển bản sao lưu bên ngoài (${loose_bak##*/}) vào ${SYSTEM_BK_DIR}/${NC}"
+            dest_name="${loose_bak##*/}"
+            dest_file="${SYSTEM_BK_DIR}/${dest_name}"
+            if [ -f "${dest_file}" ]; then
+                dest_file="${SYSTEM_BK_DIR}/${dest_name}_$(date +%s%N 2>/dev/null || date +%s)"
+            fi
+            mv "${loose_bak}" "${dest_file}" 2>/dev/null || true
+            echo -e "${GREEN}[✔] Đã chuyển bản sao lưu bên ngoài (${dest_file##*/}) vào ${SYSTEM_BK_DIR}/${NC}"
         fi
     done
 fi
@@ -330,25 +393,26 @@ if [ -f "${PRINTER_CFG}" ]; then
         cp "${PRINTER_CFG}" "${BACKUP_PRINTER}"
     fi
     python3 -c "
-import re
+import sys, re
+printer_cfg = sys.argv[1]
 try:
-    with open('${PRINTER_CFG}', 'r') as f:
+    with open(printer_cfg, 'r') as f:
         content = f.read()
-    # Safely comment out any include lines pointing to tool_offsets.cfg, tool_calibrator macros, safe_staging, sample_tool, etc.
     pattern = r'(?m)^([ \t]*\[include [^]]*(?:tool[-_]offsets\.cfg|tool[-_]calibrator[^\n]*\.cfg|safe[-_]staging[^\n]*\.cfg|sample[-_]tool[^\n]*\.cfg|tool[-_]calibrator/macros\.cfg)\])'
     updated, count = re.subn(pattern, r'# \1 # disabled by TKC uninstaller', content)
     if count > 0:
-        with open('${PRINTER_CFG}', 'w') as f:
+        with open(printer_cfg, 'w') as f:
             f.write(updated)
         print(f'OK {count}')
 except Exception as ex:
     print(f'ERR {ex}')
-" | while read -r line; do
+" "${PRINTER_CFG}" | while read -r line; do
         if [[ "${line}" =~ ^OK ]]; then
             echo -e "${GREEN}[✔] Đã tự động vô hiệu hóa các dòng include TKC trong printer.cfg.${NC}"
         fi
     done
 fi
+
 
 # 4. Remove from moonraker.asvc & moonraker.conf
 echo -e "\n${BLUE}[4/5] Dọn dẹp cấu hình Moonraker (moonraker.asvc & moonraker.conf)...${NC}"

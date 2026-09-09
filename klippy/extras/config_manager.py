@@ -274,26 +274,22 @@ class ConfigManager:
         """Returns list of allowed canonical directory roots for configuration backups."""
         roots = [
             self.backup_dir,
+            os.path.join(self.config_dir, "tool_calibrator", "backups", "calibration_offsets"),
             os.path.join(self.config_dir, "tool_calibrator_backups", "calibration_offsets"),
             os.path.join(os.path.dirname(self.config_dir), "tool_calibrator_backups", "calibration_offsets"),
-            self.config_dir,
         ]
         return [os.path.realpath(r) for r in roots if r]
 
     def rollback(self, target_backup: Optional[str] = None) -> str:
         """
         Restores a specific timestamped backup copy or the newest available backup.
-        Validates backup location within allowed backup roots, validates content integrity,
-        creates a pre-rollback backup, and atomically writes to config_path.
-
-        Args:
-            target_backup: Optional specific backup filename or path to restore.
-
-        Returns:
-            str: Name/path of the restored backup file.
+        Validates backup location strictly within backup roots, validates backup filename pattern,
+        validates INI content structure, creates a mandatory pre-rollback backup, and atomically
+        writes to config_path.
         """
         backups = self._get_all_backups()
         valid_roots = self._get_valid_backup_roots()
+        fn = os.path.basename(self.config_path)
 
         if target_backup:
             candidate = os.path.expanduser(target_backup)
@@ -312,7 +308,8 @@ class ConfigManager:
 
             chosen_backup = os.path.abspath(candidate)
             chosen_real = os.path.realpath(candidate)
-            # Security check: backup file must strictly reside inside an allowed backup root
+
+            # Security check 1: backup file must strictly reside inside an allowed backup root
             is_allowed = False
             for root in valid_roots:
                 try:
@@ -323,12 +320,19 @@ class ConfigManager:
                     pass
             if not is_allowed:
                 raise ConfigManagerException(f"Unauthorized backup file location outside backup roots: {target_backup}")
+
+            # Security check 2: backup filename must match managed backup naming pattern
+            candidate_fn = os.path.basename(chosen_real)
+            if not re.match(rf"^{re.escape(fn)}\.calib_backup_.*$", candidate_fn):
+                raise ConfigManagerException(
+                    f"Invalid backup filename '{candidate_fn}'. Managed backups must match pattern '{fn}.calib_backup_*'"
+                )
         else:
             if not backups:
                 raise ConfigManagerException("No historical backups found to restore.")
             chosen_backup = backups[-1]
 
-        # Validate content before applying
+        # Validate content structure before applying
         try:
             with open(chosen_backup, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -337,19 +341,40 @@ class ConfigManager:
             lines = [l + "\n" for l in content.splitlines()]
             if content and not lines:
                 lines = [content]
+
+            # Content structure verification: must contain valid section header or TKC header
+            has_valid_structure = False
+            for raw_l in lines:
+                stripped = raw_l.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("#") and "Tool-Klipper-Calibration" in stripped:
+                    has_valid_structure = True
+                    break
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    has_valid_structure = True
+                    break
+                if "=" in stripped or ":" in stripped:
+                    has_valid_structure = True
+                    break
+            if not has_valid_structure:
+                raise ConfigManagerException(
+                    f"Backup file '{chosen_backup}' does not contain valid Klipper configuration structure."
+                )
         except Exception as e:
             if isinstance(e, ConfigManagerException):
                 raise
             raise ConfigManagerException(f"Failed to read/validate backup file {chosen_backup}: {e}")
 
-        # Create pre-rollback backup of current config if it exists
+        # Create mandatory pre-rollback backup of current config if it exists
         if os.path.exists(self.config_path):
             try:
                 self.create_backup()
             except Exception as e:
-                logger.warning(f"Could not create pre-rollback backup: {e}")
+                raise ConfigManagerException(f"Cannot perform rollback: failed to create pre-rollback backup: {e}")
 
         # Atomic replacement with fsync
         self._write_lines_atomically(lines)
         logger.info(f"Restored configuration from: {chosen_backup}")
         return chosen_backup
+

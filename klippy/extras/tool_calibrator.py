@@ -22,6 +22,7 @@ from .safe_navigator import SafeNavigator, SafeNavigatorException
 from .config_manager import ConfigManager, ConfigManagerException
 from .z_backends.switch_backend import SwitchBackend
 from .z_backends.cartographer_backend import CartographerBackend
+from .tool_offsets import is_command_registered
 
 logger = logging.getLogger("tool_calibrator")
 
@@ -788,12 +789,11 @@ class ToolCalibrator:
                     raise SafeNavigatorException(
                         f"[ERR_TOOL_NOT_FOUND] Tool T{t} does not exist in printer configuration. Available tools: {sorted(known_tools)}"
                     )
-            # Deduplicate while preserving order
+            # Deduplicate while preserving order, ensuring reference_tool is strictly at index 0
             seen = set()
             deduped = [t for t in selected if not (t in seen or seen.add(t))]
-            if self.reference_tool not in deduped:
-                return [self.reference_tool] + deduped
-            return deduped
+            return [self.reference_tool] + [t for t in deduped if t != self.reference_tool]
+
 
         # Configured tools in [tool_calibrator]
         if self.configured_tools_str:
@@ -1014,8 +1014,7 @@ class ToolCalibrator:
 
             if needs_reconciliation:
                 logger.info(f"[tool_calibrator] Reconciling uninitialized toolchanger state to T{target_tool}")
-                registered_cmds = getattr(self.gcode, "commands", {})
-                if "INITIALIZE_TOOLCHANGER" in registered_cmds:
+                if is_command_registered(self.gcode, "INITIALIZE_TOOLCHANGER"):
                     try:
                         self.gcode.run_script_from_command(f"INITIALIZE_TOOLCHANGER T={target_tool}")
                         logger.info(f"[tool_calibrator] Executed INITIALIZE_TOOLCHANGER T={target_tool}")
@@ -1579,6 +1578,11 @@ class ToolCalibrator:
                         current_active = self._get_active_tool_no()
                     if current_active != tool_no:
                         self.navigator.move_to_safe_z(toolhead, gcode_move)
+                        if not self.navigator.is_safe_z_enabled():
+                            cur_pos = toolhead.get_position()
+                            if cur_pos[2] < 2.0:
+                                toolhead.manual_move([None, None, 2.0], 15.0)
+                                toolhead.wait_moves()
 
                     # Change tool
                     if self.before_pickup_gcode is not None:
@@ -1664,6 +1668,11 @@ class ToolCalibrator:
                     current_active = self._get_active_tool_no()
                 if current_active != self.reference_tool:
                     self.navigator.move_to_safe_z(toolhead, gcode_move)
+                    if not self.navigator.is_safe_z_enabled():
+                        cur_pos = toolhead.get_position()
+                        if cur_pos[2] < 2.0:
+                            toolhead.manual_move([None, None, 2.0], 15.0)
+                            toolhead.wait_moves()
                     self.gcode.run_script_from_command(f"T{self.reference_tool}")
                     toolhead.wait_moves()
                     self.run_record["physical_tool"] = self.reference_tool
@@ -1874,11 +1883,12 @@ class ToolCalibrator:
                 sw_existing["safe_z"] = self.navigator.safe_z
                 self.config_manager.save_section("tool_calibrator_station switch", sw_existing)
 
+            sz_info = f"{self.navigator.safe_z:.3f} mm" if self.navigator.is_safe_z_enabled() else "OFF"
             gcmd.respond_info(
                 f"✔ [CAMERA Station Configured & Saved Automatically]\n"
                 f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
                 f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
-                f"  Safe Z:   {self.navigator.safe_z} mm\n"
+                f"  Safe Z:   {sz_info}\n"
                 f"  Saved to: {self.config_manager.config_path}"
             )
 
@@ -1917,11 +1927,12 @@ class ToolCalibrator:
                 cam_existing["safe_z"] = self.navigator.safe_z
                 self.config_manager.save_section("tool_calibrator_station camera", cam_existing)
 
+            sz_sw_info = f"{self.navigator.safe_z:.3f} mm" if self.navigator.is_safe_z_enabled() else "OFF"
             gcmd.respond_info(
                 f"✔ [SWITCH Station Configured & Saved Automatically]\n"
                 f"  Target:   X{target_x:.3f} Y{target_y:.3f} Z{target_z:.3f}\n"
                 f"  Approach: X{app_x:.3f} Y{app_y:.3f} (Vector towards bed center)\n"
-                f"  Safe Z:   {self.navigator.safe_z} mm\n"
+                f"  Safe Z:   {sz_sw_info}\n"
                 f"  Saved to: {self.config_manager.config_path}"
             )
 
@@ -2108,9 +2119,15 @@ class ToolCalibrator:
 
         if pos_type == "SAFE_Z":
             target_z = gcmd.get_float("Z", pos[2])
-            self.navigator.safe_z = round(target_z, 3)
+            try:
+                self.navigator.set_safe_z(target_z)
+            except ValueError as val_err:
+                raise gcmd.error(f"[tool_calibrator] Invalid SAFE_Z value: {val_err}")
             self.navigator.configured_safe_z = self.navigator.safe_z
-            gcmd.respond_info(f"Global Safe_Z set to Z:{self.navigator.safe_z:.3f}")
+            if self.navigator.is_safe_z_enabled():
+                gcmd.respond_info(f"Global Safe_Z set to Z:{self.navigator.safe_z:.3f} (ENABLED)")
+            else:
+                gcmd.respond_info("Global Safe_Z set to DISABLED (OFF)")
             if save_to_disk:
                 for sec in ("tool_calibrator_station camera", "tool_calibrator_station switch"):
                     existing = self.config_manager.load_section(sec) or {}
@@ -2218,7 +2235,7 @@ class ToolCalibrator:
             prev_z = toolhead.get_position()[2]
             self.navigator.depart_station(toolhead, gcode_move)
             pos = toolhead.get_position()
-            if self.navigator.safe_z > 0.0 and pos[2] > prev_z + 0.01:
+            if self.navigator.is_safe_z_enabled() and pos[2] > prev_z + 0.01:
                 gcmd.respond_info(f"✔ Departed station. Safe altitude: Z{pos[2]:.3f}")
             else:
                 gcmd.respond_info("✔ Departed station.")
@@ -2329,78 +2346,90 @@ class ToolCalibrator:
             gcmd.respond_info("[tool_calibrator] No calibration cycle is currently running.")
 
     def cmd_CALIBRATION_STATUS(self, gcmd) -> None:
-        """Emits current calibration state, telemetry run record, and cached offsets."""
+        """Outputs current calibration and hardware telemetry status."""
+        raw_rec = getattr(self, "run_record", {})
+        rec = raw_rec if isinstance(raw_rec, dict) else {}
+        gcmd.respond_info(f"Tool-Calibrator Status: {rec.get('state', 'IDLE')} (Last Status: {self.last_run_status})")
+        if rec:
+            validity_str = "VALID" if rec.get("valid") else "INVALID/ABORTED"
+            dur = 0.0
+            if rec.get("end_time") and rec.get("start_time"):
+                dur = round(rec["end_time"] - rec["start_time"], 1)
+            elif rec.get("start_time") or rec.get("start_monotonic"):
+                if rec.get("start_monotonic"):
+                    try:
+                        dur = max(0.0, round(self.reactor.monotonic() - float(rec["start_monotonic"]), 1))
+                    except Exception:
+                        pass
+                elif rec.get("start_time"):
+                    try:
+                        dur = max(0.0, round(time.time() - float(rec["start_time"]), 1))
+                    except Exception:
+                        pass
+            gcmd.respond_info(
+                f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase', 'IDLE')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
+            )
+            if rec.get("error"):
+                gcmd.respond_info(f"  Last Error: {rec.get('error')}")
+        is_sz_enabled = getattr(getattr(self, "navigator", None), "is_safe_z_enabled", lambda: False)()
+        safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", None)
+        sz_display = f"{safe_z_val:.2f}mm" if (is_sz_enabled and safe_z_val is not None) else "OFF"
+        is_speedup = getattr(getattr(self, "navigator", None), "carto_speedup", False)
+        speedup_str = " [Carto Speed-Up: ENABLED (No Z-lift)]" if is_speedup else ""
+        gcmd.respond_info(f"  Safe_Z: {sz_display} (Station/Dock){speedup_str} | Backend: {getattr(self, 'z_backend_type', 'unknown')}")
+
+        # Vision service connectivity and version telemetry
         try:
-            rec = self.run_record if isinstance(self.run_record, dict) else {}
-            gcmd.respond_info(f"Tool-Calibrator Status: {rec.get('state', 'IDLE')} (Last Status: {self.last_run_status})")
-            if rec.get("run_id"):
-                validity_str = "VALID" if rec.get("valid") else "INCOMPLETE/FAILED"
-                dur = rec.get("duration_sec", 0.0)
-                if rec.get("state") == "RUNNING":
-                    if rec.get("start_monotonic"):
-                        try:
-                            dur = max(0.0, round(self.reactor.monotonic() - float(rec["start_monotonic"]), 1))
-                        except Exception:
-                            pass
-                    elif rec.get("start_time"):
-                        try:
-                            dur = max(0.0, round(time.time() - float(rec["start_time"]), 1))
-                        except Exception:
-                            pass
-                gcmd.respond_info(
-                    f"  Run ID: {rec.get('run_id')} | State: {rec.get('state')} ({validity_str}) | Phase: {rec.get('phase')} | Physical Tool: {rec.get('physical_tool')} | Calibrating: {rec.get('calibrating_tool')} | Duration: {dur:.1f}s"
-                )
-                if rec.get("error"):
-                    gcmd.respond_info(f"  Last Error: {rec.get('error')}")
-            safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", 0.0)
-            is_speedup = getattr(getattr(self, "navigator", None), "carto_speedup", False)
-            speedup_str = " [Carto Speed-Up: ENABLED (No Z-lift)]" if is_speedup else ""
-            gcmd.respond_info(f"  Safe_Z: {safe_z_val:.2f}mm (Station/Dock){speedup_str} | Backend: {getattr(self, 'z_backend_type', 'unknown')}")
-
-            # Vision service connectivity and version telemetry
-            try:
-                health = self._query_vision("health", timeout=1.0)
-                if isinstance(health, dict) and health.get("status") in ("ok", "healthy", "up"):
-                    ver = health.get("version", "unknown")
-                    svc = health.get("service", "tkc-vision")
-                    commit = f" ({health.get('commit')})" if health.get("commit") and health.get("commit") != "unknown" else ""
-                    cam_state = "READY" if health.get("camera_ready") else "NOT_READY"
-                    gcmd.respond_info(f"  Vision Service: ONLINE ({svc} v{ver}{commit}) | Camera: {cam_state}")
-                else:
-                    gcmd.respond_info("  Vision Service: OFFLINE / UNREACHABLE")
-            except Exception:
-                gcmd.respond_info("  Vision Service: OFFLINE / UNREACHABLE")
-
-            if self.cached_offsets:
-                validity_note = "Valid" if rec.get("valid") else "Stale (Prior Completed Run)"
-                gcmd.respond_info(f"  Cached Offsets ({validity_note}):")
-                for t, offs in self.cached_offsets.items():
-                    parts = [f"{k.upper()}={v:+.3f}" for k, v in offs.items()]
-                    gcmd.respond_info(f"    T{t}: {' '.join(parts) if parts else 'None'}")
+            health = self._query_vision("health", timeout=1.0)
+            if isinstance(health, dict) and health.get("status") in ("ok", "healthy", "up"):
+                ver = health.get("version", "unknown")
+                svc = health.get("service", "tkc-vision")
+                commit = f" ({health.get('commit')})" if health.get("commit") and health.get("commit") != "unknown" else ""
+                cam_state = "READY" if health.get("camera_ready") else "NOT_READY"
+                gcmd.respond_info(f"  Vision Service: ONLINE ({svc} v{ver}{commit}) | Camera: {cam_state}")
             else:
-                gcmd.respond_info("  No offsets cached in memory.")
-        except Exception as ex:
-            logger.error(f"[tool_calibrator] Error executing cmd_CALIBRATION_STATUS: {ex}")
-            gcmd.respond_info(f"[tool_calibrator] Status query exception: {ex}")
+                gcmd.respond_info("  Vision Service: OFFLINE / UNREACHABLE")
+        except Exception:
+            gcmd.respond_info("  Vision Service: OFFLINE / UNREACHABLE")
+
+        raw_offsets = getattr(self, "cached_offsets", {})
+        cached_offsets = raw_offsets if isinstance(raw_offsets, dict) else {}
+        if cached_offsets:
+            validity_note = "Valid" if rec.get("valid") else "Stale (Prior Completed Run)"
+            gcmd.respond_info(f"  Cached Offsets ({validity_note}):")
+            for t, offs in sorted(cached_offsets.items()):
+                parts = [f"{k.upper()}={v:+.3f}" for k, v in offs.items()] if isinstance(offs, dict) else []
+                gcmd.respond_info(f"    T{t}: {' '.join(parts) if parts else 'None'}")
+        else:
+            gcmd.respond_info("  Cached Offsets: None")
 
     def get_status(self, eventtime=None) -> Dict[str, Any]:
-        """Provides state dictionaries to Mainsail and Fluidd frontend templates."""
+        """Provides rich runtime status dictionary for Moonraker/Mainsail/Fluidd telemetry."""
         try:
-            rec = dict(self.run_record) if isinstance(self.run_record, dict) else {}
+            raw_rec = getattr(self, "run_record", {})
+            rec = dict(raw_rec) if isinstance(raw_rec, dict) else {}
             if rec.get("state") == "RUNNING":
-                try:
-                    if rec.get("start_monotonic"):
-                        now = eventtime if (eventtime is not None and isinstance(eventtime, (int, float))) else self.reactor.monotonic()
-                        rec["elapsed_sec"] = max(0.0, round(float(now) - float(rec["start_monotonic"]), 1))
-                    elif rec.get("start_time"):
-                        now = time.time()
-                        rec["elapsed_sec"] = max(0.0, round(float(now) - float(rec["start_time"]), 1))
-                    else:
+                if rec.get("start_monotonic"):
+                    try:
+                        if eventtime is not None:
+                            rec["elapsed_sec"] = max(0.0, round(float(eventtime) - float(rec["start_monotonic"]), 1))
+                        elif self.reactor is not None:
+                            rec["elapsed_sec"] = max(0.0, round(self.reactor.monotonic() - float(rec["start_monotonic"]), 1))
+                        else:
+                            rec["elapsed_sec"] = 0.0
+                    except Exception:
                         rec["elapsed_sec"] = 0.0
-                except Exception:
-                    rec["elapsed_sec"] = 0.0
+                elif rec.get("start_time"):
+                    try:
+                        rec["elapsed_sec"] = max(0.0, round(time.time() - float(rec["start_time"]), 1))
+                    except Exception:
+                        rec["elapsed_sec"] = 0.0
 
-            safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", 0.0)
+            is_sz_enabled = getattr(getattr(self, "navigator", None), "is_safe_z_enabled", lambda: False)()
+            safe_z_val = getattr(getattr(self, "navigator", None), "safe_z", None)
+            raw_offsets = getattr(self, "cached_offsets", {})
+            cached_offsets = dict(raw_offsets) if isinstance(raw_offsets, dict) else {}
+
             return {
                 "status": rec.get("state", "IDLE"),
                 "phase": rec.get("phase", "IDLE"),
@@ -2413,9 +2442,10 @@ class ToolCalibrator:
                 "run_record": rec,
                 "reference_tool": getattr(self, "reference_tool", 0),
                 "z_backend": getattr(self, "z_backend_type", "cartographer"),
-                "safe_z": safe_z_val,
+                "safe_z": safe_z_val if is_sz_enabled else None,
+                "safe_z_enabled": is_sz_enabled,
                 "carto_speedup": getattr(getattr(self, "navigator", None), "carto_speedup", False),
-                "cached_offsets": dict(getattr(self, "cached_offsets", {}))
+                "cached_offsets": cached_offsets
             }
         except Exception as ex:
             logger.error(f"[tool_calibrator] Unhandled exception in get_status: {ex}")

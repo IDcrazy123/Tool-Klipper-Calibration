@@ -177,8 +177,15 @@ rm -rf "${INSTALL_BACKUP_DIR}" "${JOURNAL_FILE}"
 mkdir -p "${INSTALL_BACKUP_DIR}"
 touch "${JOURNAL_FILE}"
 
+INSTALL_SUCCESS=false
+CLEANUP_ALREADY_RUN=0
+
 cleanup_on_error() {
     local exit_code=$?
+    if [ "${CLEANUP_ALREADY_RUN}" -ne 0 ]; then
+        return
+    fi
+    CLEANUP_ALREADY_RUN=1
     echo -e "\n${RED}[ERR] Quá trình cài đặt bị gián đoạn (Exit code: ${exit_code})! Đang hoàn tác theo thứ tự ngược lại...${NC}"
     if [ -f "${JOURNAL_FILE}" ]; then
         (tac "${JOURNAL_FILE}" 2>/dev/null || cat "${JOURNAL_FILE}") | while IFS= read -r line || [ -n "${line}" ]; do
@@ -205,6 +212,47 @@ cleanup_on_error() {
                     orig_target="$(echo "${val}" | cut -d':' -f2)"
                     rm -f "${dst}"
                     [ -n "${orig_target}" ] && ln -s "${orig_target}" "${dst}"
+                    ;;
+                SERVICE_CREATED)
+                    sfile="$(echo "${val}" | cut -d':' -f1)"
+                    smode="$(echo "${val}" | cut -d':' -f2)"
+                    if [ "${smode}" = "system" ]; then
+                        sudo systemctl stop tool_calibrator.service 2>/dev/null || true
+                        sudo systemctl disable tool_calibrator.service 2>/dev/null || true
+                        [ -f "${sfile}" ] && sudo rm -f "${sfile}"
+                        sudo systemctl daemon-reload 2>/dev/null || true
+                    else
+                        systemctl --user stop tool_calibrator.service 2>/dev/null || true
+                        systemctl --user disable tool_calibrator.service 2>/dev/null || true
+                        [ -f "${sfile}" ] && rm -f "${sfile}"
+                        systemctl --user daemon-reload 2>/dev/null || true
+                    fi
+                    ;;
+                SERVICE_UPDATED)
+                    sfile="$(echo "${val}" | cut -d':' -f1)"
+                    smode="$(echo "${val}" | cut -d':' -f2)"
+                    bkfile="$(echo "${val}" | cut -d':' -f3)"
+                    was_en="$(echo "${val}" | cut -d':' -f4)"
+                    was_act="$(echo "${val}" | cut -d':' -f5)"
+                    if [ "${smode}" = "system" ]; then
+                        sudo systemctl stop tool_calibrator.service 2>/dev/null || true
+                        if [ -f "${bkfile}" ]; then
+                            sudo cp -a "${bkfile}" "${sfile}"
+                            sudo chown root:root "${sfile}"
+                            sudo chmod 644 "${sfile}"
+                        fi
+                        sudo systemctl daemon-reload 2>/dev/null || true
+                        [ "${was_en}" = "1" ] && sudo systemctl enable tool_calibrator.service 2>/dev/null || sudo systemctl disable tool_calibrator.service 2>/dev/null || true
+                        [ "${was_act}" = "1" ] && sudo systemctl start tool_calibrator.service 2>/dev/null || true
+                    else
+                        systemctl --user stop tool_calibrator.service 2>/dev/null || true
+                        if [ -f "${bkfile}" ]; then
+                            cp -a "${bkfile}" "${sfile}"
+                        fi
+                        systemctl --user daemon-reload 2>/dev/null || true
+                        [ "${was_en}" = "1" ] && systemctl --user enable tool_calibrator.service 2>/dev/null || systemctl --user disable tool_calibrator.service 2>/dev/null || true
+                        [ "${was_act}" = "1" ] && systemctl --user start tool_calibrator.service 2>/dev/null || true
+                    fi
                     ;;
                 SERVICE_INSTALLED)
                     sfile="$(echo "${val}" | cut -d':' -f1)"
@@ -240,9 +288,18 @@ cleanup_on_error() {
         rm -rf "${INSTALL_BACKUP_DIR}" "${JOURNAL_FILE}" 2>/dev/null || true
     fi
     echo -e "${YELLOW}[!] Đã hoàn tác các thay đổi tạm thời. Vui lòng kiểm tra lỗi trước khi thử lại.${NC}"
-    exit "${exit_code}"
 }
+
+cleanup_on_exit() {
+    local code=$?
+    if [ "${INSTALL_SUCCESS}" != "true" ]; then
+        cleanup_on_error
+        exit "${code}"
+    fi
+}
+trap cleanup_on_exit EXIT
 trap cleanup_on_error ERR
+
 
 create_symlink_with_journal() {
     local src="$1"
@@ -319,9 +376,15 @@ fi
 echo -e "${GREEN}[+] Đang nâng cấp pip và cài đặt thư viện từ server/requirements.txt...${NC}"
 "${VENV_DIR}/bin/pip" install --upgrade pip
 if [ -f "${REPO_DIR}/server/constraints.txt" ]; then
-    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt" -c "${REPO_DIR}/server/constraints.txt" || "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt"
+    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt" -c "${REPO_DIR}/server/constraints.txt" || {
+        echo -e "${RED}[ERR] Cài đặt dependencies thất bại theo constraints bảo mật! Vui lòng kiểm tra môi trường pip/python.${NC}"
+        exit 1
+    }
 else
-    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt"
+    "${VENV_DIR}/bin/pip" install -r "${REPO_DIR}/server/requirements.txt" || {
+        echo -e "${RED}[ERR] Cài đặt dependencies thất bại! Vui lòng kiểm tra kết nối mạng và môi trường python.${NC}"
+        exit 1
+    }
 fi
 
 # 4. Link Klipper Extras & Macro Bundle
@@ -415,19 +478,20 @@ if [ -f "${PRINTER_CFG}" ]; then
     echo "BACKUP=${PRINTER_CFG_BAK}:${PRINTER_CFG}" >> "${JOURNAL_FILE}"
 
     python3 -c "
-import re
+import sys, re
+printer_cfg = sys.argv[1]
 try:
-    with open('${PRINTER_CFG}', 'r') as f:
+    with open(printer_cfg, 'r') as f:
         content = f.read()
     pattern = r'(?m)^([ \t]*\[include [^]]*(?:safe[-_]staging[^\n]*\.cfg|tool[-_]calibrator[-_]macros\.cfg|sample[-_]tool[^\n]*\.cfg|tool[-_]calibrator/macros\.cfg)\])'
     updated, count = re.subn(pattern, r'# \1 # disabled by TKC installer (consolidated into tool_calibrator.cfg)', content)
     if count > 0:
-        with open('${PRINTER_CFG}', 'w') as f:
+        with open(printer_cfg, 'w') as f:
             f.write(updated)
         print(f'MIGRATED {count}')
 except Exception as ex:
     pass
-" 2>/dev/null | while read -r line; do
+" "${PRINTER_CFG}" 2>/dev/null | while read -r line; do
         if [[ "${line}" =~ ^MIGRATED ]]; then
             echo -e "${GREEN}[✔] Đã tự động vô hiệu hóa các include macro cũ trong printer.cfg (chuyển sang cấu trúc 1 file duy nhất).${NC}"
         fi
@@ -435,9 +499,11 @@ except Exception as ex:
 fi
 
 # Remove any obsolete legacy macro template files if they exist (never delete tool_offsets.cfg here!)
-for stale in "macros.cfg" "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
-    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" "${CONFIG_DIR}/${stale}" 2>/dev/null || true
+for stale in "sample_tool_calibrator.cfg" "tool_calibrator_macros.cfg" "safe_staging_macros.cfg"; do
+    rm -f "${MACRO_DIR}/${stale}" "${TARGET_CONFIG_DIR}/${stale}" 2>/dev/null || true
 done
+# Remove legacy macros.cfg strictly within MACRO_DIR, never in root CONFIG_DIR where user may have their own macros
+rm -f "${MACRO_DIR}/macros.cfg" 2>/dev/null || true
 
 # Clean up loose duplicate tool_calibrator.cfg outside in root config directory if different from target
 if [ "${TARGET_CONFIG_DIR}/tool_calibrator.cfg" != "${TARGET}" ]; then
@@ -452,14 +518,57 @@ for legacy_bk in "${TARGET_CONFIG_DIR}/tool_calibrator_backups" "${CONFIG_DIR}/t
     if [ -d "${legacy_bk}" ]; then
         echo -e "${CYAN}[+] Di chuyển các bản sao lưu cũ vào thư mục tập trung: ${MACRO_DIR}/backups/...${NC}"
         mkdir -p "${MACRO_DIR}/backups"
-        if cp -rn "${legacy_bk}"/* "${MACRO_DIR}/backups/" 2>/dev/null; then
-            rm -rf "${legacy_bk}"
+        python3 -c "
+import sys, os, shutil, hashlib
+
+src_dir = sys.argv[1]
+dest_dir = sys.argv[2]
+if not os.path.isdir(src_dir):
+    sys.exit(0)
+os.makedirs(dest_dir, exist_ok=True)
+
+def file_hash(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+all_success = True
+for root, dirs, files in os.walk(src_dir):
+    rel_path = os.path.relpath(root, src_dir)
+    target_subdir = os.path.join(dest_dir, rel_path) if rel_path != '.' else dest_dir
+    os.makedirs(target_subdir, exist_ok=True)
+    for fname in files:
+        src_file = os.path.join(root, fname)
+        target_file = os.path.join(target_subdir, fname)
+        try:
+            if os.path.exists(target_file):
+                if file_hash(src_file) != file_hash(target_file):
+                    base, ext = os.path.splitext(fname)
+                    unique_name = f'{base}_migrated_{int(os.path.getmtime(src_file))}{ext}'
+                    target_file = os.path.join(target_subdir, unique_name)
+                    shutil.copy2(src_file, target_file)
+            else:
+                shutil.copy2(src_file, target_file)
+            if not os.path.exists(target_file) or file_hash(src_file) != file_hash(target_file):
+                all_success = False
+        except Exception:
+            all_success = False
+
+if all_success:
+    shutil.rmtree(src_dir)
+    print('MIGRATED_OK')
+else:
+    sys.exit(1)
+" "${legacy_bk}" "${MACRO_DIR}/backups" 2>/dev/null && {
             echo -e "${GREEN}[✔] Đã dọn sạch thư mục sao lưu bên ngoài (${legacy_bk}).${NC}"
-        else
+        } || {
             echo -e "${YELLOW}[!] Không thể sao chép hoàn toàn từ ${legacy_bk}, giữ nguyên thư mục nguồn.${NC}"
-        fi
+        }
     fi
 done
+
 
 # Consolidate any loose printer.cfg or system backup files from root config directory into system_configs/
 SYS_BK_DIR="${MACRO_DIR}/backups/system_configs"
@@ -514,10 +623,19 @@ if [ "${SERVICE_MODE}" = "system" ]; then
         -e "s|%VENV_DIR%|${VENV_DIR}|g" \
         "${REPO_DIR}/scripts/tool_calibrator.service" > "${TEMP_SERVICE}"
 
+    if [ -f "${SERVICE_FILE}" ]; then
+        was_active=$(sudo systemctl is-active --quiet tool_calibrator.service 2>/dev/null && echo "1" || echo "0")
+        was_enabled=$(sudo systemctl is-enabled --quiet tool_calibrator.service 2>/dev/null && echo "1" || echo "0")
+        ORIG_SVC="${INSTALL_BACKUP_DIR}/tool_calibrator.service.orig"
+        sudo cp -a "${SERVICE_FILE}" "${ORIG_SVC}" 2>/dev/null || true
+        echo "SERVICE_UPDATED=${SERVICE_FILE}:system:${ORIG_SVC}:${was_enabled}:${was_active}" >> "${JOURNAL_FILE}"
+    else
+        echo "SERVICE_CREATED=${SERVICE_FILE}:system" >> "${JOURNAL_FILE}"
+    fi
+
     sudo mv "${TEMP_SERVICE}" "${SERVICE_FILE}"
     sudo chown root:root "${SERVICE_FILE}"
     sudo chmod 644 "${SERVICE_FILE}"
-    echo "SERVICE_INSTALLED=${SERVICE_FILE}:system" >> "${JOURNAL_FILE}"
 
     echo -e "${GREEN}[+] Reloading systemd daemon và kích hoạt system service...${NC}"
     sudo systemctl daemon-reload
@@ -532,14 +650,26 @@ else
         -e "s|WantedBy=multi-user.target|WantedBy=default.target|g" \
         -e "s|%REPO_DIR%|${REPO_DIR}|g" \
         -e "s|%VENV_DIR%|${VENV_DIR}|g" \
-        "${REPO_DIR}/scripts/tool_calibrator.service" > "${USER_SERVICE_FILE}"
-    echo "SERVICE_INSTALLED=${USER_SERVICE_FILE}:user" >> "${JOURNAL_FILE}"
+        "${REPO_DIR}/scripts/tool_calibrator.service" > "${USER_SERVICE_FILE}.tmp"
+
+    if [ -f "${USER_SERVICE_FILE}" ]; then
+        was_active=$(systemctl --user is-active --quiet tool_calibrator.service 2>/dev/null && echo "1" || echo "0")
+        was_enabled=$(systemctl --user is-enabled --quiet tool_calibrator.service 2>/dev/null && echo "1" || echo "0")
+        ORIG_SVC="${INSTALL_BACKUP_DIR}/user_tool_calibrator.service.orig"
+        cp -a "${USER_SERVICE_FILE}" "${ORIG_SVC}" 2>/dev/null || true
+        echo "SERVICE_UPDATED=${USER_SERVICE_FILE}:user:${ORIG_SVC}:${was_enabled}:${was_active}" >> "${JOURNAL_FILE}"
+    else
+        echo "SERVICE_CREATED=${USER_SERVICE_FILE}:user" >> "${JOURNAL_FILE}"
+    fi
+
+    mv "${USER_SERVICE_FILE}.tmp" "${USER_SERVICE_FILE}"
 
     echo -e "${GREEN}[+] Reloading systemd user daemon và kích hoạt user service...${NC}"
     systemctl --user daemon-reload
     systemctl --user enable tool_calibrator.service
     systemctl --user restart tool_calibrator.service
 fi
+
 
 # Restart Moonraker and Klipper
 RELOAD_SUCCESS=true
@@ -632,23 +762,26 @@ fi
 
 # Write persistent manifest for safe uninstall and upgrade tracking
 python3 -c "
-import json, time
+import sys, json, time
 manifest = {
     'installed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-    'service_mode': '${SERVICE_MODE}',
-    'config_subdir': '${CONFIG_SUBDIR}',
-    'target_config_dir': '${TARGET_CONFIG_DIR}',
-    'macro_dir': '${MACRO_DIR}',
-    'offsets_cfg': '${OFFSETS_CFG}',
-    'version': '${HEALTH_OUTPUT}'
+    'service_mode': sys.argv[1],
+    'config_subdir': sys.argv[2],
+    'target_config_dir': sys.argv[3],
+    'macro_dir': sys.argv[4],
+    'offsets_cfg': sys.argv[5],
+    'version': sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else 'unknown'
 }
-with open('${PERSISTENT_MANIFEST}', 'w') as f:
+with open(sys.argv[7], 'w') as f:
     json.dump(manifest, f, indent=2)
-" 2>/dev/null || true
+" "${SERVICE_MODE}" "${CONFIG_SUBDIR}" "${TARGET_CONFIG_DIR}" "${MACRO_DIR}" "${OFFSETS_CFG}" "${VER}" "${PERSISTENT_MANIFEST}" 2>/dev/null || true
 
-# Clear temporary rollback journal
+# Mark installation successful so cleanup trap won't trigger
+INSTALL_SUCCESS=true
 rm -f "${JOURNAL_FILE}"
-trap - ERR
+rm -rf "${INSTALL_BACKUP_DIR}" 2>/dev/null || true
+trap - EXIT ERR
+
 
 if [ "${RELOAD_SUCCESS}" = false ]; then
     echo -e "\n${YELLOW}====================================================${NC}"

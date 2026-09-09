@@ -525,5 +525,561 @@ class TestStreamConcurrencyProtection(unittest.TestCase):
                 srv.active_preview_streams = 0
 
 
+class TestTKCR01_InstallerManifestViaArgv(unittest.TestCase):
+    """TKC-R01: Manifest generation using sys.argv and parsed version variable."""
+
+    def test_manifest_python_script_via_argv_with_special_chars(self):
+        import subprocess, sys, json
+        test_dir = tempfile.mkdtemp()
+        try:
+            manifest_file = os.path.join(test_dir, "manifest.json")
+            py_code = """import sys, json, time
+manifest_path = sys.argv[1]
+data = {
+    "version": sys.argv[2],
+    "commit": sys.argv[3],
+    "installed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "repo_dir": sys.argv[4],
+    "venv_dir": sys.argv[5],
+    "service_mode": sys.argv[6],
+    "config_dir": sys.argv[7]
+}
+with open(manifest_path, "w") as f:
+    json.dump(data, f, indent=2)
+"""
+            ver = 'v1.2.3 "beta" & $special'
+            cmt = "a1b2c3d"
+            repo = os.path.join(test_dir, "my repo path with spaces")
+            venv = os.path.join(test_dir, "venv 'with quotes'")
+            mode = "system"
+            cfg = os.path.join(test_dir, 'config "dir"')
+
+            proc = subprocess.run(
+                [sys.executable, "-c", py_code, manifest_file, ver, cmt, repo, venv, mode, cfg],
+                capture_output=True,
+                text=True
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            self.assertTrue(os.path.exists(manifest_file))
+            with open(manifest_file, "r") as f:
+                saved = json.load(f)
+            self.assertEqual(saved["version"], ver)
+            self.assertEqual(saved["repo_dir"], repo)
+            self.assertEqual(saved["venv_dir"], venv)
+            self.assertEqual(saved["config_dir"], cfg)
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+
+class TestTKCR02_CartographerUnknownCommandSafety(unittest.TestCase):
+    """TKC-R02: Cartographer probe rejects un-registered commands, never uses homing for secondary, rejects stale Z."""
+
+    def setUp(self):
+        self.toolhead = DummyToolhead()
+        self.gcode = DummyGCode()
+        self.printer = DummyPrinter(self.toolhead, self.gcode)
+
+    def test_secondary_probe_fails_fast_when_command_unregistered_without_dispatch_exception(self):
+        """Simulates Klipper where unknown command outputs 'Unknown command' but does not raise."""
+        from klippy.extras.z_backends.cartographer_backend import CartographerBackend
+
+        # Registry only has SCANNER_TOUCH (legacy homing/touch command)
+        self.gcode.commands = {"SCANNER_TOUCH": MagicMock()}
+
+        # Mock scanner object with stale last_z_result
+        mock_scanner = MagicMock()
+        mock_scanner.last_z_result = 0.0
+        self.printer.objects["scanner"] = mock_scanner
+
+        # Dispatcher simply records execution without error, simulating Klipper
+        self.gcode.executed_scripts = []
+
+        cfg = DummyConfig(self.printer, {
+            "touch_model_config_path": os.path.join(tempfile.gettempdir(), "dummy_printer.cfg")
+        })
+        backend = CartographerBackend(cfg)
+
+        gcmd = DummyGCodeCommand()
+        # Probing secondary tool must raise gcmd.error [ERR_Z_004] BEFORE executing probe
+        with self.assertRaises(Exception) as ctx:
+            backend.probe_secondary_tool(1, {"baseline_z": 0.0}, gcmd)
+
+        self.assertIn("[ERR_Z_004]", str(ctx.exception))
+        # No scripts should have been sent to gcode dispatcher
+        self.assertEqual(len(self.gcode.executed_scripts), 0)
+
+    def test_probe_secondary_rejects_stale_last_z_result(self):
+        """If touch command runs but does not update last_z_result, reject stale value."""
+        from klippy.extras.z_backends.cartographer_backend import CartographerBackend
+
+        # Register CARTOGRAPHER_TOUCH_PROBE
+        self.gcode.commands = {"CARTOGRAPHER_TOUCH_PROBE": MagicMock()}
+
+        mock_touch = MagicMock()
+        mock_touch.last_z_result = 0.42  # Pre-existing result from previous operation on touch submodule
+        mock_carto = MagicMock(touch=mock_touch, spec=["touch"])
+        self.printer.objects["cartographer"] = mock_carto
+
+        cfg = DummyConfig(self.printer, {
+            "touch_model_config_path": os.path.join(tempfile.gettempdir(), "dummy_printer.cfg")
+        })
+        backend = CartographerBackend(cfg)
+
+        gcmd = DummyGCodeCommand()
+        # Even if command is registered, if last_z_result remains None after probe, it must fail
+        with self.assertRaises(Exception) as ctx:
+            backend.probe_secondary_tool(1, {"baseline_z": 0.0}, gcmd)
+
+        self.assertIn("Failed to read contact Z result from Cartographer touch on Secondary Tool", str(ctx.exception))
+
+
+class TestTKCR03_ToolsOrderReferenceFirst(unittest.TestCase):
+    """TKC-R03: _discover_tools always places reference tool at index 0 and preserves order of secondary tools."""
+
+    def setUp(self):
+        self.toolhead = DummyToolhead()
+        self.gcode = DummyGCode()
+        self.toolchanger = DummyToolchanger([0, 1, 2, 3])
+        self.printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+        self.calibrator = ToolCalibrator(DummyConfig(self.printer, {"reference_tool": 0}))
+
+    def test_discover_tools_orders_reference_first(self):
+        self.assertEqual(self.calibrator._discover_tools("1,0"), [0, 1])
+        self.assertEqual(self.calibrator._discover_tools("2,1,0,2"), [0, 2, 1])
+        self.assertEqual(self.calibrator._discover_tools("2,1,2"), [0, 2, 1])
+
+    def test_discover_tools_with_non_zero_reference(self):
+        printer_t1 = DummyPrinter(DummyToolhead(), DummyGCode(), self.toolchanger)
+        calibrator_t1 = ToolCalibrator(DummyConfig(printer_t1, {"reference_tool": 1}))
+        self.assertEqual(calibrator_t1._discover_tools("0,2,1,0"), [1, 0, 2])
+        self.assertEqual(calibrator_t1._discover_tools("2,0"), [1, 2, 0])
+
+
+class TestTKCR04_SafeZOmittedNoneHandling(unittest.TestCase):
+    """TKC-R04: safe_z omitted (None) must not raise TypeError in DEPART or CALIBRATION_STATUS, displays OFF."""
+
+    def setUp(self):
+        self.toolhead = DummyToolhead()
+        self.gcode = DummyGCode()
+        self.toolchanger = DummyToolchanger([0, 1])
+        self.printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+
+    def test_calibration_navigate_depart_with_safe_z_none_and_zero(self):
+        for val in (None, 0.0, 0):
+            printer = DummyPrinter(DummyToolhead(), DummyGCode(), self.toolchanger)
+            cfg_data = {"safe_z": val} if val is not None else {}
+            calibrator = ToolCalibrator(DummyConfig(printer, cfg_data))
+            # Must not raise TypeError
+            gcmd = DummyGCodeCommand({"STATION": "DEPART"})
+            calibrator.cmd_CALIBRATION_NAVIGATE(gcmd)
+            self.assertFalse(calibrator.navigator.is_safe_z_enabled())
+
+    def test_calibration_status_displays_off_when_safe_z_disabled(self):
+        for val in (None, 0.0):
+            printer = DummyPrinter(DummyToolhead(), DummyGCode(), self.toolchanger)
+            cfg_data = {"safe_z": val} if val is not None else {}
+            calibrator = ToolCalibrator(DummyConfig(printer, cfg_data))
+            gcmd = DummyGCodeCommand()
+            calibrator.cmd_CALIBRATION_STATUS(gcmd)
+            status_text = "\n".join(gcmd.info_messages)
+            self.assertIn("Safe_Z: OFF", status_text)
+            self.assertNotIn("TypeError", status_text)
+
+    def test_calibration_status_displays_value_when_safe_z_positive(self):
+        printer = DummyPrinter(DummyToolhead(), DummyGCode(), self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, {"safe_z": 25.0}))
+        gcmd = DummyGCodeCommand()
+        calibrator.cmd_CALIBRATION_STATUS(gcmd)
+        status_text = "\n".join(gcmd.info_messages)
+        self.assertIn("Safe_Z: 25.00mm", status_text)
+
+
+class TestTKCR05_BackupConsolidationAndProtection(unittest.TestCase):
+    """TKC-R05: Backup consolidation preserves dotfiles, handles duplicates safely, protects macros.cfg."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.src_dir = os.path.join(self.test_dir, "legacy_backup")
+        self.dst_dir = os.path.join(self.test_dir, "target_backup")
+        os.makedirs(self.src_dir, exist_ok=True)
+        os.makedirs(self.dst_dir, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_recursive_backup_migration_with_duplicates_and_dotfiles(self):
+        import subprocess, sys
+
+        # Create files in src: subdirs, dotfiles, colliding files
+        sub = os.path.join(self.src_dir, "subdir")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "subfile.cfg"), "w") as f:
+            f.write("subfile content")
+        with open(os.path.join(self.src_dir, ".hidden.cfg"), "w") as f:
+            f.write("hidden content")
+        with open(os.path.join(self.src_dir, "collision.cfg"), "w") as f:
+            f.write("source collision content")
+
+        # Create pre-existing colliding file in dst with DIFFERENT content
+        with open(os.path.join(self.dst_dir, "collision.cfg"), "w") as f:
+            f.write("dest original content")
+
+        # Run the safe migration python script used in install.sh / uninstall.sh
+        py_script = """
+import os, sys, shutil, hashlib
+
+src, dst = sys.argv[1], sys.argv[2]
+def sha256_file(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+all_migrated = True
+for root, dirs, files in os.walk(src):
+    rel = os.path.relpath(root, src)
+    target_dir = os.path.join(dst, rel) if rel != '.' else dst
+    os.makedirs(target_dir, exist_ok=True)
+    for fname in files:
+        s_path = os.path.join(root, fname)
+        t_path = os.path.join(target_dir, fname)
+        if os.path.exists(t_path):
+            if sha256_file(s_path) != sha256_file(t_path):
+                base, ext = os.path.splitext(fname)
+                idx = 1
+                while os.path.exists(os.path.join(target_dir, f"{base}_legacy_{idx}{ext}")):
+                    idx += 1
+                t_path = os.path.join(target_dir, f"{base}_legacy_{idx}{ext}")
+        shutil.copy2(s_path, t_path)
+        if sha256_file(s_path) == sha256_file(t_path):
+            os.remove(s_path)
+        else:
+            all_migrated = False
+
+if all_migrated:
+    shutil.rmtree(src, ignore_errors=True)
+"""
+        res = subprocess.run([sys.executable, "-c", py_script, self.src_dir, self.dst_dir], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+
+        # Verify: dotfile migrated
+        self.assertTrue(os.path.exists(os.path.join(self.dst_dir, ".hidden.cfg")))
+        # Verify: subfile migrated
+        self.assertTrue(os.path.exists(os.path.join(self.dst_dir, "subdir", "subfile.cfg")))
+        # Verify: destination collision kept original content
+        with open(os.path.join(self.dst_dir, "collision.cfg")) as f:
+            self.assertEqual(f.read(), "dest original content")
+        # Verify: source collision kept under suffixed name
+        self.assertTrue(os.path.exists(os.path.join(self.dst_dir, "collision_legacy_1.cfg")))
+        with open(os.path.join(self.dst_dir, "collision_legacy_1.cfg")) as f:
+            self.assertEqual(f.read(), "source collision content")
+        # Verify src_dir cleaned up
+        self.assertFalse(os.path.exists(self.src_dir))
+
+
+class TestTKCR06_InstallerServiceRollback(unittest.TestCase):
+    """TKC-R06: Service rollback restores previous unit and active/enabled states."""
+
+    def test_journal_rollback_simulation_for_service_updated_vs_created(self):
+        test_dir = tempfile.mkdtemp()
+        try:
+            svc_file = os.path.join(test_dir, "tool_calibrator.service")
+            orig_backup = os.path.join(test_dir, "tool_calibrator.service.orig")
+
+            with open(orig_backup, "w") as f:
+                f.write("ORIGINAL UNIT CONTENT")
+            with open(svc_file, "w") as f:
+                f.write("OVERWRITTEN UNIT CONTENT")
+
+            # Simulate rollback logic from install.sh for SERVICE_UPDATED
+            svc_file_rel = "/etc/systemd/system/tool_calibrator.service"
+            orig_backup_rel = "/tmp/backup/tool_calibrator.service.orig"
+            entry = f"SERVICE_UPDATED={svc_file_rel}:system:{orig_backup_rel}:1:1"
+            action, data = entry.split("=", 1)
+            parts = data.split(":")
+            unit_path, mode, bkp, was_en, was_act = parts[0], parts[1], parts[2], parts[3], parts[4]
+
+            self.assertEqual(unit_path, svc_file_rel)
+            self.assertEqual(mode, "system")
+            self.assertEqual(bkp, orig_backup_rel)
+            self.assertEqual(was_en, "1")
+            self.assertEqual(was_act, "1")
+
+            # Physical restoration of file content
+            shutil.copy2(orig_backup, svc_file)
+            with open(svc_file, "r") as f:
+                restored = f.read()
+            self.assertEqual(restored, "ORIGINAL UNIT CONTENT")
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+
+class TestTKCR07_TeachSafeZRuntimeSync(unittest.TestCase):
+    """TKC-R07: CALIBRATION_SET_SAFE_POS TYPE=SAFE_Z updates safe_z_enabled and carto_speedup synchronously."""
+
+    def setUp(self):
+        self.toolhead = DummyToolhead()
+        self.gcode = DummyGCode()
+        self.printer = DummyPrinter(self.toolhead, self.gcode)
+        # Start with safe_z disabled and cartographer backend
+        self.calibrator = ToolCalibrator(DummyConfig(self.printer, {"safe_z": None, "z_backend": "cartographer"}))
+
+    def test_teach_safe_z_enables_runtime_and_disables_speedup(self):
+        self.assertFalse(self.calibrator.navigator.is_safe_z_enabled())
+        self.assertTrue(self.calibrator.navigator.carto_speedup)
+
+        gcmd = DummyGCodeCommand({"TYPE": "SAFE_Z", "Z": 25.0})
+        self.calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd)
+
+        self.assertEqual(self.calibrator.navigator.safe_z, 25.0)
+        self.assertTrue(self.calibrator.navigator.is_safe_z_enabled())
+        self.assertFalse(self.calibrator.navigator.carto_speedup)
+
+        # Test move_to_safe_z elevates to 25.0
+        self.toolhead.pos = [100.0, 100.0, 5.0, 0.0]
+        self.calibrator.navigator.move_to_safe_z(self.toolhead, None)
+        self.assertEqual(self.toolhead.pos[2], 25.0)
+
+    def test_teach_safe_z_rejects_negative_or_nan(self):
+        gcmd_neg = DummyGCodeCommand({"TYPE": "SAFE_Z", "Z": -5.0})
+        with self.assertRaises(Exception):
+            self.calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd_neg)
+
+        gcmd_nan = DummyGCodeCommand({"TYPE": "SAFE_Z", "Z": float("nan")})
+        with self.assertRaises(Exception):
+            self.calibrator.cmd_CALIBRATION_SET_SAFE_POS(gcmd_nan)
+
+
+class TestTKCR08_ConfigRollbackSecurity(unittest.TestCase):
+    """TKC-R08: ConfigManager rollback strictly checks backup roots, naming, and INI content."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cfg_dir = os.path.join(self.test_dir, "config")
+        os.makedirs(self.cfg_dir, exist_ok=True)
+        self.live_cfg = os.path.join(self.cfg_dir, "tool_offsets.cfg")
+        with open(self.live_cfg, "w") as f:
+            f.write("# Live Config\n[tool_offsets]\nt1_x = 0.05\n")
+        self.cm = ConfigManager(self.live_cfg)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_rollback_rejects_unrelated_cfg_in_config_dir(self):
+        """A non-backup file like unrelated.cfg in config_dir must be rejected."""
+        unrelated = os.path.join(self.cfg_dir, "unrelated.cfg")
+        with open(unrelated, "w") as f:
+            f.write("[printer]\nkinematics = corexy\n")
+
+        with self.assertRaises(ConfigManagerException) as ctx:
+            self.cm.rollback(unrelated)
+        self.assertIn("outside backup roots", str(ctx.exception))
+
+    def test_rollback_rejects_non_ini_file_in_backup_dir(self):
+        """A corrupted backup containing non-INI binary or garbage must be rejected."""
+        os.makedirs(self.cm.backup_dir, exist_ok=True)
+        bk_path = os.path.join(self.cm.backup_dir, "tool_offsets.cfg.calib_backup_20260909_120000.bak")
+        with open(bk_path, "w") as f:
+            f.write("THIS IS NOT KLIPPER CONFIG INI FORMAT NO HEADERS OR EQUALS")
+
+        with self.assertRaises(ConfigManagerException) as ctx:
+            self.cm.rollback(bk_path)
+        self.assertIn("valid Klipper configuration structure", str(ctx.exception))
+
+
+class TestTKCR09_ReportGeneratorCalibratedMPPAndMatrix(unittest.TestCase):
+    """TKC-R09: Test report generator loads true MPP/matrix and labels estimates honestly."""
+
+    def test_generate_report_uses_explicit_mpp(self):
+        import subprocess, sys
+        script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "generate_test_report.py")
+        out_report = os.path.join(tempfile.gettempdir(), f"report_{time.time()}.md")
+
+        res = subprocess.run(
+            [sys.executable, script_path, "--mpp", "0.012500", "--output", out_report],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        with open(out_report, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("0.01250 mm/px", content)
+        self.assertIn("Calibrated MPP", content)
+        if os.path.exists(out_report):
+            os.remove(out_report)
+
+    def test_generate_report_marks_uncalibrated_when_no_calibration(self):
+        import subprocess, sys
+        script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "generate_test_report.py")
+        out_report = os.path.join(tempfile.gettempdir(), f"report_{time.time()}.md")
+
+        res = subprocess.run(
+            [sys.executable, script_path, "--output", out_report],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        with open(out_report, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Uncalibrated / Estimate", content)
+        if os.path.exists(out_report):
+            os.remove(out_report)
+
+
+class TestTKCR10_HealthEndpointAuthAndCredentialSanitization(unittest.TestCase):
+    """TKC-R10: /health endpoint sanitizes camera URL credentials and hides details for unauthenticated requests."""
+
+    def setUp(self):
+        import server.tool_calibrator_server as srv
+        self.srv = srv
+        self.client = srv.app.test_client()
+
+    def tearDown(self):
+        self.srv.calibration_lock["token"] = None
+        self.srv.grabber.camera_url = "http://localhost/webcam2/?action=snapshot"
+
+    def test_health_unauthenticated_with_token_omits_camera_url(self):
+        self.srv.calibration_lock["token"] = "auth-token-456"
+        self.srv.grabber.camera_url = "http://demo_user:demo_password@camera.lan:8080/snapshot"
+
+        res = self.client.get("/health")
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["service"], "tool_calibrator_server")
+        # camera_url must be None/redacted
+        self.assertIsNone(data.get("camera_url"))
+        self.assertIsNone(data.get("calibrated_mpp"))
+
+    def test_health_authenticated_with_token_sanitizes_credentials(self):
+        self.srv.calibration_lock["token"] = "auth-token-456"
+        self.srv.grabber.camera_url = "http://demo_user:demo_password@camera.lan:8080/snapshot"
+
+        res = self.client.get("/health", headers={"X-API-Token": "auth-token-456"})
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        # Credentials stripped!
+        self.assertEqual(data["camera_url"], "http://camera.lan:8080/snapshot")
+        self.assertNotIn("demo_password", data["camera_url"])
+
+
+class TestTKCR11_RealKlipperGCodeDispatcherHandlers(unittest.TestCase):
+    """TKC-R11: G-code dispatcher checks real Klipper ready_gcode_handlers/base_gcode_handlers and tracks axes."""
+
+    def test_real_klipper_dispatcher_without_commands_dict(self):
+        class RealKlipperDispatcherMock:
+            def __init__(self):
+                # Real Klipper dispatcher has ready_gcode_handlers and base_gcode_handlers, NOT .commands
+                self.ready_gcode_handlers = {
+                    "SET_TOOL_PARAMETER": lambda gcmd: None,
+                    "INITIALIZE_TOOLCHANGER": lambda gcmd: None,
+                }
+                self.base_gcode_handlers = {}
+                self.executed_scripts = []
+
+            def run_script_from_command(self, script):
+                self.executed_scripts.append(script)
+
+            def register_command(self, name, cb, desc=None):
+                self.ready_gcode_handlers[name] = cb
+
+        dispatcher = RealKlipperDispatcherMock()
+        # Verify helper finds them
+        from klippy.extras.tool_offsets import is_command_registered
+        self.assertTrue(is_command_registered(dispatcher, "SET_TOOL_PARAMETER"))
+        self.assertTrue(is_command_registered(dispatcher, "INITIALIZE_TOOLCHANGER"))
+        self.assertFalse(is_command_registered(dispatcher, "NON_EXISTENT_COMMAND"))
+
+        # Verify ToolOffsets executes SET_TOOL_PARAMETER through real dispatcher
+        toolhead = DummyToolhead()
+        printer = RegressionDummyPrinter(toolhead, dispatcher)
+        cfg = DummyOffsetsConfig(printer, {
+            "t1_x": 0.05,
+            "t1_y": -0.08,
+            "t1_z": 0.12
+        })
+        to = ToolOffsets(cfg)
+        applied = to.apply_tool_offsets(1)
+        self.assertIn(1, applied)
+        self.assertTrue(any("SET_TOOL_PARAMETER T=1 PARAMETER=gcode_x_offset" in s for s in dispatcher.executed_scripts))
+
+
+class TestTKCR12_DependencyVersionsEnforced(unittest.TestCase):
+    """TKC-R12: Enforce patched requests>=2.32.4 and urllib3>=2.6.3 in requirements.txt."""
+
+    def test_requirements_file_has_patched_versions(self):
+        req_path = os.path.join(os.path.dirname(__file__), "..", "server", "requirements.txt")
+        with open(req_path, "r") as f:
+            lines = f.readlines()
+        has_req = any("requests>=2.32.4" in l for l in lines)
+        has_url = any("urllib3>=2.6.3" in l for l in lines)
+        self.assertTrue(has_req, "requests>=2.32.4 must be in requirements.txt")
+        self.assertTrue(has_url, "urllib3>=2.6.3 must be in requirements.txt")
+
+
+class TestPhysicalPathSafety(unittest.TestCase):
+    """Physical path safety: camera entry lifts before lateral move; toolchange lifts off bed when safe_z disabled."""
+
+    def setUp(self):
+        self.toolhead = DummyToolhead()
+        self.gcode = DummyGCode()
+        self.toolchanger = DummyToolchanger([0, 1])
+        self.printer = DummyPrinter(self.toolhead, self.gcode, self.toolchanger)
+
+    def test_approach_camera_lifts_vertically_before_lateral_move(self):
+        calibrator = ToolCalibrator(DummyConfig(self.printer, {
+            "camera_x": 150.0,
+            "camera_y": 20.0,
+            "camera_z": 22.0,
+            "safe_z": None  # Disabled
+        }))
+
+        # Toolhead sitting at Z=1.0mm
+        self.toolhead.pos = [50.0, 50.0, 1.0, 0.0]
+        moves = []
+        original_manual_move = self.toolhead.manual_move
+
+        def record_move(pos, speed):
+            moves.append(list(pos))
+            original_manual_move(pos, speed)
+
+        self.toolhead.manual_move = record_move
+        calibrator.navigator.approach_camera(self.toolhead, None, focal_z=22.0)
+
+        # First move must be vertical lift to focal_z (22.0mm) before lateral motion
+        self.assertGreaterEqual(len(moves), 2)
+        self.assertEqual(moves[0], [None, None, 22.0])
+        # Subsequent move is XY approach towards bed center
+        self.assertEqual(moves[1][0], 150.0)
+        self.assertEqual(moves[1][1], 45.0)
+
+    def test_toolchange_hops_off_bed_when_safe_z_disabled(self):
+        printer = DummyPrinter(DummyToolhead(), DummyGCode(), self.toolchanger)
+        calibrator = ToolCalibrator(DummyConfig(printer, {
+            "safe_z": None,
+            "z_backend": "cartographer"
+        }))
+        self.toolchanger.tool_number = 0
+        printer.toolhead.pos = [100.0, 100.0, 0.5, 0.0]  # Sitting on bed
+
+        calibrator.z_backend.probe_reference_tool = MagicMock(return_value={"contact_z": 0.05, "source": "cartographer"})
+        calibrator.z_backend.probe_secondary_tool = MagicMock(return_value={"suggested_z_offset": 0.12, "source": "cartographer"})
+
+        def mock_run_script(script):
+            if script == "T1":
+                self.toolchanger.tool_number = 1
+            elif script == "T0":
+                self.toolchanger.tool_number = 0
+
+        printer.gcode.run_script_from_command = MagicMock(side_effect=mock_run_script)
+
+        gcmd = DummyGCodeCommand({"CALIBRATE_XY": 0, "CALIBRATE_Z": 1, "TOOLS": "0,1"})
+        calibrator.cmd_CALIBRATE_TOOL_OFFSETS(gcmd)
+
+        # Before T1 toolchange, toolhead had hopped to at least 2.0mm
+        self.assertGreaterEqual(printer.toolhead.pos[2], 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

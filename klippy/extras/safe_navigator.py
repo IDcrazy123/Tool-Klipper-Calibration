@@ -7,6 +7,7 @@ to prevent toolhead collision with camera shrouds, docks, and bed clamps.
 
 from typing import Tuple, Optional, Dict
 import logging
+import math
 
 logger = logging.getLogger("tool_calibrator.safe_navigator")
 
@@ -217,6 +218,38 @@ class SafeNavigator:
         homed_axes = status.get("homed_axes", "")
         return "x" in homed_axes and "y" in homed_axes and "z" in homed_axes
 
+    def set_safe_z(self, val: Optional[float]) -> None:
+        """
+        Synchronously updates safe_z and safe_z_enabled runtime state.
+        Validates that val is a non-negative finite float if not None.
+        Recomputes carto_speedup accordingly.
+        """
+        if val is not None:
+            try:
+                f_val = float(val)
+            except (ValueError, TypeError):
+                raise ValueError(f"safe_z must be a valid float, got: {val}")
+            if not math.isfinite(f_val):
+                raise ValueError(f"safe_z must be a finite number, got: {val}")
+            if f_val < 0.0:
+                raise ValueError(f"safe_z cannot be negative, got: {f_val}")
+            if f_val > 0.0:
+                self.safe_z = round(f_val, 3)
+                self.safe_z_enabled = True
+            else:
+                self.safe_z = None
+                self.safe_z_enabled = False
+        else:
+            self.safe_z = None
+            self.safe_z_enabled = False
+
+        # Recompute carto_speedup synchronously
+        self.carto_speedup = (
+            self.z_backend_type == "cartographer"
+            and not self.safe_z_enabled
+            and not self.force_safe_z
+        )
+
     def is_safe_z_enabled(self) -> bool:
         """Returns True only when safe_z is actively enabled with a positive value."""
         return bool(getattr(self, "safe_z_enabled", False) and self.safe_z is not None and self.safe_z > 0.0)
@@ -225,19 +258,18 @@ class SafeNavigator:
         """
         Elevates Z vertically to safe_z if currently lower and safe_z is enabled.
         Clamps safe_z against the user's physical frame max_z to avoid Move out of range.
-        Always waits for moves to finish before returning.
         If safe_z is disabled (None or <= 0.0), no motion is performed.
         """
         if not self.is_safe_z_enabled():
             return
+        if not self.is_homed():
+            raise SafeNavigatorException("Axes must be homed before executing safe Z elevation.")
 
-        toolhead.wait_moves()
         cur_pos = toolhead.get_position()
-
-        target_clearance = self.safe_z
-
         limits = self.get_axis_limits()
         max_z = limits["z"][1]
+        target_clearance = self.safe_z
+
         effective_safe_z = min(target_clearance, max(limits["z"][0], max_z - 3.0))
 
         if cur_pos[2] < effective_safe_z:
@@ -246,21 +278,28 @@ class SafeNavigator:
             toolhead.manual_move([None, None, effective_safe_z], self.z_speed)
             toolhead.wait_moves()
 
-    def approach_camera(self, toolhead, gcode_move, target_z: Optional[float] = None) -> None:
+    def approach_camera(self, toolhead, gcode_move, focal_z: Optional[float] = None, target_z: Optional[float] = None) -> None:
         """
-        Executes 3-tier safe transition into the Camera Station:
-        1. Raise Z to Safe_Z if enabled.
-        2. Rapid XY travel to Camera Safe Approach point.
-        3. Descend Z to focal height (or compensated focal altitude for secondary tools).
-        4. Slow creep XY into Camera optical center.
+        Executes 4-tier safe transition into the Optical Inspection Station.
+        Validates target boundary coordinates and performs coordinated motion.
         """
         if not self.is_homed():
             raise SafeNavigatorException("Printer axes must be homed before entering camera station.")
 
         if self.cam_target_x is None or self.cam_target_y is None:
-            raise SafeNavigatorException("Camera target coordinates (camera_x, camera_y) not configured.")
+            raise SafeNavigatorException("Camera coordinates (camera_x, camera_y) not configured.")
 
-        effective_focal_z = target_z if target_z is not None else self.cam_target_z
+        # Determine focal inspection altitude
+        if focal_z is not None:
+            effective_focal_z = focal_z
+        elif target_z is not None:
+            effective_focal_z = target_z
+        elif self.cam_target_z is not None:
+            effective_focal_z = self.cam_target_z
+        elif self.is_safe_z_enabled():
+            effective_focal_z = self.safe_z
+        else:
+            effective_focal_z = 20.0
 
         # Automatic approach vector towards bed center if not explicitly taught
         if self.cam_approach_x is not None and self.cam_approach_y is not None:
@@ -272,17 +311,25 @@ class SafeNavigator:
         self.validate_coordinate_safety(x=app_x, y=app_y)
         self.validate_coordinate_safety(x=self.cam_target_x, y=self.cam_target_y, z=effective_focal_z)
 
-        # Step 1: Vertical lift to safe clearance if enabled
+        cur_pos = toolhead.get_position()
+
+        # Step 1: Vertical lift to safe clearance if enabled, or at least focal Z if currently lower
         if self.is_safe_z_enabled():
             self.move_to_safe_z(toolhead, gcode_move)
+        elif cur_pos[2] < effective_focal_z:
+            self.validate_coordinate_safety(z=effective_focal_z)
+            toolhead.manual_move([None, None, effective_focal_z], self.z_speed)
+            toolhead.wait_moves()
 
         # Step 2: Lateral XY travel to approach waypoint outside shroud
         toolhead.manual_move([app_x, app_y, None], self.travel_speed)
         toolhead.wait_moves()
 
-        # Step 3: Descend Z to focal altitude
-        toolhead.manual_move([None, None, effective_focal_z], self.z_speed)
-        toolhead.wait_moves()
+        # Step 3: Descend/align Z to focal altitude
+        cur_pos = toolhead.get_position()
+        if abs(cur_pos[2] - effective_focal_z) > 0.001:
+            toolhead.manual_move([None, None, effective_focal_z], self.z_speed)
+            toolhead.wait_moves()
 
         # Step 4: Controlled low-speed lateral entry into optical center
         toolhead.manual_move([self.cam_target_x, self.cam_target_y, None], self.approach_speed)
